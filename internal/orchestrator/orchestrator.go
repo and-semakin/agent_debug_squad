@@ -23,8 +23,9 @@ var (
 )
 
 type Orchestrator struct {
-	cfg   domain.SessionConfig
-	store *store.Store
+	cfg     domain.SessionConfig
+	store   *store.Store
+	execCtx context.Context
 
 	mu       sync.Mutex
 	runtimes map[string]*agentRuntime
@@ -50,6 +51,7 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 	o := &Orchestrator{
 		cfg:      cfg,
 		store:    s,
+		execCtx:  context.Background(),
 		runtimes: map[string]*agentRuntime{},
 		waiters:  map[string]chan struct{}{},
 		nextRun:  1,
@@ -162,7 +164,7 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 		return domain.RunRecord{}, err
 	}
 
-	go o.runWorker(ctx, agentName, run, waiter)
+	go o.runWorker(o.execCtx, agentName, run, waiter)
 	return run, nil
 }
 

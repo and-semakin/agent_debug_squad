@@ -86,6 +86,30 @@ func TestSubmitRunRejectsConcurrentRunForSameAgent(t *testing.T) {
 	}
 }
 
+func TestSubmitRunContinuesAfterCallerContextCancelled(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	submitCtx, cancel := context.WithCancel(ctx)
+	run, err := o.SubmitRun(submitCtx, "Reviewer", "continue after submit", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	cancel()
+
+	completed, err := o.Wait(ctx, run.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if completed.Status != domain.RunCompleted {
+		t.Fatalf("Status = %q, want %q; error = %v", completed.Status, domain.RunCompleted, completed.Error)
+	}
+}
+
 func TestSubmitRunAllowsDifferentAgentsConcurrently(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer", "Implementer")
