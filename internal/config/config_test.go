@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +76,30 @@ agents:
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("expected duplicate agent error")
+	}
+}
+
+func TestLoadConfigRejectsUnsupportedOptionValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+agents:
+  - name: Reviewer
+    backend: codex
+    startup_prompt: Review carefully.
+    options:
+      model: 123
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected unsupported option value error")
+	}
+	if !strings.Contains(err.Error(), `agent "Reviewer" option "model"`) {
+		t.Fatalf("error = %q", err)
 	}
 }

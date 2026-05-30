@@ -103,6 +103,8 @@ func Load(path string) (domain.SessionConfig, error) {
 					items = append(items, s)
 				}
 				spec.ListOptions[key] = items
+			default:
+				return domain.SessionConfig{}, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string or list of strings", name, key, value)
 			}
 		}
 		agents = append(agents, spec)
