@@ -43,12 +43,12 @@ type AgentState struct {
 	Name             string      `json:"name"`
 	Backend          string      `json:"backend"`
 	StartupPrompt    string      `json:"startup_prompt"`
-	WorkspaceDir      string      `json:"workspace_dir"`
-	BackendSessionID  string      `json:"backend_session_id"`
+	WorkspaceDir     string      `json:"workspace_dir"`
+	BackendSessionID string      `json:"backend_session_id"`
 	Status           AgentStatus `json:"status"`
 	CreatedAt        time.Time   `json:"created_at"`
-	LastRunID         string      `json:"last_run_id"`
-	LastError         *string     `json:"last_error"`
+	LastRunID        string      `json:"last_run_id"`
+	LastError        *string     `json:"last_error"`
 }
 
 type RunRecord struct {
@@ -75,7 +75,7 @@ type RunResult struct {
 	FinalMessage string
 	Stderr       string
 	RawEvents    []string
-	ErrorMessage  string
+	ErrorMessage string
 }
 
 type TranscriptEvent struct {
