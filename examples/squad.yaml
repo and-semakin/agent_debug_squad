@@ -1,0 +1,12 @@
+session_name: local-fake-squad
+workspace_dir: .
+state_dir_name: .agent-debug-squad
+host: 127.0.0.1
+port: 8080
+agents:
+  - name: Reviewer
+    backend: fake
+    startup_prompt: Review the submitted debugging notes and point out concrete risks.
+  - name: Skeptic
+    backend: fake
+    startup_prompt: Challenge assumptions and look for missing evidence.
