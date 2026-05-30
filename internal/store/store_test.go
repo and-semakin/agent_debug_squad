@@ -141,3 +141,51 @@ func TestMarkInterruptedUpdatesActiveRuns(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreRejectsUnsafeAgentName(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{
+		SessionID:    "session_test",
+		WorkspaceDir: root,
+		StateDirName: ".agent-debug-squad",
+	}
+	s := New(cfg)
+
+	err := s.SaveAgentState(domain.AgentState{
+		Name:      "../escape",
+		Backend:   "fake",
+		Status:    domain.AgentIdle,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SaveAgentState() error = nil, want unsafe path error")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(s.SessionDir(), "escape", "state.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("unsafe agent state was written, stat error = %v", statErr)
+	}
+}
+
+func TestStoreRejectsUnsafeRunID(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{
+		SessionID:    "session_test",
+		WorkspaceDir: root,
+		StateDirName: ".agent-debug-squad",
+	}
+	s := New(cfg)
+
+	err := s.SaveRun(domain.RunRecord{
+		RunID:     "../escape",
+		Agent:     "Reviewer",
+		Status:    domain.RunQueued,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("SaveRun() error = nil, want unsafe path error")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(s.SessionDir(), "escape", "run.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("unsafe run was written, stat error = %v", statErr)
+	}
+}
