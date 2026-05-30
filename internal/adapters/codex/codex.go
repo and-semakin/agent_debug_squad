@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -26,6 +27,8 @@ type StreamResult struct {
 }
 
 const maxJSONLEventSize = 8 * 1024 * 1024
+
+const incompleteTurnError = "codex turn did not complete"
 
 func New(spec domain.AgentSpec) *Adapter {
 	return &Adapter{spec: spec}
@@ -129,11 +132,17 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 }
 
 func buildRunResult(stdout []byte, stderr []byte, execErr error) (domain.RunResult, error) {
-	if execErr != nil {
+	if len(bytes.TrimSpace(stdout)) == 0 {
+		if execErr != nil {
+			return domain.RunResult{
+				Stderr:       string(stderr),
+				ErrorMessage: execErr.Error(),
+			}, execErr
+		}
 		return domain.RunResult{
 			Stderr:       string(stderr),
-			ErrorMessage: execErr.Error(),
-		}, execErr
+			ErrorMessage: incompleteTurnError,
+		}, errors.New(incompleteTurnError)
 	}
 
 	parsed, parseErr := ParseJSONL(stdout)
@@ -150,6 +159,20 @@ func buildRunResult(stdout []byte, stderr []byte, execErr error) (domain.RunResu
 			RawEvents:    parsed.RawEvents,
 			ErrorMessage: parsed.ErrorMessage,
 		}, nil
+	}
+	if execErr != nil {
+		return domain.RunResult{
+			Stderr:       string(stderr),
+			RawEvents:    parsed.RawEvents,
+			ErrorMessage: execErr.Error(),
+		}, execErr
+	}
+	if !parsed.Completed {
+		return domain.RunResult{
+			Stderr:       string(stderr),
+			RawEvents:    parsed.RawEvents,
+			ErrorMessage: incompleteTurnError,
+		}, errors.New(incompleteTurnError)
 	}
 
 	return domain.RunResult{

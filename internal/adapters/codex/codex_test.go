@@ -135,3 +135,35 @@ func TestBuildRunResultTurnFailedPreservesStderrAndParsedError(t *testing.T) {
 		t.Fatalf("buildRunResult().ErrorMessage = %q, want %q", got.ErrorMessage, "boom")
 	}
 }
+
+func TestBuildRunResultErrorsWhenTurnDoesNotComplete(t *testing.T) {
+	stdout := []byte(`{"type":"item.completed","item":{"type":"message","role":"assistant","text":"almost"}}`)
+
+	got, err := buildRunResult(stdout, nil, nil)
+	if err == nil {
+		t.Fatal("buildRunResult() error = nil, want incomplete turn error")
+	}
+	if got.ErrorMessage != "codex turn did not complete" {
+		t.Fatalf("buildRunResult().ErrorMessage = %q, want %q", got.ErrorMessage, "codex turn did not complete")
+	}
+}
+
+func TestBuildRunResultNonZeroExitUsesParsedTurnFailedError(t *testing.T) {
+	execErr := errors.New("exit status 1")
+	stdout := []byte(`{"type":"turn.failed","error":{"message":"parsed boom"}}`)
+	stderr := []byte("diagnostic stderr\n")
+
+	got, err := buildRunResult(stdout, stderr, execErr)
+	if err != nil {
+		t.Fatalf("buildRunResult() error = %v", err)
+	}
+	if got.ErrorMessage != "parsed boom" {
+		t.Fatalf("buildRunResult().ErrorMessage = %q, want %q", got.ErrorMessage, "parsed boom")
+	}
+	if got.Stderr != string(stderr) {
+		t.Fatalf("buildRunResult().Stderr = %q, want %q", got.Stderr, string(stderr))
+	}
+	if len(got.RawEvents) != 1 {
+		t.Fatalf("buildRunResult().RawEvents len = %d, want 1", len(got.RawEvents))
+	}
+}
