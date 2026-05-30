@@ -25,6 +25,8 @@ type StreamResult struct {
 	RawEvents    []string
 }
 
+const maxJSONLEventSize = 8 * 1024 * 1024
+
 func New(spec domain.AgentSpec) *Adapter {
 	return &Adapter{spec: spec}
 }
@@ -50,6 +52,7 @@ func BuildEnv(spec domain.AgentSpec, environ []string) []string {
 func ParseJSONL(data []byte) (StreamResult, error) {
 	var result StreamResult
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLEventSize)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
@@ -115,38 +118,45 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
 	cmd.Env = BuildEnv(a.spec, os.Environ())
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
-	out, err := cmd.CombinedOutput()
-	parsed, parseErr := ParseJSONL(out)
+	stdout, err := cmd.Output()
 	state.Status = domain.AgentIdle
 	state.LastRunID = run.RunID
+	result, resultErr := buildRunResult(stdout, stderr.Bytes(), err)
+	return result, state, resultErr
+}
+
+func buildRunResult(stdout []byte, stderr []byte, execErr error) (domain.RunResult, error) {
+	if execErr != nil {
+		return domain.RunResult{
+			Stderr:       string(stderr),
+			ErrorMessage: execErr.Error(),
+		}, execErr
+	}
+
+	parsed, parseErr := ParseJSONL(stdout)
 	if parseErr != nil {
 		return domain.RunResult{
-			Stderr:       string(out),
+			Stderr:       string(stderr),
 			RawEvents:    parsed.RawEvents,
 			ErrorMessage: parseErr.Error(),
-		}, state, parseErr
+		}, parseErr
 	}
 	if parsed.Failed {
 		return domain.RunResult{
-			Stderr:       string(out),
+			Stderr:       string(stderr),
 			RawEvents:    parsed.RawEvents,
 			ErrorMessage: parsed.ErrorMessage,
-		}, state, nil
-	}
-	if err != nil {
-		return domain.RunResult{
-			Stderr:       string(out),
-			RawEvents:    parsed.RawEvents,
-			ErrorMessage: err.Error(),
-		}, state, err
+		}, nil
 	}
 
 	return domain.RunResult{
 		FinalMessage: parsed.FinalMessage,
-		Stderr:       string(out),
+		Stderr:       string(stderr),
 		RawEvents:    parsed.RawEvents,
-	}, state, nil
+	}, nil
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {
