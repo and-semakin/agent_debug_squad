@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 )
 
 const maxStreamJSONEventSize = 8 * 1024 * 1024
+const missingAssistantMessageError = "kimi stream did not include assistant message"
 
 type Adapter struct {
 	spec domain.AgentSpec
@@ -42,7 +44,7 @@ func ParseStreamJSON(data []byte) (StreamResult, error) {
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			return result, err
 		}
-		if eventType, _ := event["type"].(string); eventType == "assistant" {
+		if isAssistantEvent(event) {
 			if text := assistantText(event); text != "" {
 				result.FinalMessage = text
 			}
@@ -91,21 +93,13 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		}, state, err
 	}
 
-	parsed, parseErr := ParseStreamJSON(stdout)
-	if parseErr != nil {
-		return domain.RunResult{
-			Stderr:       stderr.String(),
-			RawEvents:    parsed.RawEvents,
-			ErrorMessage: parseErr.Error(),
-		}, state, parseErr
+	result, resultErr := buildRunResult(stdout, stderr.Bytes())
+	if resultErr != nil {
+		return result, state, resultErr
 	}
 
 	state.LastRunID = run.RunID
-	return domain.RunResult{
-		FinalMessage: parsed.FinalMessage,
-		Stderr:       stderr.String(),
-		RawEvents:    parsed.RawEvents,
-	}, state, nil
+	return result, state, nil
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {
@@ -114,6 +108,38 @@ func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.
 	}
 	state.Status = domain.AgentIdle
 	return state, nil
+}
+
+func buildRunResult(stdout []byte, stderr []byte) (domain.RunResult, error) {
+	parsed, parseErr := ParseStreamJSON(stdout)
+	if parseErr != nil {
+		return domain.RunResult{
+			Stderr:       string(stderr),
+			RawEvents:    parsed.RawEvents,
+			ErrorMessage: parseErr.Error(),
+		}, parseErr
+	}
+	if parsed.FinalMessage == "" {
+		err := errors.New(missingAssistantMessageError)
+		return domain.RunResult{
+			Stderr:       string(stderr),
+			RawEvents:    parsed.RawEvents,
+			ErrorMessage: err.Error(),
+		}, err
+	}
+	return domain.RunResult{
+		FinalMessage: parsed.FinalMessage,
+		Stderr:       string(stderr),
+		RawEvents:    parsed.RawEvents,
+	}, nil
+}
+
+func isAssistantEvent(event map[string]any) bool {
+	if eventType, _ := event["type"].(string); eventType == "assistant" {
+		return true
+	}
+	role, _ := event["role"].(string)
+	return role == "assistant"
 }
 
 func assistantText(event map[string]any) string {

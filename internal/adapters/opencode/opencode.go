@@ -68,11 +68,15 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	}
 
 	body := map[string]any{
-		"model": a.spec.StringOptions["model"],
-		"agent": a.spec.StringOptions["agent"],
 		"parts": []map[string]any{
 			{"type": "text", "text": run.Message},
 		},
+	}
+	if model := a.spec.StringOptions["model"]; model != "" {
+		body["model"] = model
+	}
+	if agent := a.spec.StringOptions["agent"]; agent != "" {
+		body["agent"] = agent
 	}
 	var response messageResponse
 	if err := a.postJSON(ctx, "/session/"+state.BackendSessionID+"/message", body, &response); err != nil {

@@ -75,6 +75,44 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 	}
 }
 
+func TestSendOmitsEmptyModelAndAgent(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"parts": []map[string]any{
+				{"type": "text", "text": "Final OpenCode answer"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir()}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := gotBody["model"]; ok {
+		t.Fatalf("body unexpectedly included empty model: %#v", gotBody)
+	}
+	if _, ok := gotBody["agent"]; ok {
+		t.Fatalf("body unexpectedly included empty agent: %#v", gotBody)
+	}
+}
+
 func TestInitCreatesSessionWhenMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/session" {
