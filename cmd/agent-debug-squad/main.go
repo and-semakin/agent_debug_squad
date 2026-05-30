@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 
@@ -55,7 +56,7 @@ func serve(args []string) error {
 	}
 	srv := api.New(orch, cfg)
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
 	log.Printf("listening on http://%s", addr)
 	return http.ListenAndServe(addr, srv)
 }
