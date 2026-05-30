@@ -173,24 +173,31 @@ func (o *Orchestrator) Wait(ctx context.Context, runID string, timeout time.Dura
 	if err != nil {
 		return run, err
 	}
+	if isTerminal(run.Status) {
+		o.deleteWaiter(runID)
+		return run, nil
+	}
 
 	o.mu.Lock()
 	waiter, hasWaiter := o.waiters[runID]
-	if !isTerminal(run.Status) && !hasWaiter {
+	registered := false
+	if !hasWaiter {
 		waiter = make(chan struct{})
 		o.waiters[runID] = waiter
-		hasWaiter = true
+		registered = true
 	}
 	o.mu.Unlock()
-	if isTerminal(run.Status) && !hasWaiter {
-		return run, nil
-	}
 
 	run, err = o.Run(ctx, runID)
 	if err != nil {
 		return run, err
 	}
-	if isTerminal(run.Status) && !hasWaiter {
+	if isTerminal(run.Status) {
+		if registered {
+			o.closeRegisteredWaiter(runID, waiter)
+		} else {
+			o.deleteWaiter(runID)
+		}
 		return run, nil
 	}
 
@@ -313,7 +320,6 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		newState.WorkspaceDir = o.cfg.WorkspaceDir
 	}
 
-	_ = o.store.SaveRun(run)
 	_ = o.store.SaveAgentState(newState)
 	_ = o.store.AppendTranscript(domain.TranscriptEvent{
 		Type:       "agent_result",
@@ -323,6 +329,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		Status:     run.Status,
 		At:         completed,
 	})
+	_ = o.store.SaveRun(run)
 
 	o.mu.Lock()
 	if current := o.runtimes[agentName]; current != nil {
@@ -343,6 +350,21 @@ func (o *Orchestrator) notify(runID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if waiter, ok := o.waiters[runID]; ok {
+		close(waiter)
+		delete(o.waiters, runID)
+	}
+}
+
+func (o *Orchestrator) deleteWaiter(runID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.waiters, runID)
+}
+
+func (o *Orchestrator) closeRegisteredWaiter(runID string, waiter chan struct{}) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if current, ok := o.waiters[runID]; ok && current == waiter {
 		close(waiter)
 		delete(o.waiters, runID)
 	}

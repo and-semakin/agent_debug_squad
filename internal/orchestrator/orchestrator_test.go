@@ -110,6 +110,49 @@ func TestSubmitRunContinuesAfterCallerContextCancelled(t *testing.T) {
 	}
 }
 
+func TestWaitReturnsImmediatelyForCompletedRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "finish first", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	completed, err := o.Wait(ctx, run.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait(first) error = %v", err)
+	}
+	if completed.Status != domain.RunCompleted {
+		t.Fatalf("first Status = %q, want %q", completed.Status, domain.RunCompleted)
+	}
+
+	o.mu.Lock()
+	o.waiters[run.RunID] = make(chan struct{})
+	o.mu.Unlock()
+
+	withTinyTimeout, err := o.Wait(ctx, run.RunID, time.Nanosecond)
+	if err != nil {
+		t.Fatalf("Wait(tiny timeout) error = %v", err)
+	}
+	if withTinyTimeout.Status != domain.RunCompleted {
+		t.Fatalf("tiny timeout Status = %q, want %q", withTinyTimeout.Status, domain.RunCompleted)
+	}
+
+	zeroCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	withZeroTimeout, err := o.Wait(zeroCtx, run.RunID, 0)
+	if err != nil {
+		t.Fatalf("Wait(zero timeout) error = %v", err)
+	}
+	if withZeroTimeout.Status != domain.RunCompleted {
+		t.Fatalf("zero timeout Status = %q, want %q", withZeroTimeout.Status, domain.RunCompleted)
+	}
+}
+
 func TestSubmitRunAllowsDifferentAgentsConcurrently(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer", "Implementer")
