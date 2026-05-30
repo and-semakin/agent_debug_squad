@@ -6,6 +6,8 @@ import (
 
 	"github.com/andrey/agent-debug-squad/internal/adapters/codex"
 	"github.com/andrey/agent-debug-squad/internal/adapters/fake"
+	"github.com/andrey/agent-debug-squad/internal/adapters/kimi"
+	"github.com/andrey/agent-debug-squad/internal/adapters/opencode"
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
@@ -21,8 +23,10 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 		return fake.New(spec), nil
 	case "codex":
 		return codex.New(spec), nil
-	case "opencode", "kimi":
-		return nil, fmt.Errorf("backend %q is wired in a later implementation task", spec.Backend)
+	case "kimi":
+		return kimi.New(spec), nil
+	case "opencode":
+		return opencode.New(spec), nil
 	default:
 		return nil, fmt.Errorf("unknown backend %q", spec.Backend)
 	}
