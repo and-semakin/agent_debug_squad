@@ -65,6 +65,9 @@ agents:
     options:
       command: codex
       model: openai/gpt-5.5
+      inherit_env:
+        - OPENAI_API_KEY
+        - CODEX_HOME
 
   - name: Skeptic
     backend: opencode
@@ -264,6 +267,8 @@ codex exec --json resume <SESSION_ID> ...
 
 The adapter reads JSONL events from stdout/stderr as provided by Codex. A turn completes on `turn.completed` and fails on `turn.failed`. The final agent message is extracted from the completed agent message event or from the final stdout result when available.
 
+The Codex adapter must support a configurable environment whitelist. The YAML `options.inherit_env` list names environment variables to copy from the service process into each `codex exec` child process. Variables not listed are not inherited except for the minimal process environment required by the operating system and command lookup. This is required for deployments that need explicit control over credentials, Codex home/config paths, proxies, or feature flags.
+
 ### Kimi Adapter
 
 Kimi should use non-interactive prompt mode with structured output:
@@ -292,7 +297,7 @@ The service is local-first. Default host is `127.0.0.1`. No authentication is re
 
 The service should not automatically transmit one agent's output to another agent. The facilitator decides which output files an agent should read and includes those file paths in the next prompt.
 
-Backend approval and sandbox behavior remains backend-specific and should be configured in YAML options. The service records what it invoked but does not bypass approvals unless explicitly configured.
+Backend approval, sandbox behavior, and backend child-process environment remain backend-specific and should be configured in YAML options. The service records what it invoked but does not bypass approvals or inherit broad environment variables unless explicitly configured.
 
 ## Testing Strategy
 
@@ -305,6 +310,7 @@ Unit tests:
 - Transcript events.
 - REST handlers with fake adapters.
 - Adapter parsers against sample OpenCode, Codex, and Kimi JSONL streams.
+- Codex adapter environment inheritance, verifying only whitelisted variables are passed to child processes.
 
 Integration tests:
 
