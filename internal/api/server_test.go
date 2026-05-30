@@ -77,6 +77,39 @@ func TestHealthEndpointReturnsOK(t *testing.T) {
 	}
 }
 
+func TestAgentEndpointReturnsOneAgent(t *testing.T) {
+	srv := newTestServer(t, "Reviewer", "Implementer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/agents/Reviewer", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+
+	var agent domain.AgentState
+	decodeResponse(t, rr, &agent)
+	if agent.Name != "Reviewer" {
+		t.Fatalf("Name = %q, want Reviewer", agent.Name)
+	}
+	if agent.StartupPrompt != "You are Reviewer" {
+		t.Fatalf("StartupPrompt = %q, want %q", agent.StartupPrompt, "You are Reviewer")
+	}
+}
+
+func TestAgentEndpointReturnsNotFoundForUnknownAgent(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/agents/Missing", nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+}
+
 func TestBlankMessageReturnsBadRequest(t *testing.T) {
 	srv := newTestServer(t, "Reviewer")
 

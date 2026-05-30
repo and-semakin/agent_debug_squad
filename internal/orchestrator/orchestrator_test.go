@@ -3,6 +3,9 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +214,41 @@ func TestNewMarksExistingRunningRunInterrupted(t *testing.T) {
 	}
 	if loaded.Error == nil || *loaded.Error == "" {
 		t.Fatalf("Error = %v, want startup interruption message", loaded.Error)
+	}
+}
+
+func TestRunFailsWhenFinalAgentStatePersistenceFails(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	s := store.New(cfg)
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	agentDir := filepath.Join(s.SessionDir(), "agents", "Reviewer")
+	if err := os.Chmod(agentDir, 0o500); err != nil {
+		t.Fatalf("Chmod(agentDir) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(agentDir, 0o700); err != nil {
+			t.Errorf("cleanup Chmod(agentDir) error = %v", err)
+		}
+	})
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "please review", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	completed, err := o.Wait(ctx, run.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if completed.Status != domain.RunFailed {
+		t.Fatalf("Status = %q, want %q", completed.Status, domain.RunFailed)
+	}
+	if completed.Error == nil || !strings.Contains(*completed.Error, "save agent state") {
+		t.Fatalf("Error = %v, want save agent state error", completed.Error)
 	}
 }
 

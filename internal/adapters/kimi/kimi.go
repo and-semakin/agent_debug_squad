@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andrey/agent-debug-squad/internal/adapters/promptfmt"
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
@@ -79,7 +80,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		command = "kimi"
 	}
 
-	cmd := exec.CommandContext(ctx, command, "-p", run.Message, "--output-format", "stream-json")
+	cmd := exec.CommandContext(ctx, command, "-p", promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message), "--output-format", "stream-json")
 	cmd.Dir = state.WorkspaceDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -100,6 +101,13 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 
 	state.LastRunID = run.RunID
 	return result, state, nil
+}
+
+func (a *Adapter) startupPrompt(state domain.AgentState) string {
+	if state.StartupPrompt != "" {
+		return state.StartupPrompt
+	}
+	return a.spec.StartupPrompt
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {

@@ -72,10 +72,11 @@ type RunRequest struct {
 }
 
 type RunResult struct {
-	FinalMessage string
-	Stderr       string
-	RawEvents    []string
-	ErrorMessage string
+	FinalMessage     string
+	Stderr           string
+	RawEvents        []string
+	ErrorMessage     string
+	BackendSessionID string
 }
 
 type TranscriptEvent struct {

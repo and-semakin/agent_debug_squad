@@ -103,3 +103,51 @@ agents:
 		t.Fatalf("error = %q", err)
 	}
 }
+
+func TestLoadConfigRejectsNonLoopbackHost(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+host: 0.0.0.0
+agents:
+  - name: Reviewer
+    backend: codex
+    startup_prompt: Review carefully.
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want non-loopback host error")
+	}
+	if !strings.Contains(err.Error(), "non-loopback host") {
+		t.Fatalf("error = %q, want non-loopback host", err.Error())
+	}
+}
+
+func TestLoadConfigAcceptsLocalhostHost(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+host: localhost
+agents:
+  - name: Reviewer
+    backend: codex
+    startup_prompt: Review carefully.
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host != "localhost" {
+		t.Fatalf("Host = %q, want localhost", cfg.Host)
+	}
+}

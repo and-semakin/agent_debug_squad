@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andrey/agent-debug-squad/internal/adapters/promptfmt"
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
@@ -19,11 +20,12 @@ type Adapter struct {
 }
 
 type StreamResult struct {
-	Completed    bool
-	Failed       bool
-	FinalMessage string
-	ErrorMessage string
-	RawEvents    []string
+	Completed        bool
+	Failed           bool
+	FinalMessage     string
+	ErrorMessage     string
+	RawEvents        []string
+	BackendSessionID string
 }
 
 const maxJSONLEventSize = 8 * 1024 * 1024
@@ -70,6 +72,22 @@ func ParseJSONL(data []byte) (StreamResult, error) {
 		}
 
 		switch eventType, _ := event["type"].(string); eventType {
+		case "thread.started":
+			if result.BackendSessionID == "" {
+				result.BackendSessionID = firstString(
+					stringValue(event["thread_id"]),
+					nestedString(event, "thread", "id"),
+					stringValue(event["session_id"]),
+				)
+			}
+		case "session.created":
+			if result.BackendSessionID == "" {
+				result.BackendSessionID = firstString(
+					stringValue(event["session_id"]),
+					stringValue(event["id"]),
+					nestedString(event, "session", "id"),
+				)
+			}
 		case "turn.completed":
 			result.Completed = true
 		case "turn.failed":
@@ -118,7 +136,11 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	if state.BackendSessionID != "" {
 		args = append(args, "resume", state.BackendSessionID)
 	}
-	args = append(args, run.Message)
+	message := run.Message
+	if state.LastRunID == "" {
+		message = promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message)
+	}
+	args = append(args, message)
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
@@ -130,6 +152,9 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	state.Status = domain.AgentIdle
 	state.LastRunID = run.RunID
 	result, resultErr := buildRunResult(stdout, stderr.Bytes(), err)
+	if state.BackendSessionID == "" && result.BackendSessionID != "" {
+		state.BackendSessionID = result.BackendSessionID
+	}
 	return result, state, resultErr
 }
 
@@ -150,38 +175,50 @@ func buildRunResult(stdout []byte, stderr []byte, execErr error) (domain.RunResu
 	parsed, parseErr := ParseJSONL(stdout)
 	if parseErr != nil {
 		return domain.RunResult{
-			Stderr:       string(stderr),
-			RawEvents:    parsed.RawEvents,
-			ErrorMessage: parseErr.Error(),
+			Stderr:           string(stderr),
+			RawEvents:        parsed.RawEvents,
+			BackendSessionID: parsed.BackendSessionID,
+			ErrorMessage:     parseErr.Error(),
 		}, parseErr
 	}
 	if parsed.Failed {
 		return domain.RunResult{
-			Stderr:       string(stderr),
-			RawEvents:    parsed.RawEvents,
-			ErrorMessage: parsed.ErrorMessage,
+			Stderr:           string(stderr),
+			RawEvents:        parsed.RawEvents,
+			BackendSessionID: parsed.BackendSessionID,
+			ErrorMessage:     parsed.ErrorMessage,
 		}, errors.New(parsed.ErrorMessage)
 	}
 	if execErr != nil {
 		return domain.RunResult{
-			Stderr:       string(stderr),
-			RawEvents:    parsed.RawEvents,
-			ErrorMessage: execErr.Error(),
+			Stderr:           string(stderr),
+			RawEvents:        parsed.RawEvents,
+			BackendSessionID: parsed.BackendSessionID,
+			ErrorMessage:     execErr.Error(),
 		}, execErr
 	}
 	if !parsed.Completed {
 		return domain.RunResult{
-			Stderr:       string(stderr),
-			RawEvents:    parsed.RawEvents,
-			ErrorMessage: incompleteTurnError,
+			Stderr:           string(stderr),
+			RawEvents:        parsed.RawEvents,
+			BackendSessionID: parsed.BackendSessionID,
+			ErrorMessage:     incompleteTurnError,
 		}, errors.New(incompleteTurnError)
 	}
 
 	return domain.RunResult{
-		FinalMessage: parsed.FinalMessage,
-		Stderr:       string(stderr),
-		RawEvents:    parsed.RawEvents,
+		FinalMessage:     parsed.FinalMessage,
+		Stderr:           string(stderr),
+		RawEvents:        parsed.RawEvents,
+		BackendSessionID: parsed.BackendSessionID,
 	}, nil
+}
+
+func (a *Adapter) startupPrompt(state domain.AgentState) string {
+	if state.StartupPrompt != "" {
+		return state.StartupPrompt
+	}
+	return a.spec.StartupPrompt
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {

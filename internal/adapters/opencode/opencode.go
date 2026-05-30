@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andrey/agent-debug-squad/internal/adapters/promptfmt"
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
@@ -67,9 +68,14 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 
+	message := run.Message
+	if state.LastRunID == "" {
+		message = promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message)
+	}
+
 	body := map[string]any{
 		"parts": []map[string]any{
-			{"type": "text", "text": run.Message},
+			{"type": "text", "text": message},
 		},
 	}
 	if model := a.spec.StringOptions["model"]; model != "" {
@@ -86,6 +92,13 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	state.Status = domain.AgentIdle
 	state.LastRunID = run.RunID
 	return domain.RunResult{FinalMessage: response.finalText()}, state, nil
+}
+
+func (a *Adapter) startupPrompt(state domain.AgentState) string {
+	if state.StartupPrompt != "" {
+		return state.StartupPrompt
+	}
+	return a.spec.StartupPrompt
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {

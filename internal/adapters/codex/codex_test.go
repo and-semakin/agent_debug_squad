@@ -1,7 +1,11 @@
 package codex
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -70,6 +74,42 @@ func TestParseJSONLDetectsFailure(t *testing.T) {
 	}
 }
 
+func TestParseJSONLCapturesBackendSessionID(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "thread_id",
+			data: `{"type":"thread.started","thread_id":"thread_123"}`,
+			want: "thread_123",
+		},
+		{
+			name: "nested_thread_id",
+			data: `{"type":"thread.started","thread":{"id":"thread_456"}}`,
+			want: "thread_456",
+		},
+		{
+			name: "session_id",
+			data: `{"type":"session.created","session_id":"session_789"}`,
+			want: "session_789",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseJSONL([]byte(tt.data))
+			if err != nil {
+				t.Fatalf("ParseJSONL() error = %v", err)
+			}
+			if got.BackendSessionID != tt.want {
+				t.Fatalf("BackendSessionID = %q, want %q", got.BackendSessionID, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseJSONLHandlesLargeAssistantEvent(t *testing.T) {
 	message := strings.Repeat("x", 70*1024)
 	data := []byte(`{"type":"item.completed","item":{"type":"message","role":"assistant","text":"` + message + `"}}
@@ -84,6 +124,92 @@ func TestParseJSONLHandlesLargeAssistantEvent(t *testing.T) {
 	}
 	if got.FinalMessage != message {
 		t.Fatalf("ParseJSONL().FinalMessage len = %d, want %d", len(got.FinalMessage), len(message))
+	}
+}
+
+func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
+	script, promptPath := codexCommandScript(t, `{"type":"turn.completed"}`)
+	spec := domain.AgentSpec{
+		Name:          "Reviewer",
+		Backend:       "codex",
+		StartupPrompt: "Review carefully.",
+		StringOptions: map[string]string{"command": script},
+	}
+	state := domain.AgentState{
+		Name:         "Reviewer",
+		WorkspaceDir: t.TempDir(),
+	}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Reviewer",
+		Message: "Please inspect this diff.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotPrompt := readTextFile(t, promptPath)
+	wantPrompt := "Startup prompt:\nReview carefully.\n\nFacilitator message:\nPlease inspect this diff."
+	if gotPrompt != wantPrompt {
+		t.Fatalf("prompt = %q, want %q", gotPrompt, wantPrompt)
+	}
+}
+
+func TestSendDoesNotRepeatStartupPromptAfterFirstRun(t *testing.T) {
+	script, promptPath := codexCommandScript(t, `{"type":"turn.completed"}`)
+	spec := domain.AgentSpec{
+		Name:          "Reviewer",
+		Backend:       "codex",
+		StartupPrompt: "Review carefully.",
+		StringOptions: map[string]string{"command": script},
+	}
+	state := domain.AgentState{
+		Name:             "Reviewer",
+		WorkspaceDir:     t.TempDir(),
+		LastRunID:        "run_1",
+		BackendSessionID: "thread_123",
+	}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_2",
+		Agent:   "Reviewer",
+		Message: "Second turn.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotPrompt := readTextFile(t, promptPath)
+	if gotPrompt != "Second turn." {
+		t.Fatalf("prompt = %q, want second turn only", gotPrompt)
+	}
+}
+
+func TestSendStoresBackendSessionIDFromThreadStarted(t *testing.T) {
+	script, _ := codexCommandScript(t, `{"type":"thread.started","thread_id":"thread_abc"}
+{"type":"turn.completed"}`)
+	spec := domain.AgentSpec{
+		Name:          "Reviewer",
+		Backend:       "codex",
+		StartupPrompt: "Review carefully.",
+		StringOptions: map[string]string{"command": script},
+	}
+	state := domain.AgentState{
+		Name:         "Reviewer",
+		WorkspaceDir: t.TempDir(),
+	}
+
+	_, nextState, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Reviewer",
+		Message: "Start.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextState.BackendSessionID != "thread_abc" {
+		t.Fatalf("BackendSessionID = %q, want thread_abc", nextState.BackendSessionID)
 	}
 }
 
@@ -178,4 +304,39 @@ func TestBuildRunResultNonZeroExitUsesParsedTurnFailedError(t *testing.T) {
 	if len(got.RawEvents) != 1 {
 		t.Fatalf("buildRunResult().RawEvents len = %d, want 1", len(got.RawEvents))
 	}
+}
+
+func codexCommandScript(t *testing.T, stdout string) (string, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.txt")
+	scriptPath := filepath.Join(dir, "codex-command.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  last="$arg"
+done
+printf '%%s' "$last" > %s
+cat <<'EOF'
+%s
+EOF
+`, shellQuote(promptPath), stdout)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return scriptPath, promptPath
+}
+
+func readTextFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }

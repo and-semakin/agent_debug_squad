@@ -120,6 +120,17 @@ func (o *Orchestrator) Agents() []domain.AgentState {
 	return states
 }
 
+func (o *Orchestrator) Agent(name string) (domain.AgentState, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	rt, ok := o.runtimes[name]
+	if !ok {
+		return domain.AgentState{}, false
+	}
+	return rt.state, true
+}
+
 func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string, metadata map[string]string) (domain.RunRecord, error) {
 	o.mu.Lock()
 	rt, ok := o.runtimes[agentName]
@@ -285,7 +296,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	if result.Stderr != "" {
 		stderrPath, err := o.store.WriteRunStderr(run, result.Stderr)
 		if err != nil && sendErr == nil {
-			sendErr = err
+			sendErr = fmt.Errorf("write run stderr: %w", err)
 		}
 		if stderrPath != "" && sendErr == nil && result.FinalMessage == "" {
 			result.FinalMessage = stderrPath
@@ -294,9 +305,9 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	if result.FinalMessage != "" {
 		outputPath, err := o.store.WriteAgentOutput(run, result.FinalMessage)
 		if err != nil && sendErr == nil {
-			sendErr = err
+			sendErr = fmt.Errorf("write agent output: %w", err)
 		}
-		if outputPath != "" {
+		if outputPath != "" && err == nil {
 			run.OutputPath = &outputPath
 		}
 	}
@@ -320,22 +331,37 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		newState.WorkspaceDir = o.cfg.WorkspaceDir
 	}
 
-	_ = o.store.SaveAgentState(newState)
-	_ = o.store.AppendTranscript(domain.TranscriptEvent{
+	if err := o.store.SaveAgentState(newState); err != nil {
+		markPersistenceFailure(&run, &newState, fmt.Errorf("save agent state: %w", err))
+	}
+	if err := o.store.AppendTranscript(domain.TranscriptEvent{
 		Type:       "agent_result",
 		RunID:      run.RunID,
 		Agent:      run.Agent,
 		OutputPath: deref(run.OutputPath),
 		Status:     run.Status,
 		At:         completed,
-	})
-	_ = o.store.SaveRun(run)
+	}); err != nil {
+		markPersistenceFailure(&run, &newState, fmt.Errorf("append transcript: %w", err))
+	}
+	if err := o.store.SaveRun(run); err != nil {
+		markPersistenceFailure(&run, &newState, fmt.Errorf("save run: %w", err))
+		_ = o.store.SaveRun(run)
+	}
 
 	o.mu.Lock()
 	if current := o.runtimes[agentName]; current != nil {
 		current.state = newState
 	}
 	o.mu.Unlock()
+}
+
+func markPersistenceFailure(run *domain.RunRecord, state *domain.AgentState, err error) {
+	message := err.Error()
+	run.Status = domain.RunFailed
+	run.Error = &message
+	state.Status = domain.AgentFailed
+	state.LastError = &message
 }
 
 func (o *Orchestrator) releaseAgent(agentName string) {

@@ -38,6 +38,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /session", s.handleSession)
 	s.mux.HandleFunc("GET /agents", s.handleAgents)
+	s.mux.HandleFunc("GET /agents/{name}", s.handleAgent)
 	s.mux.HandleFunc("GET /runs", s.handleRuns)
 	s.mux.HandleFunc("GET /runs/{run_id}", s.handleRun)
 	s.mux.HandleFunc("GET /transcript", s.handleTranscript)
@@ -54,6 +55,15 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.orchestrator.Agents())
+}
+
+func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
+	agent, ok := s.orchestrator.Agent(r.PathValue("name"))
+	if !ok {
+		writeError(w, http.StatusNotFound, orchestrator.ErrAgentNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {

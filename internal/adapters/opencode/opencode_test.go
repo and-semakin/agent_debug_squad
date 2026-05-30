@@ -41,7 +41,7 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 			"agent":    "build",
 		},
 	}
-	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir()}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
 
 	result, nextState, err := New(spec).Send(context.Background(), state, domain.RunRequest{
 		RunID:   "run_1",
@@ -73,6 +73,51 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 	}
 	if nextState.LastRunID != "run_1" {
 		t.Fatalf("LastRunID = %q, want %q", nextState.LastRunID, "run_1")
+	}
+}
+
+func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"parts": []map[string]any{
+				{"type": "text", "text": "Final OpenCode answer"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir()}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parts, ok := gotBody["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts = %#v, want one text part", gotBody["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("part = %#v, want object", parts[0])
+	}
+	want := "Startup prompt:\nChallenge assumptions.\n\nFacilitator message:\nhello"
+	if part["text"] != want {
+		t.Fatalf("part text = %q, want %q", part["text"], want)
 	}
 }
 

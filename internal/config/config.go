@@ -46,6 +46,9 @@ func Load(path string) (domain.SessionConfig, error) {
 	if raw.Host == "" {
 		raw.Host = "127.0.0.1"
 	}
+	if !isAllowedHost(raw.Host) {
+		return domain.SessionConfig{}, fmt.Errorf("non-loopback host %q is not allowed without auth in v1", raw.Host)
+	}
 	if raw.Port == 0 {
 		raw.Port = 8080
 	}
@@ -124,6 +127,15 @@ func Load(path string) (domain.SessionConfig, error) {
 		Port:         raw.Port,
 		Agents:       agents,
 	}, nil
+}
+
+func isAllowedHost(host string) bool {
+	switch strings.TrimSpace(strings.ToLower(host)) {
+	case "", "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func stableSessionID(name, workspace string) string {
