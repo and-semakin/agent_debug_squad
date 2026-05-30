@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	"github.com/andrey/agent-debug-squad/internal/domain"
 	"github.com/andrey/agent-debug-squad/internal/orchestrator"
 )
+
+const defaultWaitTimeout = 60 * time.Second
 
 type Server struct {
 	orchestrator *orchestrator.Orchestrator
@@ -70,6 +71,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	if isUnsafePathError(err) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -97,6 +102,17 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	wait := r.URL.Query().Get("wait") == "true"
+	timeout := defaultWaitTimeout
+	if wait {
+		var err error
+		timeout, err = timeoutFromQuery(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+
 	run, err := s.orchestrator.SubmitRun(r.Context(), r.PathValue("name"), body.Message, body.Metadata)
 	if errors.Is(err, orchestrator.ErrAgentNotFound) {
 		writeError(w, http.StatusNotFound, err)
@@ -111,14 +127,8 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("wait") == "true" {
-		waitCtx := context.Background()
-		if deadline, ok := r.Context().Deadline(); ok {
-			var cancel context.CancelFunc
-			waitCtx, cancel = context.WithDeadline(waitCtx, deadline)
-			defer cancel()
-		}
-		waited, waitErr := s.orchestrator.Wait(waitCtx, run.RunID, timeoutFromQuery(r))
+	if wait {
+		waited, waitErr := s.orchestrator.Wait(r.Context(), run.RunID, timeout)
 		if waitErr == nil || errors.Is(waitErr, orchestrator.ErrWaitTimeout) {
 			run = waited
 		} else if errors.Is(waitErr, orchestrator.ErrRunNotFound) {
@@ -138,16 +148,16 @@ type createRunRequest struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
-func timeoutFromQuery(r *http.Request) time.Duration {
+func timeoutFromQuery(r *http.Request) (time.Duration, error) {
 	value := r.URL.Query().Get("timeout_seconds")
 	if value == "" {
-		return 0
+		return defaultWaitTimeout, nil
 	}
 	seconds, err := strconv.Atoi(value)
 	if err != nil || seconds <= 0 {
-		return 0
+		return 0, errors.New("timeout_seconds must be a positive integer")
 	}
-	return time.Duration(seconds) * time.Second
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -158,4 +168,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func isUnsafePathError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unsafe ")
 }

@@ -49,6 +49,7 @@ func TestBusyAgentReturnsConflict(t *testing.T) {
 	if first.Code != http.StatusAccepted {
 		t.Fatalf("first status = %d, want %d; body = %s", first.Code, http.StatusAccepted, first.Body.String())
 	}
+	waitForAgentStatus(t, srv, "Reviewer", domain.AgentRunning)
 
 	second := httptest.NewRecorder()
 	srv.ServeHTTP(second, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{Message: "second"}))
@@ -124,12 +125,88 @@ func TestWaitTrueCompletesWithOutputPath(t *testing.T) {
 	}
 }
 
+func TestInvalidTimeoutSecondsReturnBadRequest(t *testing.T) {
+	for _, timeoutSeconds := range []string{"abc", "0"} {
+		t.Run(timeoutSeconds, func(t *testing.T) {
+			srv := newTestServer(t, "Reviewer")
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs?wait=true&timeout_seconds="+timeoutSeconds, runPayload{
+				Message: "finish",
+			}))
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+			assertJSONContentType(t, rr)
+
+			runs, err := srv.orchestrator.Runs(context.Background())
+			if err != nil {
+				t.Fatalf("Runs() error = %v", err)
+			}
+			if len(runs) != 0 {
+				t.Fatalf("len(runs) = %d, want 0", len(runs))
+			}
+		})
+	}
+}
+
+func TestWaitTrueUsesRequestContextCancellation(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rr := httptest.NewRecorder()
+	req := newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs?wait=true&timeout_seconds=60", runPayload{
+		Message: "finish after request cancel",
+	}).WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.ServeHTTP(rr, req)
+	}()
+
+	run := waitForRunCreated(t, srv)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after request context cancellation")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+
+	completed, err := srv.orchestrator.Wait(context.Background(), run.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait(%q) error = %v", run.RunID, err)
+	}
+	if completed.Status != domain.RunCompleted {
+		t.Fatalf("Status = %q, want %q", completed.Status, domain.RunCompleted)
+	}
+}
+
+func TestUnsafeRunPathReturnsClientError(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/bad%2Fid", nil))
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+}
+
 type runPayload struct {
 	Message  string            `json:"message"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-func newTestServer(t *testing.T, agentNames ...string) http.Handler {
+func newTestServer(t *testing.T, agentNames ...string) *Server {
 	t.Helper()
 
 	cfg := testConfig(t, agentNames...)
@@ -150,6 +227,48 @@ func newTestServer(t *testing.T, agentNames ...string) http.Handler {
 		}
 	})
 	return New(o, cfg)
+}
+
+func waitForAgentStatus(t *testing.T, srv *Server, agentName string, want domain.AgentStatus) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, agent := range srv.orchestrator.Agents() {
+			if agent.Name == agentName && agent.Status == want {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("agent %q did not reach status %q", agentName, want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForRunCreated(t *testing.T, srv *Server) domain.RunRecord {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		runs, err := srv.orchestrator.Runs(context.Background())
+		if err != nil {
+			t.Fatalf("Runs() error = %v", err)
+		}
+		if len(runs) > 0 {
+			return runs[0]
+		}
+		select {
+		case <-deadline:
+			t.Fatal("run was not created")
+		case <-ticker.C:
+		}
+	}
 }
 
 func testConfig(t *testing.T, agentNames ...string) domain.SessionConfig {
