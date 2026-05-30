@@ -125,14 +125,26 @@ func TestBuildRunResultTurnFailedPreservesStderrAndParsedError(t *testing.T) {
 	stderr := []byte("diagnostic stderr\n")
 
 	got, err := buildRunResult(stdout, stderr, nil)
-	if err != nil {
-		t.Fatalf("buildRunResult() error = %v", err)
+	if err == nil {
+		t.Fatal("buildRunResult() error = nil, want turn failed error")
 	}
 	if got.Stderr != string(stderr) {
 		t.Fatalf("buildRunResult().Stderr = %q, want %q", got.Stderr, string(stderr))
 	}
 	if got.ErrorMessage != "boom" {
 		t.Fatalf("buildRunResult().ErrorMessage = %q, want %q", got.ErrorMessage, "boom")
+	}
+}
+
+func TestBuildRunResultTurnFailedDefaultsMissingMessage(t *testing.T) {
+	stdout := []byte(`{"type":"turn.failed"}`)
+
+	got, err := buildRunResult(stdout, nil, nil)
+	if err == nil {
+		t.Fatal("buildRunResult() error = nil, want turn failed error")
+	}
+	if got.ErrorMessage != "codex turn failed" {
+		t.Fatalf("buildRunResult().ErrorMessage = %q, want %q", got.ErrorMessage, "codex turn failed")
 	}
 }
 
@@ -154,8 +166,8 @@ func TestBuildRunResultNonZeroExitUsesParsedTurnFailedError(t *testing.T) {
 	stderr := []byte("diagnostic stderr\n")
 
 	got, err := buildRunResult(stdout, stderr, execErr)
-	if err != nil {
-		t.Fatalf("buildRunResult() error = %v", err)
+	if err == nil {
+		t.Fatal("buildRunResult() error = nil, want turn failed error")
 	}
 	if got.ErrorMessage != "parsed boom" {
 		t.Fatalf("buildRunResult().ErrorMessage = %q, want %q", got.ErrorMessage, "parsed boom")

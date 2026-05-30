@@ -29,6 +29,7 @@ type StreamResult struct {
 const maxJSONLEventSize = 8 * 1024 * 1024
 
 const incompleteTurnError = "codex turn did not complete"
+const turnFailedError = "codex turn failed"
 
 func New(spec domain.AgentSpec) *Adapter {
 	return &Adapter{spec: spec}
@@ -76,6 +77,7 @@ func ParseJSONL(data []byte) (StreamResult, error) {
 			result.ErrorMessage = firstString(
 				nestedString(event, "error", "message"),
 				stringValue(event["message"]),
+				turnFailedError,
 			)
 		case "item.completed":
 			if text := assistantMessageText(event); text != "" {
@@ -158,7 +160,7 @@ func buildRunResult(stdout []byte, stderr []byte, execErr error) (domain.RunResu
 			Stderr:       string(stderr),
 			RawEvents:    parsed.RawEvents,
 			ErrorMessage: parsed.ErrorMessage,
-		}, nil
+		}, errors.New(parsed.ErrorMessage)
 	}
 	if execErr != nil {
 		return domain.RunResult{
