@@ -98,6 +98,7 @@ agents:
     options:
       base_url: http://127.0.0.1:4096
       model: zai-coding-plan/glm-5.1
+      timeout_seconds: "600"
 
   - name: Advocat
     backend: kimi

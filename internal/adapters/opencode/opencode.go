@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultBaseURL     = "http://127.0.0.1:4096"
-	defaultHTTPTimeout = 2 * time.Minute
+	defaultHTTPTimeout = 10 * time.Minute
 )
 
 type Adapter struct {
