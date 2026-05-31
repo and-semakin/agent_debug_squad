@@ -157,7 +157,7 @@ func (s *Store) appendRunArtifactLine(run domain.RunRecord, suffix string, line 
 	}
 	defer file.Close()
 	if _, err := file.WriteString(line + "\n"); err != nil {
-		return "", err
+		return path, err
 	}
 	return path, file.Sync()
 }
