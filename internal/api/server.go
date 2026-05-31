@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -173,7 +174,9 @@ func timeoutFromQuery(r *http.Request) (time.Duration, error) {
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("json encode response: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

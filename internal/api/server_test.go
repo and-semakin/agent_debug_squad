@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +234,24 @@ func TestUnsafeRunPathReturnsClientError(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
 	}
 	assertJSONContentType(t, rr)
+}
+
+func TestWriteJSONLogsEncodeErrors(t *testing.T) {
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	writeJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
+
+	if got := logs.String(); !strings.Contains(got, "json encode response: json: unsupported type: chan int") {
+		t.Fatalf("log output = %q, want json encode response error", got)
+	}
 }
 
 type runPayload struct {
