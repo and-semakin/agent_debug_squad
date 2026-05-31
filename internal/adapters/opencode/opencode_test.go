@@ -54,8 +54,12 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 	if gotPath != "/session/session_123/message" {
 		t.Fatalf("path = %s, want %s", gotPath, "/session/session_123/message")
 	}
-	if gotBody["model"] != "anthropic/claude-sonnet-4.5" {
-		t.Fatalf("model = %v, body = %#v", gotBody["model"], gotBody)
+	model, ok := gotBody["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("model = %#v, want object", gotBody["model"])
+	}
+	if model["providerID"] != "anthropic" || model["modelID"] != "claude-sonnet-4.5" {
+		t.Fatalf("model = %#v, want providerID/modelID", model)
 	}
 	if gotBody["agent"] != "build" {
 		t.Fatalf("agent = %v, body = %#v", gotBody["agent"], gotBody)

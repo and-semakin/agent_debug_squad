@@ -79,7 +79,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		},
 	}
 	if model := a.spec.StringOptions["model"]; model != "" {
-		body["model"] = model
+		body["model"] = modelPayload(model)
 	}
 	if agent := a.spec.StringOptions["agent"]; agent != "" {
 		body["agent"] = agent
@@ -156,6 +156,20 @@ func (a *Adapter) baseURL() string {
 		return defaultBaseURL
 	}
 	return baseURL
+}
+
+func modelPayload(model string) map[string]string {
+	providerID, modelID, ok := strings.Cut(model, "/")
+	if !ok {
+		return map[string]string{
+			"providerID": "",
+			"modelID":    model,
+		}
+	}
+	return map[string]string{
+		"providerID": providerID,
+		"modelID":    modelID,
+	}
 }
 
 func (r messageResponse) finalText() string {
