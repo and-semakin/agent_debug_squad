@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andrey/agent-debug-squad/internal/adapters/promptfmt"
@@ -136,30 +138,94 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		command = "codex"
 	}
 
-	args := []string{"exec", "--json"}
-	if state.BackendSessionID != "" {
-		args = append(args, "resume", state.BackendSessionID)
-	}
 	message := run.Message
 	if state.LastRunID == "" {
 		message = promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message)
 	}
-	args = append(args, message)
+	yolo := true
+	if a.spec.Yolo != nil {
+		yolo = *a.spec.Yolo
+	}
+	args := buildArgs(a.spec, state, message, yolo)
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
 	cmd.Env = BuildEnv(a.spec, os.Environ())
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 
-	stdout, err := cmd.Output()
+	stdout, stderr, err := runCommandStreaming(ctx, cmd, sink)
 	state.Status = domain.AgentIdle
 	state.LastRunID = run.RunID
-	result, resultErr := buildRunResult(stdout, stderr.Bytes(), err)
+	result, resultErr := buildRunResult(stdout, stderr, err)
 	if state.BackendSessionID == "" && result.BackendSessionID != "" {
 		state.BackendSessionID = result.BackendSessionID
 	}
 	return result, state, resultErr
+}
+
+func buildArgs(spec domain.AgentSpec, state domain.AgentState, message string, yolo bool) []string {
+	args := []string{"exec", "--json"}
+	if yolo {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	if state.BackendSessionID != "" {
+		args = append(args, "resume", state.BackendSessionID)
+	}
+	args = append(args, message)
+	return args
+}
+
+func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink) ([]byte, []byte, error) {
+	if sink == nil {
+		sink = domain.DiscardRunSink()
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var wg sync.WaitGroup
+	var scanErr error
+	var mu sync.Mutex
+	scan := func(r io.Reader, stream string) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLEventSize)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if stream == "stderr" {
+				stderr.WriteString(line + "\n")
+				sink.StderrLine(line)
+			} else {
+				stdout.WriteString(line + "\n")
+				sink.StdoutLine(line)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			mu.Lock()
+			if scanErr == nil {
+				scanErr = err
+			}
+			mu.Unlock()
+		}
+	}
+	wg.Add(2)
+	go scan(stdoutPipe, "stdout")
+	go scan(stderrPipe, "stderr")
+	waitErr := cmd.Wait()
+	wg.Wait()
+	if scanErr != nil {
+		return stdout.Bytes(), stderr.Bytes(), scanErr
+	}
+	return stdout.Bytes(), stderr.Bytes(), waitErr
 }
 
 func buildRunResult(stdout []byte, stderr []byte, execErr error) (domain.RunResult, error) {

@@ -159,6 +159,26 @@ func TestParseJSONLHandlesLargeAssistantEvent(t *testing.T) {
 	}
 }
 
+func TestBuildArgsAddsYoloFlagByDefault(t *testing.T) {
+	spec := domain.AgentSpec{Name: "Reviewer", Backend: "codex"}
+	state := domain.AgentState{}
+	args := buildArgs(spec, state, "hello", true)
+	if !containsString(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("args = %#v, want yolo flag", args)
+	}
+}
+
+func TestBuildArgsOmitsYoloFlagWhenDisabled(t *testing.T) {
+	spec := domain.AgentSpec{Name: "Reviewer", Backend: "codex"}
+	disabled := false
+	spec.Yolo = &disabled
+	state := domain.AgentState{}
+	args := buildArgs(spec, state, "hello", false)
+	if containsString(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("args = %#v, want no yolo flag", args)
+	}
+}
+
 func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 	script, promptPath := codexCommandScript(t, `{"type":"turn.completed"}`)
 	spec := domain.AgentSpec{
@@ -176,7 +196,7 @@ func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Reviewer",
 		Message: "Please inspect this diff.",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +227,7 @@ func TestSendDoesNotRepeatStartupPromptAfterFirstRun(t *testing.T) {
 		RunID:   "run_2",
 		Agent:   "Reviewer",
 		Message: "Second turn.",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,12 +256,34 @@ func TestSendStoresBackendSessionIDFromThreadStarted(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Reviewer",
 		Message: "Start.",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if nextState.BackendSessionID != "thread_abc" {
 		t.Fatalf("BackendSessionID = %q, want thread_abc", nextState.BackendSessionID)
+	}
+}
+
+func TestSendStreamsStdoutAndStderr(t *testing.T) {
+	script, promptPath := codexCommandScript(t, `{"type":"item.completed","item":{"type":"message","role":"assistant","text":"done"}}
+{"type":"turn.completed"}`)
+	sink := &recordingSink{}
+	spec := domain.AgentSpec{Name: "Reviewer", Backend: "codex", StartupPrompt: "Review.", StringOptions: map[string]string{"command": script}}
+	state := domain.AgentState{Name: "Reviewer", WorkspaceDir: t.TempDir()}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{RunID: "run_1", Agent: "Reviewer", Message: "hello"}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "done" {
+		t.Fatalf("FinalMessage = %q, want done", result.FinalMessage)
+	}
+	if len(sink.stdout) == 0 {
+		t.Fatalf("stdout sink empty")
+	}
+	if gotPrompt := readTextFile(t, promptPath); !strings.Contains(gotPrompt, "hello") {
+		t.Fatalf("prompt = %q, want hello", gotPrompt)
 	}
 }
 
@@ -357,6 +399,24 @@ EOF
 		t.Fatal(err)
 	}
 	return scriptPath, promptPath
+}
+
+type recordingSink struct {
+	stdout []string
+	stderr []string
+}
+
+func (s *recordingSink) StdoutLine(line string) { s.stdout = append(s.stdout, line) }
+func (s *recordingSink) StderrLine(line string) { s.stderr = append(s.stderr, line) }
+func (s *recordingSink) Err() error             { return nil }
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func readTextFile(t *testing.T, path string) string {
