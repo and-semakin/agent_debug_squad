@@ -42,6 +42,7 @@ type SessionConfig struct {
 type AgentState struct {
 	Name             string      `json:"name"`
 	Backend          string      `json:"backend"`
+	Model            string      `json:"model,omitempty"`
 	StartupPrompt    string      `json:"startup_prompt"`
 	WorkspaceDir     string      `json:"workspace_dir"`
 	BackendSessionID string      `json:"backend_session_id"`

@@ -121,4 +121,4 @@ agents:
 
       Будь адвокатом текущего кода, но не отрицай реальные проблемы. Цель — помочь Facilitator сформировать небольшой, полезный запрос к Implementer.
     options:
-      command: kimi
+      command: /Users/andrey/.kimi-code/bin/kimi

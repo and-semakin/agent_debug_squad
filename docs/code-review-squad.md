@@ -22,12 +22,14 @@ The server listens on `127.0.0.1:8090` and writes artifacts under:
 
 The launcher exports the proxy variables needed by Codex. The YAML config whitelists those variables through `options.inherit_env` for the Codex-backed agents.
 
+Agent state includes the configured `model` when an agent has one, so `GET /agents` and `sessions/<session_id>/agents/<agent_name>/state.json` show which model backs OpenCode-style agents.
+
 ## Agents
 
 - `Facilitator`: Codex. Owns the session flow and final summary.
 - `Implementer`: Codex. Edits code only when Facilitator gives a concrete implementation request.
 - `Critic`: OpenCode with model `zai-coding-plan/glm-5.1`. Reads and critiques only.
-- `Advocat`: Kimi. Reads and defends current decisions objectively.
+- `Advocat`: Kimi at `/Users/andrey/.kimi-code/bin/kimi`. Reads and defends current decisions objectively.
 
 ## Scenario
 

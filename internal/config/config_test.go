@@ -195,6 +195,14 @@ func TestLoadProjectCodeReviewSquadConfig(t *testing.T) {
 	if critic.StringOptions["model"] != "zai-coding-plan/glm-5.1" {
 		t.Fatalf("Critic model = %q", critic.StringOptions["model"])
 	}
+
+	advocat := cfg.Agents[3]
+	if advocat.Name != "Advocat" {
+		t.Fatalf("fourth agent = %q, want Advocat", advocat.Name)
+	}
+	if advocat.StringOptions["command"] != "/Users/andrey/.kimi-code/bin/kimi" {
+		t.Fatalf("Advocat command = %q", advocat.StringOptions["command"])
+	}
 }
 
 func containsString(items []string, want string) bool {

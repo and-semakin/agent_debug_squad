@@ -82,12 +82,14 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 			state = domain.AgentState{
 				Name:          spec.Name,
 				Backend:       spec.Backend,
+				Model:         spec.StringOptions["model"],
 				StartupPrompt: spec.StartupPrompt,
 				WorkspaceDir:  cfg.WorkspaceDir,
 			}
 		} else if err != nil {
 			return nil, err
 		}
+		state.Model = spec.StringOptions["model"]
 		state.WorkspaceDir = cfg.WorkspaceDir
 
 		state, err = adapter.Init(ctx, spec, state)

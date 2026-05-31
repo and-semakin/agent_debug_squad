@@ -271,6 +271,34 @@ func TestNewMarksExistingRunningRunInterrupted(t *testing.T) {
 	}
 }
 
+func TestNewPersistsAgentModelFromSpec(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Critic")
+	cfg.Agents[0].StringOptions = map[string]string{"model": "zai-coding-plan/glm-5.1"}
+	s := store.New(cfg)
+
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	state, ok := o.Agent("Critic")
+	if !ok {
+		t.Fatal("Agent(Critic) not found")
+	}
+	if state.Model != "zai-coding-plan/glm-5.1" {
+		t.Fatalf("state.Model = %q, want zai-coding-plan/glm-5.1", state.Model)
+	}
+
+	loaded, err := s.LoadAgentState("Critic")
+	if err != nil {
+		t.Fatalf("LoadAgentState() error = %v", err)
+	}
+	if loaded.Model != "zai-coding-plan/glm-5.1" {
+		t.Fatalf("persisted Model = %q, want zai-coding-plan/glm-5.1", loaded.Model)
+	}
+}
+
 func TestRunFailsWhenFinalAgentStatePersistenceFails(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer")
