@@ -89,10 +89,15 @@ func serve(ctx context.Context, args []string) error {
 			return fmt.Errorf("shutdown server: %w", err)
 		}
 		err := <-errC
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
-		return err
+		workerCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer cancel()
+		if err := orch.WaitForWorkers(workerCtx); err != nil {
+			return fmt.Errorf("wait for workers: %w", err)
+		}
+		return nil
 	}
 }
 

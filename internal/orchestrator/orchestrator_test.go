@@ -139,6 +139,34 @@ func TestRootContextCancellationFailsRunningRun(t *testing.T) {
 	}
 }
 
+func TestWaitForWorkersWaitsForActiveRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "wait for worker", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := o.WaitForWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitForWorkers() error = %v", err)
+	}
+
+	completed, err := o.Run(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if completed.Status != domain.RunCompleted {
+		t.Fatalf("Status = %q, want %q", completed.Status, domain.RunCompleted)
+	}
+}
+
 func TestWaitReturnsImmediatelyForCompletedRun(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer")

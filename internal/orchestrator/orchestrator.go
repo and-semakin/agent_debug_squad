@@ -31,6 +31,7 @@ type Orchestrator struct {
 	runtimes map[string]*agentRuntime
 	waiters  map[string]chan struct{}
 	nextRun  int
+	workerWG sync.WaitGroup
 }
 
 type agentRuntime struct {
@@ -178,8 +179,27 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 		return domain.RunRecord{}, err
 	}
 
+	o.workerWG.Add(1)
 	go o.runWorker(o.execCtx, agentName, run, waiter)
 	return run, nil
+}
+
+func (o *Orchestrator) WaitForWorkers(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() {
+		o.workerWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (o *Orchestrator) Wait(ctx context.Context, runID string, timeout time.Duration) (domain.RunRecord, error) {
@@ -267,6 +287,7 @@ func (o *Orchestrator) Transcript(ctx context.Context) ([]domain.TranscriptEvent
 
 func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run domain.RunRecord, waiter chan struct{}) {
 	defer func() {
+		defer o.workerWG.Done()
 		o.releaseAgent(agentName)
 		close(waiter)
 		o.mu.Lock()
