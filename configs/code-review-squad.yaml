@@ -21,6 +21,8 @@ agents:
       - base URL: http://127.0.0.1:8090
       - участники: Implementer, Critic, Advocat
       - артефакты и ответы агентов лежат в .agent-review-artifacts/
+      - сервер уже запущен снаружи; не запускай и не останавливай ./scripts/start-code-review-squad.sh, agent-debug-squad, opencode serve или другие серверные процессы
+      - взаимодействуй с другими агентами только через HTTP API на http://127.0.0.1:8090
 
       Ограничение сценария:
       - ровно 3 круга улучшений
