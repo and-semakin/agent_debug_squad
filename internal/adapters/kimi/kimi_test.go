@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,6 +74,20 @@ func TestBuildRunResultErrorsWhenNoAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestBuildArgsAddsYoloByDefault(t *testing.T) {
+	args := buildArgs("hello", true)
+	if !containsString(args, "--yolo") {
+		t.Fatalf("args = %#v, want --yolo", args)
+	}
+}
+
+func TestBuildArgsOmitsYoloWhenDisabled(t *testing.T) {
+	args := buildArgs("hello", false)
+	if containsString(args, "--yolo") {
+		t.Fatalf("args = %#v, want no --yolo", args)
+	}
+}
+
 func TestSendIncludesStartupPromptEveryRun(t *testing.T) {
 	script, promptPath := kimiCommandScript(t, `{"type":"assistant","message":{"content":"done"}}`)
 	spec := domain.AgentSpec{
@@ -91,7 +106,7 @@ func TestSendIncludesStartupPromptEveryRun(t *testing.T) {
 		RunID:   "run_2",
 		Agent:   "Implementer",
 		Message: "Fix the failing test.",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +118,31 @@ func TestSendIncludesStartupPromptEveryRun(t *testing.T) {
 	}
 }
 
+func TestSendStreamsStdoutAndStderr(t *testing.T) {
+	stdoutLines := []string{`{"type":"assistant","message":{"content":"Final answer"}}`}
+	script, promptPath := kimiCommandScript(t, strings.Join(stdoutLines, "\n"))
+	sink := &recordingSink{}
+	spec := domain.AgentSpec{Name: "Advocat", Backend: "kimi", StartupPrompt: "Defend.", StringOptions: map[string]string{"command": script}}
+	state := domain.AgentState{Name: "Advocat", WorkspaceDir: t.TempDir()}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{RunID: "run_1", Agent: "Advocat", Message: "hello"}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "Final answer" {
+		t.Fatalf("FinalMessage = %q, want Final answer", result.FinalMessage)
+	}
+	if !slices.Equal(sink.stdout, stdoutLines) {
+		t.Fatalf("stdout sink = %#v, want %#v", sink.stdout, stdoutLines)
+	}
+	if !slices.Equal(sink.stderr, []string{"kimi stderr diagnostic"}) {
+		t.Fatalf("stderr sink = %#v, want diagnostic line", sink.stderr)
+	}
+	if gotPrompt := readTextFile(t, promptPath); !strings.Contains(gotPrompt, "hello") {
+		t.Fatalf("prompt = %q, want hello", gotPrompt)
+	}
+}
+
 func kimiCommandScript(t *testing.T, stdout string) (string, string) {
 	t.Helper()
 
@@ -111,6 +151,7 @@ func kimiCommandScript(t *testing.T, stdout string) (string, string) {
 	scriptPath := filepath.Join(dir, "kimi-command.sh")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s' "$2" > %s
+printf 'kimi stderr diagnostic\n' >&2
 cat <<'EOF'
 %s
 EOF
@@ -119,6 +160,24 @@ EOF
 		t.Fatal(err)
 	}
 	return scriptPath, promptPath
+}
+
+type recordingSink struct {
+	stdout []string
+	stderr []string
+}
+
+func (s *recordingSink) StdoutLine(line string) { s.stdout = append(s.stdout, line) }
+func (s *recordingSink) StderrLine(line string) { s.stderr = append(s.stderr, line) }
+func (s *recordingSink) Err() error             { return nil }
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func readTextFile(t *testing.T, path string) string {
