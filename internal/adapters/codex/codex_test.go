@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
@@ -338,6 +340,41 @@ func TestSendStreamsStdoutAndStderr(t *testing.T) {
 	if gotPrompt := readTextFile(t, promptPath); !strings.Contains(gotPrompt, "hello") {
 		t.Fatalf("prompt = %q, want hello", gotPrompt)
 	}
+}
+
+func TestRunCommandStreamingKillsProcessOnScannerError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestCodexLargeLineHelperProcess", "--")
+	cmd.Env = append(os.Environ(), "CODEX_TEST_LARGE_LINE=1")
+
+	started := time.Now()
+	_, _, err := runCommandStreaming(ctx, cmd, domain.DiscardRunSink())
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("runCommandStreaming() error = nil, want scanner error")
+	}
+	if !strings.Contains(err.Error(), "token too long") {
+		t.Fatalf("runCommandStreaming() error = %v, want token too long", err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("runCommandStreaming() elapsed = %s, want process killed promptly after scanner error", elapsed)
+	}
+}
+
+func TestCodexLargeLineHelperProcess(t *testing.T) {
+	if os.Getenv("CODEX_TEST_LARGE_LINE") != "1" {
+		return
+	}
+	chunk := strings.Repeat("x", 1024)
+	for i := 0; i < maxJSONLEventSize/len(chunk)+1024; i++ {
+		if _, err := os.Stdout.WriteString(chunk); err != nil {
+			os.Exit(0)
+		}
+	}
+	time.Sleep(10 * time.Second)
+	os.Exit(0)
 }
 
 func TestBuildRunResultParsesStdoutOnlyAndPreservesStderr(t *testing.T) {

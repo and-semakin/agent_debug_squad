@@ -213,6 +213,9 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink
 			mu.Lock()
 			if scanErr == nil {
 				scanErr = err
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
 			}
 			mu.Unlock()
 		}
