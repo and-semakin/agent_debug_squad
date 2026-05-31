@@ -1,8 +1,10 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,7 +76,7 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +135,7 @@ func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +180,7 @@ func TestSendOmitsEmptyModelAndAgent(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +224,7 @@ func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +263,7 @@ func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	})
+	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +287,7 @@ func TestSendReturnsHTTPStatusError(t *testing.T) {
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	})
+	}, domain.DiscardRunSink())
 	if err == nil {
 		t.Fatal("Send() error = nil, want HTTP status error")
 	}
@@ -319,6 +321,38 @@ func TestInitCreatesSessionWhenMissing(t *testing.T) {
 	}
 	if state.BackendSessionID != "created_session" {
 		t.Fatalf("BackendSessionID = %q, want %q", state.BackendSessionID, "created_session")
+	}
+}
+
+func TestSendLogsUnsupportedYoloWarning(t *testing.T) {
+	var logs bytes.Buffer
+	previous := logger
+	logger = log.New(&logs, "", 0)
+	t.Cleanup(func() { logger = previous })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"parts": []map[string]any{{"type": "text", "text": "ok"}},
+		})
+	}))
+	defer server.Close()
+
+	enabled := true
+	spec := domain.AgentSpec{
+		Name:          "Critic",
+		Backend:       "opencode",
+		StartupPrompt: "Review.",
+		Yolo:          &enabled,
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Critic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{RunID: "run_1", Agent: "Critic", Message: "hello"}, domain.DiscardRunSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "backend=opencode yolo=true unsupported") {
+		t.Fatalf("logs = %q, want unsupported yolo warning", logs.String())
 	}
 }
 

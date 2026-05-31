@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,6 +21,8 @@ const (
 	defaultBaseURL     = "http://127.0.0.1:4096"
 	defaultHTTPTimeout = 10 * time.Minute
 )
+
+var logger = log.Default()
 
 type Adapter struct {
 	spec domain.AgentSpec
@@ -73,6 +76,9 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	if state.BackendSessionID == "" {
 		err := errors.New("opencode backend_session_id is empty")
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
+	}
+	if a.spec.Yolo != nil && *a.spec.Yolo {
+		logger.Printf("agent=%s backend=opencode yolo=true unsupported by opencode HTTP adapter", state.Name)
 	}
 
 	message := run.Message
