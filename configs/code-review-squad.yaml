@@ -39,11 +39,12 @@ agents:
       - в финальном ответе напечатай саммари прошедшей сессии: что обсуждали, какие улучшения были реализованы, какие коммиты появились, какие проблемы остались
     options:
       command: codex
+      env:
+        - HTTP_PROXY=http://br0ke:neskaju@72.56.83.57:3128
+        - HTTPS_PROXY=http://br0ke:neskaju@72.56.83.57:3128
+        - ALL_PROXY=http://br0ke:neskaju@72.56.83.57:3128
+        - NO_PROXY=127.0.0.1,localhost,minikube,*.avito.dev,*.avito.ru,*.k.avito.ru,*.db.avito-sd,192.168.*,*.avito.local,*.avito.lan,*.avito.sd,*.avito.st,*.k8s,raw.githubusercontent.com,registry.npmjs.org,proxy.golang.org,pypi.org,*github.com,github.com,pypi.python.org,repo.gradle.org,*schemastore.org,*maven.org,*json-schema.org,packagist.org,go.dev,*.avito-sd
       inherit_env:
-        - HTTP_PROXY
-        - HTTPS_PROXY
-        - ALL_PROXY
-        - NO_PROXY
         - PATH
         - HOME
         - CODEX_HOME
@@ -66,11 +67,12 @@ agents:
       За всю сессию ожидается ровно 3 хода Implementer: по одному после каждого круга обсуждения.
     options:
       command: codex
+      env:
+        - HTTP_PROXY=http://br0ke:neskaju@72.56.83.57:3128
+        - HTTPS_PROXY=http://br0ke:neskaju@72.56.83.57:3128
+        - ALL_PROXY=http://br0ke:neskaju@72.56.83.57:3128
+        - NO_PROXY=127.0.0.1,localhost,minikube,*.avito.dev,*.avito.ru,*.k.avito.ru,*.db.avito-sd,192.168.*,*.avito.local,*.avito.lan,*.avito.sd,*.avito.st,*.k8s,raw.githubusercontent.com,registry.npmjs.org,proxy.golang.org,pypi.org,*github.com,github.com,pypi.python.org,repo.gradle.org,*schemastore.org,*maven.org,*json-schema.org,packagist.org,go.dev,*.avito-sd
       inherit_env:
-        - HTTP_PROXY
-        - HTTPS_PROXY
-        - ALL_PROXY
-        - NO_PROXY
         - PATH
         - HOME
         - CODEX_HOME

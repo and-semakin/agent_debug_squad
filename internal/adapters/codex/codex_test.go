@@ -42,6 +42,38 @@ func TestBuildEnvOnlyIncludesWhitelistedVariables(t *testing.T) {
 	}
 }
 
+func TestBuildEnvIncludesExplicitEnvOptions(t *testing.T) {
+	spec := domain.AgentSpec{
+		ListOptions: map[string][]string{
+			"inherit_env": {"PATH"},
+			"env": {
+				"HTTP_PROXY=http://proxy.example:3128",
+				"NO_PROXY=127.0.0.1,localhost",
+			},
+		},
+	}
+	environ := []string{
+		"PATH=/usr/local/bin:/usr/bin",
+		"HTTP_PROXY=http://ambient-proxy.example:3128",
+	}
+
+	got := BuildEnv(spec, environ)
+
+	want := []string{
+		"PATH=/usr/local/bin:/usr/bin",
+		"HTTP_PROXY=http://proxy.example:3128",
+		"NO_PROXY=127.0.0.1,localhost",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("BuildEnv() len = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("BuildEnv()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestParseJSONLFindsCompletionAndFinalMessage(t *testing.T) {
 	data := []byte(`{"type":"item.completed","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}}
 {"type":"item.completed","item":{"type":"message","role":"assistant","text":"last"}}

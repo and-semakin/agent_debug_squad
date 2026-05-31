@@ -20,7 +20,7 @@ The server listens on `127.0.0.1:8090` and writes artifacts under:
 .agent-review-artifacts/
 ```
 
-The launcher exports the proxy variables needed by Codex. The YAML config whitelists those variables through `options.inherit_env` for the Codex-backed agents.
+The launcher does not export Codex proxy variables for the whole squad process. The YAML config sets those variables through `options.env` on the Codex-backed agents only. `options.inherit_env` is reserved for process-local values such as `PATH`, `HOME`, and `CODEX_HOME`.
 
 Agent state includes the configured `model` when an agent has one, so `GET /agents` and `sessions/<session_id>/agents/<agent_name>/state.json` show which model backs OpenCode-style agents.
 

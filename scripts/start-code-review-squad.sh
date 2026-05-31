@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export HTTP_PROXY="http://br0ke:neskaju@72.56.83.57:3128"
-export HTTPS_PROXY="http://br0ke:neskaju@72.56.83.57:3128"
-export ALL_PROXY="http://br0ke:neskaju@72.56.83.57:3128"
-export NO_PROXY="127.0.0.1,localhost,minikube,*.avito.dev,*.avito.ru,*.k.avito.ru,*.db.avito-sd,192.168.*,*.avito.local,*.avito.lan,*.avito.sd,*.avito.st,*.k8s,raw.githubusercontent.com,registry.npmjs.org,pypi.org,*github.com,github.com,pypi.python.org,repo.gradle.org,*schemastore.org,*maven.org,*json-schema.org,packagist.org,go.dev,*.avito-sd"
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
 
 OPENCODE_URL="http://127.0.0.1:4096"
 OPENCODE_PID=""

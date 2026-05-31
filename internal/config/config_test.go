@@ -184,8 +184,11 @@ func TestLoadProjectCodeReviewSquadConfig(t *testing.T) {
 	if facilitator.Name != "Facilitator" {
 		t.Fatalf("first agent = %q, want Facilitator", facilitator.Name)
 	}
-	if !containsString(facilitator.ListOptions["inherit_env"], "HTTP_PROXY") {
-		t.Fatalf("Facilitator inherit_env = %#v, want HTTP_PROXY", facilitator.ListOptions["inherit_env"])
+	if containsString(facilitator.ListOptions["inherit_env"], "HTTP_PROXY") {
+		t.Fatalf("Facilitator inherit_env = %#v, must not inherit HTTP_PROXY from squad process", facilitator.ListOptions["inherit_env"])
+	}
+	if !containsPrefix(facilitator.ListOptions["env"], "HTTP_PROXY=") {
+		t.Fatalf("Facilitator env = %#v, want explicit HTTP_PROXY", facilitator.ListOptions["env"])
 	}
 
 	critic := cfg.Agents[2]
@@ -208,6 +211,15 @@ func TestLoadProjectCodeReviewSquadConfig(t *testing.T) {
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPrefix(items []string, prefix string) bool {
+	for _, item := range items {
+		if strings.HasPrefix(item, prefix) {
 			return true
 		}
 	}

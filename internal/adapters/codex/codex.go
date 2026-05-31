@@ -52,6 +52,7 @@ func BuildEnv(spec domain.AgentSpec, environ []string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
+	env = append(env, spec.ListOptions["env"]...)
 	return env
 }
 
