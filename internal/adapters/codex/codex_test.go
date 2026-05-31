@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -266,8 +267,11 @@ func TestSendStoresBackendSessionIDFromThreadStarted(t *testing.T) {
 }
 
 func TestSendStreamsStdoutAndStderr(t *testing.T) {
-	script, promptPath := codexCommandScript(t, `{"type":"item.completed","item":{"type":"message","role":"assistant","text":"done"}}
-{"type":"turn.completed"}`)
+	stdoutLines := []string{
+		`{"type":"item.completed","item":{"type":"message","role":"assistant","text":"done"}}`,
+		`{"type":"turn.completed"}`,
+	}
+	script, promptPath := codexCommandScript(t, strings.Join(stdoutLines, "\n"))
 	sink := &recordingSink{}
 	spec := domain.AgentSpec{Name: "Reviewer", Backend: "codex", StartupPrompt: "Review.", StringOptions: map[string]string{"command": script}}
 	state := domain.AgentState{Name: "Reviewer", WorkspaceDir: t.TempDir()}
@@ -279,8 +283,11 @@ func TestSendStreamsStdoutAndStderr(t *testing.T) {
 	if result.FinalMessage != "done" {
 		t.Fatalf("FinalMessage = %q, want done", result.FinalMessage)
 	}
-	if len(sink.stdout) == 0 {
-		t.Fatalf("stdout sink empty")
+	if !slices.Equal(sink.stdout, stdoutLines) {
+		t.Fatalf("stdout sink = %#v, want %#v", sink.stdout, stdoutLines)
+	}
+	if !slices.Equal(sink.stderr, []string{"codex stderr diagnostic"}) {
+		t.Fatalf("stderr sink = %#v, want diagnostic line", sink.stderr)
 	}
 	if gotPrompt := readTextFile(t, promptPath); !strings.Contains(gotPrompt, "hello") {
 		t.Fatalf("prompt = %q, want hello", gotPrompt)
@@ -391,6 +398,7 @@ for arg in "$@"; do
   last="$arg"
 done
 printf '%%s' "$last" > %s
+printf 'codex stderr diagnostic\n' >&2
 cat <<'EOF'
 %s
 EOF
