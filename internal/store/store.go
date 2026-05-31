@@ -149,11 +149,11 @@ func (s *Store) appendRunArtifactLine(run domain.RunRecord, suffix string, line 
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", err
+		return path, err
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return "", err
+		return path, err
 	}
 	defer file.Close()
 	if _, err := file.WriteString(line + "\n"); err != nil {
