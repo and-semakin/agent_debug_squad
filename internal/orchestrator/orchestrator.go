@@ -73,6 +73,7 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 	}
 
 	for _, spec := range cfg.Agents {
+		spec = agentSpecWithDefaults(cfg, spec)
 		adapter, err := adapters.New(spec)
 		if err != nil {
 			return nil, err
@@ -112,6 +113,14 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 	}
 
 	return o, nil
+}
+
+func agentSpecWithDefaults(cfg domain.SessionConfig, spec domain.AgentSpec) domain.AgentSpec {
+	if spec.Yolo == nil {
+		yolo := cfg.AgentYolo(spec)
+		spec.Yolo = &yolo
+	}
+	return spec
 }
 
 func (o *Orchestrator) Agents() []domain.AgentState {

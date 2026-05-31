@@ -326,6 +326,48 @@ func TestNewPersistsAgentModelFromSpec(t *testing.T) {
 	}
 }
 
+func TestNewAppliesDefaultYoloToRuntimeSpec(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	cfg.Defaults.Yolo = false
+	s := store.New(cfg)
+
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rt := o.runtimes["Reviewer"]
+	if rt == nil {
+		t.Fatal("runtime for Reviewer not found")
+	}
+	if rt.spec.Yolo == nil || *rt.spec.Yolo {
+		t.Fatalf("runtime spec Yolo = %v, want false from defaults", rt.spec.Yolo)
+	}
+}
+
+func TestNewKeepsAgentYoloOverride(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	cfg.Defaults.Yolo = false
+	enabled := true
+	cfg.Agents[0].Yolo = &enabled
+	s := store.New(cfg)
+
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rt := o.runtimes["Reviewer"]
+	if rt == nil {
+		t.Fatal("runtime for Reviewer not found")
+	}
+	if rt.spec.Yolo == nil || !*rt.spec.Yolo {
+		t.Fatalf("runtime spec Yolo = %v, want true agent override", rt.spec.Yolo)
+	}
+}
+
 func TestRunFailsWhenFinalAgentStatePersistenceFails(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer")
@@ -380,6 +422,7 @@ func testConfig(t *testing.T, agentNames ...string) domain.SessionConfig {
 		StateDirName: ".agent-debug-squad",
 		Host:         "127.0.0.1",
 		Port:         8080,
+		Defaults:     domain.SessionDefaults{Yolo: true},
 		Agents:       agents,
 	}
 }
