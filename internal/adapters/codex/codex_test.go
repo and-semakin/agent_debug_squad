@@ -266,6 +266,52 @@ func TestSendStoresBackendSessionIDFromThreadStarted(t *testing.T) {
 	}
 }
 
+func TestSendAddsYoloFlagByDefault(t *testing.T) {
+	script, _, argvPath := codexCommandScriptWithArgv(t, `{"type":"turn.completed"}`)
+	spec := domain.AgentSpec{
+		Name:          "Reviewer",
+		Backend:       "codex",
+		StringOptions: map[string]string{"command": script},
+	}
+	state := domain.AgentState{Name: "Reviewer", WorkspaceDir: t.TempDir()}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Reviewer",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := readTextLines(t, argvPath); !containsString(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("argv = %#v, want yolo flag", args)
+	}
+}
+
+func TestSendOmitsYoloFlagWhenDisabled(t *testing.T) {
+	script, _, argvPath := codexCommandScriptWithArgv(t, `{"type":"turn.completed"}`)
+	disabled := false
+	spec := domain.AgentSpec{
+		Name:          "Reviewer",
+		Backend:       "codex",
+		Yolo:          &disabled,
+		StringOptions: map[string]string{"command": script},
+	}
+	state := domain.AgentState{Name: "Reviewer", WorkspaceDir: t.TempDir()}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Reviewer",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := readTextLines(t, argvPath); containsString(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("argv = %#v, want no yolo flag", args)
+	}
+}
+
 func TestSendStreamsStdoutAndStderr(t *testing.T) {
 	stdoutLines := []string{
 		`{"type":"item.completed","item":{"type":"message","role":"assistant","text":"done"}}`,
@@ -390,23 +436,32 @@ func TestBuildRunResultNonZeroExitUsesParsedTurnFailedError(t *testing.T) {
 func codexCommandScript(t *testing.T, stdout string) (string, string) {
 	t.Helper()
 
+	scriptPath, promptPath, _ := codexCommandScriptWithArgv(t, stdout)
+	return scriptPath, promptPath
+}
+
+func codexCommandScriptWithArgv(t *testing.T, stdout string) (string, string, string) {
+	t.Helper()
+
 	dir := t.TempDir()
 	promptPath := filepath.Join(dir, "prompt.txt")
+	argvPath := filepath.Join(dir, "argv.txt")
 	scriptPath := filepath.Join(dir, "codex-command.sh")
 	script := fmt.Sprintf(`#!/bin/sh
-for arg in "$@"; do
-  last="$arg"
+while [ "$#" -gt 1 ]; do
+  printf '%%s\n' "$1" >> %s
+  shift
 done
-printf '%%s' "$last" > %s
+printf '%%s' "$1" > %s
 printf 'codex stderr diagnostic\n' >&2
 cat <<'EOF'
 %s
 EOF
-`, shellQuote(promptPath), stdout)
+`, shellQuote(argvPath), shellQuote(promptPath), stdout)
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return scriptPath, promptPath
+	return scriptPath, promptPath, argvPath
 }
 
 type recordingSink struct {
@@ -435,6 +490,17 @@ func readTextFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func readTextLines(t *testing.T, path string) []string {
+	t.Helper()
+
+	text := readTextFile(t, path)
+	text = strings.TrimSuffix(text, "\n")
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
 }
 
 func shellQuote(value string) string {

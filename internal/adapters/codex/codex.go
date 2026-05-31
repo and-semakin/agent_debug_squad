@@ -220,8 +220,8 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink
 	wg.Add(2)
 	go scan(stdoutPipe, "stdout")
 	go scan(stderrPipe, "stderr")
-	waitErr := cmd.Wait()
 	wg.Wait()
+	waitErr := cmd.Wait()
 	if scanErr != nil {
 		return stdout.Bytes(), stderr.Bytes(), scanErr
 	}
