@@ -66,6 +66,33 @@ func TestSubmitRunCompletesAndWritesOutput(t *testing.T) {
 	}
 }
 
+func TestRunWorkerWritesStreamingEvents(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	s := store.New(cfg)
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "stream please", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	if _, err := o.Wait(ctx, run.RunID, time.Second); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+
+	path := filepath.Join(cfg.WorkspaceDir, cfg.StateDirName, "sessions", cfg.SessionID, "runs", run.RunID, run.Agent+".events.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(events) error = %v", err)
+	}
+	if !strings.Contains(string(data), "Reviewer received run run_000001") {
+		t.Fatalf("events = %q, want fake stream line", string(data))
+	}
+}
+
 func TestSubmitRunRejectsConcurrentRunForSameAgent(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer")

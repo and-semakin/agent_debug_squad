@@ -66,7 +66,10 @@ func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.
 	return state, nil
 }
 
-func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.RunRequest) (domain.RunResult, domain.AgentState, error) {
+func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.RunRequest, sink domain.RunSink) (domain.RunResult, domain.AgentState, error) {
+	if sink == nil {
+		sink = domain.DiscardRunSink()
+	}
 	if state.BackendSessionID == "" {
 		err := errors.New("opencode backend_session_id is empty")
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err

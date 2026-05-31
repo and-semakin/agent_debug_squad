@@ -127,7 +127,10 @@ func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.
 	return state, nil
 }
 
-func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.RunRequest) (domain.RunResult, domain.AgentState, error) {
+func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.RunRequest, sink domain.RunSink) (domain.RunResult, domain.AgentState, error) {
+	if sink == nil {
+		sink = domain.DiscardRunSink()
+	}
 	command := a.spec.StringOptions["command"]
 	if command == "" {
 		command = "codex"

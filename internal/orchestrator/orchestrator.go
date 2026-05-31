@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -310,12 +311,16 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	o.mu.Unlock()
 	_ = o.store.SaveAgentState(state)
 
+	sink := newRunSink(o.store, run, log.Default())
 	result, newState, sendErr := adapter.Send(ctx, state, domain.RunRequest{
 		RunID:    run.RunID,
 		Agent:    run.Agent,
 		Message:  run.Message,
 		Metadata: cloneMetadata(run.Metadata),
-	})
+	}, sink)
+	if sinkErr := sink.Err(); sinkErr != nil && sendErr == nil {
+		sendErr = sinkErr
+	}
 
 	completed := time.Now().UTC()
 	run.CompletedAt = &completed
