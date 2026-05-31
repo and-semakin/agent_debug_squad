@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
-const defaultBaseURL = "http://127.0.0.1:4096"
+const (
+	defaultBaseURL     = "http://127.0.0.1:4096"
+	defaultHTTPTimeout = 2 * time.Minute
+)
 
 type Adapter struct {
 	spec domain.AgentSpec
@@ -138,7 +142,7 @@ func (a *Adapter) postJSON(ctx context.Context, path string, body any, out any) 
 		req.SetBasicAuth(username, password)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := a.httpClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -156,6 +160,22 @@ func (a *Adapter) baseURL() string {
 		return defaultBaseURL
 	}
 	return baseURL
+}
+
+func (a *Adapter) httpClient() *http.Client {
+	return &http.Client{Timeout: a.httpTimeout()}
+}
+
+func (a *Adapter) httpTimeout() time.Duration {
+	value := strings.TrimSpace(a.spec.StringOptions["timeout_seconds"])
+	if value == "" {
+		return defaultHTTPTimeout
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return defaultHTTPTimeout
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func modelPayload(model string) map[string]string {

@@ -41,6 +41,9 @@ type agentRuntime struct {
 }
 
 func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orchestrator, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := s.SaveConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -51,7 +54,7 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 	o := &Orchestrator{
 		cfg:      cfg,
 		store:    s,
-		execCtx:  context.Background(),
+		execCtx:  ctx,
 		runtimes: map[string]*agentRuntime{},
 		waiters:  map[string]chan struct{}{},
 		nextRun:  1,

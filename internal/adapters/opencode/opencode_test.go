@@ -7,9 +7,36 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
+
+func TestHTTPClientUsesDefaultTimeout(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{},
+	}
+
+	if got := New(spec).httpClient().Timeout; got != defaultHTTPTimeout {
+		t.Fatalf("Timeout = %v, want %v", got, defaultHTTPTimeout)
+	}
+}
+
+func TestHTTPClientUsesConfiguredTimeoutSeconds(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"timeout_seconds": "3"},
+	}
+
+	if got := New(spec).httpClient().Timeout; got != 3*time.Second {
+		t.Fatalf("Timeout = %v, want %v", got, 3*time.Second)
+	}
+}
 
 func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 	var gotPath string

@@ -113,6 +113,32 @@ func TestSubmitRunContinuesAfterCallerContextCancelled(t *testing.T) {
 	}
 }
 
+func TestRootContextCancellationFailsRunningRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(context.Background(), "Reviewer", "cancel with process", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	cancel()
+
+	completed, err := o.Wait(context.Background(), run.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if completed.Status != domain.RunFailed {
+		t.Fatalf("Status = %q, want %q", completed.Status, domain.RunFailed)
+	}
+	if completed.Error == nil || !strings.Contains(*completed.Error, context.Canceled.Error()) {
+		t.Fatalf("Error = %v, want context canceled", completed.Error)
+	}
+}
+
 func TestWaitReturnsImmediatelyForCompletedRun(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer")
