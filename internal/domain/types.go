@@ -93,6 +93,22 @@ type RunResult struct {
 	BackendSessionID string
 }
 
+type RunSink interface {
+	StdoutLine(line string)
+	StderrLine(line string)
+	Err() error
+}
+
+type discardRunSink struct{}
+
+func (discardRunSink) StdoutLine(string) {}
+func (discardRunSink) StderrLine(string) {}
+func (discardRunSink) Err() error        { return nil }
+
+func DiscardRunSink() RunSink {
+	return discardRunSink{}
+}
+
 type TranscriptEvent struct {
 	Type       string            `json:"type"`
 	RunID      string            `json:"run_id"`

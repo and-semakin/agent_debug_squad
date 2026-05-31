@@ -135,6 +135,33 @@ func (s *Store) WriteRunStderr(run domain.RunRecord, text string) (string, error
 	return path, writeFileAtomic(path, []byte(text))
 }
 
+func (s *Store) AppendRunEvents(run domain.RunRecord, line string) (string, error) {
+	return s.appendRunArtifactLine(run, ".events.jsonl", line)
+}
+
+func (s *Store) AppendRunStderr(run domain.RunRecord, line string) (string, error) {
+	return s.appendRunArtifactLine(run, ".stderr.log", line)
+}
+
+func (s *Store) appendRunArtifactLine(run domain.RunRecord, suffix string, line string) (string, error) {
+	path, err := s.runArtifactPath(run.RunID, run.Agent, suffix)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if _, err := file.WriteString(line + "\n"); err != nil {
+		return "", err
+	}
+	return path, file.Sync()
+}
+
 func (s *Store) AppendTranscript(event domain.TranscriptEvent) error {
 	sessionDir, err := s.sessionDir()
 	if err != nil {

@@ -98,6 +98,44 @@ func TestStoreWritesAgentRunOutputAndTranscript(t *testing.T) {
 	}
 }
 
+func TestStoreAppendsRunEventsAndStderr(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{
+		SessionID:    "session_test",
+		WorkspaceDir: root,
+		StateDirName: ".agent-debug-squad",
+	}
+	s := New(cfg)
+	run := domain.RunRecord{RunID: "run_000001", Agent: "Reviewer"}
+
+	eventsPath, err := s.AppendRunEvents(run, "line one")
+	if err != nil {
+		t.Fatalf("AppendRunEvents(first) error = %v", err)
+	}
+	if _, err := s.AppendRunEvents(run, "line two"); err != nil {
+		t.Fatalf("AppendRunEvents(second) error = %v", err)
+	}
+	stderrPath, err := s.AppendRunStderr(run, "err one")
+	if err != nil {
+		t.Fatalf("AppendRunStderr(error) = %v", err)
+	}
+
+	events, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(eventsPath) error = %v", err)
+	}
+	if string(events) != "line one\nline two\n" {
+		t.Fatalf("events = %q", string(events))
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatalf("ReadFile(stderrPath) error = %v", err)
+	}
+	if string(stderr) != "err one\n" {
+		t.Fatalf("stderr = %q", string(stderr))
+	}
+}
+
 func TestMarkInterruptedUpdatesActiveRuns(t *testing.T) {
 	root := t.TempDir()
 	cfg := domain.SessionConfig{
