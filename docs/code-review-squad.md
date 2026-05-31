@@ -24,6 +24,17 @@ The launcher does not export Codex proxy variables for the whole squad process. 
 
 Agent state includes the configured `model` when an agent has one, so `GET /agents` and `sessions/<session_id>/agents/<agent_name>/state.json` show which model backs OpenCode-style agents.
 
+During a run, intermediate CLI output is written as it arrives:
+
+```text
+.agent-review-artifacts/sessions/<session_id>/runs/<run_id>/<agent>.events.jsonl
+.agent-review-artifacts/sessions/<session_id>/runs/<run_id>/<agent>.stderr.log
+```
+
+The same lines are also emitted to the `agent-debug-squad` server log with `run`, `agent`, and `stream` fields.
+
+YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Kimi uses `--yolo`. Set `options.yolo: false` on an agent to opt out.
+
 ## Agents
 
 - `Facilitator`: Codex. Owns the session flow and final summary.

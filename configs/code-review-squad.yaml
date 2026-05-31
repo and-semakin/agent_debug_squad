@@ -3,6 +3,8 @@ workspace_dir: .
 state_dir_name: .agent-review-artifacts
 host: 127.0.0.1
 port: 8090
+defaults:
+  yolo: true
 agents:
   - name: Facilitator
     backend: codex
