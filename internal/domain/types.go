@@ -25,18 +25,31 @@ type AgentSpec struct {
 	Backend       string              `json:"backend"`
 	StartupPrompt string              `json:"startup_prompt"`
 	Options       map[string]any      `json:"options,omitempty"`
+	Yolo          *bool               `json:"yolo,omitempty"`
 	StringOptions map[string]string   `json:"-"`
 	ListOptions   map[string][]string `json:"-"`
 }
 
+type SessionDefaults struct {
+	Yolo bool `json:"yolo"`
+}
+
 type SessionConfig struct {
-	SessionName  string      `json:"session_name"`
-	SessionID    string      `json:"session_id"`
-	WorkspaceDir string      `json:"workspace_dir"`
-	StateDirName string      `json:"state_dir_name"`
-	Host         string      `json:"host"`
-	Port         int         `json:"port"`
-	Agents       []AgentSpec `json:"agents"`
+	SessionName  string          `json:"session_name"`
+	SessionID    string          `json:"session_id"`
+	WorkspaceDir string          `json:"workspace_dir"`
+	StateDirName string          `json:"state_dir_name"`
+	Host         string          `json:"host"`
+	Port         int             `json:"port"`
+	Defaults     SessionDefaults `json:"defaults"`
+	Agents       []AgentSpec     `json:"agents"`
+}
+
+func (cfg SessionConfig) AgentYolo(spec AgentSpec) bool {
+	if spec.Yolo != nil {
+		return *spec.Yolo
+	}
+	return cfg.Defaults.Yolo
 }
 
 type AgentState struct {

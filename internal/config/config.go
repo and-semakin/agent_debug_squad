@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/andrey/agent-debug-squad/internal/domain"
@@ -14,12 +15,17 @@ import (
 )
 
 type rawConfig struct {
-	SessionName  string     `yaml:"session_name"`
-	WorkspaceDir string     `yaml:"workspace_dir"`
-	StateDirName string     `yaml:"state_dir_name"`
-	Host         string     `yaml:"host"`
-	Port         int        `yaml:"port"`
-	Agents       []rawAgent `yaml:"agents"`
+	SessionName  string      `yaml:"session_name"`
+	WorkspaceDir string      `yaml:"workspace_dir"`
+	StateDirName string      `yaml:"state_dir_name"`
+	Host         string      `yaml:"host"`
+	Port         int         `yaml:"port"`
+	Defaults     rawDefaults `yaml:"defaults"`
+	Agents       []rawAgent  `yaml:"agents"`
+}
+
+type rawDefaults struct {
+	Yolo *bool `yaml:"yolo"`
 }
 
 type rawAgent struct {
@@ -54,6 +60,11 @@ func Load(path string) (domain.SessionConfig, error) {
 	}
 	if raw.WorkspaceDir == "" {
 		return domain.SessionConfig{}, errors.New("workspace_dir is required")
+	}
+
+	defaults := domain.SessionDefaults{Yolo: true}
+	if raw.Defaults.Yolo != nil {
+		defaults.Yolo = *raw.Defaults.Yolo
 	}
 
 	workspace, err := filepath.Abs(raw.WorkspaceDir)
@@ -96,6 +107,12 @@ func Load(path string) (domain.SessionConfig, error) {
 			switch typed := value.(type) {
 			case string:
 				spec.StringOptions[key] = typed
+			case bool:
+				if key != "yolo" {
+					return domain.SessionConfig{}, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string, bool yolo, or list of strings", name, key, value)
+				}
+				spec.Yolo = &typed
+				spec.StringOptions[key] = strconv.FormatBool(typed)
 			case []any:
 				items := make([]string, 0, len(typed))
 				for _, item := range typed {
@@ -107,7 +124,7 @@ func Load(path string) (domain.SessionConfig, error) {
 				}
 				spec.ListOptions[key] = items
 			default:
-				return domain.SessionConfig{}, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string or list of strings", name, key, value)
+				return domain.SessionConfig{}, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string, bool yolo, or list of strings", name, key, value)
 			}
 		}
 		agents = append(agents, spec)
@@ -125,6 +142,7 @@ func Load(path string) (domain.SessionConfig, error) {
 		StateDirName: raw.StateDirName,
 		Host:         raw.Host,
 		Port:         raw.Port,
+		Defaults:     defaults,
 		Agents:       agents,
 	}, nil
 }

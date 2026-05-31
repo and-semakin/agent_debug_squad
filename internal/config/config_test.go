@@ -57,6 +57,68 @@ agents:
 	}
 }
 
+func TestLoadDefaultsYoloDefaultsToTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+agents:
+  - name: Reviewer
+    backend: fake
+    startup_prompt: Review.
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Defaults.Yolo {
+		t.Fatalf("Defaults.Yolo = false, want true")
+	}
+	if cfg.Agents[0].Yolo != nil {
+		t.Fatalf("agent Yolo = %v, want nil inherited default", cfg.Agents[0].Yolo)
+	}
+	if !cfg.AgentYolo(cfg.Agents[0]) {
+		t.Fatalf("AgentYolo(defaulted agent) = false, want true")
+	}
+}
+
+func TestLoadParsesDefaultsYoloAndAgentOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+defaults:
+  yolo: false
+agents:
+  - name: Reviewer
+    backend: codex
+    startup_prompt: Review.
+    options:
+      yolo: true
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.Yolo {
+		t.Fatalf("Defaults.Yolo = true, want false")
+	}
+	if cfg.Agents[0].Yolo == nil || !*cfg.Agents[0].Yolo {
+		t.Fatalf("agent Yolo = %v, want true override", cfg.Agents[0].Yolo)
+	}
+	if cfg.Agents[0].StringOptions["yolo"] != "true" {
+		t.Fatalf("StringOptions[yolo] = %q, want true", cfg.Agents[0].StringOptions["yolo"])
+	}
+}
+
 func TestLoadConfigRejectsDuplicateAgentNames(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "squad.yaml")
