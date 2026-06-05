@@ -65,6 +65,17 @@ type AgentState struct {
 	LastError        *string     `json:"last_error"`
 }
 
+type AgentResetResult struct {
+	Agent                    string      `json:"agent"`
+	PreviousBackendSessionID string      `json:"previous_backend_session_id"`
+	BackendSessionID         string      `json:"backend_session_id"`
+	Status                   AgentStatus `json:"status"`
+	ActiveRun                bool        `json:"active_run"`
+	PreviousRunID            string      `json:"previous_run_id,omitempty"`
+	Force                    bool        `json:"force"`
+	State                    AgentState  `json:"state"`
+}
+
 type RunRecord struct {
 	RunID       string            `json:"run_id"`
 	Agent       string            `json:"agent"`

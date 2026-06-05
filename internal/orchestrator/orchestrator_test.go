@@ -419,9 +419,22 @@ func TestResetAgentClearsIdleAgentContinuity(t *testing.T) {
 		t.Fatalf("Wait() error = %v", err)
 	}
 
-	reset, err := o.ResetAgent(ctx, "Reviewer", false)
+	result, err := o.ResetAgent(ctx, "Reviewer", false)
 	if err != nil {
 		t.Fatalf("ResetAgent() error = %v", err)
+	}
+	reset := result.State
+	if result.Agent != "Reviewer" {
+		t.Fatalf("Agent = %q, want Reviewer", result.Agent)
+	}
+	if result.PreviousBackendSessionID != "" {
+		t.Fatalf("PreviousBackendSessionID = %q, want empty initial fake session id", result.PreviousBackendSessionID)
+	}
+	if result.BackendSessionID != "fake_Reviewer_reset" {
+		t.Fatalf("BackendSessionID = %q, want fake_Reviewer_reset", result.BackendSessionID)
+	}
+	if result.ActiveRun {
+		t.Fatal("ActiveRun = true, want false")
 	}
 	if reset.Status != domain.AgentIdle {
 		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
@@ -552,9 +565,16 @@ func TestResetAgentForceInterruptsActiveRun(t *testing.T) {
 	}
 	waitForAgentStatus(t, o, "Reviewer", domain.AgentRunning)
 
-	reset, err := o.ResetAgent(ctx, "Reviewer", true)
+	result, err := o.ResetAgent(ctx, "Reviewer", true)
 	if err != nil {
 		t.Fatalf("ResetAgent(force) error = %v", err)
+	}
+	reset := result.State
+	if !result.ActiveRun {
+		t.Fatal("ActiveRun = false, want true")
+	}
+	if result.PreviousRunID != run.RunID {
+		t.Fatalf("PreviousRunID = %q, want %q", result.PreviousRunID, run.RunID)
 	}
 	if reset.Status != domain.AgentIdle {
 		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
@@ -592,19 +612,19 @@ func TestResetAgentForceWaitsForReleaseAfterInterruptWindowClosed(t *testing.T) 
 	o.mu.Unlock()
 
 	type resetResult struct {
-		state domain.AgentState
-		err   error
+		result domain.AgentResetResult
+		err    error
 	}
 	resultCh := make(chan resetResult, 1)
 	go func() {
-		state, err := o.ResetAgent(ctx, "Reviewer", true)
-		resultCh <- resetResult{state: state, err: err}
+		result, err := o.ResetAgent(ctx, "Reviewer", true)
+		resultCh <- resetResult{result: result, err: err}
 	}()
 
 	waitForRuntimeResetting(t, o, "Reviewer")
 	select {
 	case result := <-resultCh:
-		t.Fatalf("ResetAgent(force) returned before worker release: state = %#v, err = %v", result.state, result.err)
+		t.Fatalf("ResetAgent(force) returned before worker release: result = %#v, err = %v", result.result, result.err)
 	case <-time.After(20 * time.Millisecond):
 	}
 
@@ -619,8 +639,11 @@ func TestResetAgentForceWaitsForReleaseAfterInterruptWindowClosed(t *testing.T) 
 	if result.err != nil {
 		t.Fatalf("ResetAgent(force) error = %v", result.err)
 	}
-	if result.state.Status != domain.AgentIdle {
-		t.Fatalf("Status = %q, want %q", result.state.Status, domain.AgentIdle)
+	if result.result.State.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", result.result.State.Status, domain.AgentIdle)
+	}
+	if !result.result.ActiveRun {
+		t.Fatal("ActiveRun = false, want true because runtime was busy")
 	}
 
 	events, err := o.Transcript(ctx)

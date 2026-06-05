@@ -380,16 +380,25 @@ func TestResetAgentEndpointReturnsUpdatedState(t *testing.T) {
 	}
 	assertJSONContentType(t, rr)
 
-	var agent domain.AgentState
-	decodeResponse(t, rr, &agent)
-	if agent.Name != "Reviewer" {
-		t.Fatalf("Name = %q, want Reviewer", agent.Name)
+	var result domain.AgentResetResult
+	decodeResponse(t, rr, &result)
+	if result.Agent != "Reviewer" {
+		t.Fatalf("Agent = %q, want Reviewer", result.Agent)
 	}
-	if agent.LastRunID != "" {
-		t.Fatalf("LastRunID = %q, want empty", agent.LastRunID)
+	if result.PreviousBackendSessionID != "" {
+		t.Fatalf("PreviousBackendSessionID = %q, want empty initial fake session id", result.PreviousBackendSessionID)
 	}
-	if agent.Status != domain.AgentIdle {
-		t.Fatalf("Status = %q, want %q", agent.Status, domain.AgentIdle)
+	if result.BackendSessionID != "fake_Reviewer_reset" {
+		t.Fatalf("BackendSessionID = %q, want fake_Reviewer_reset", result.BackendSessionID)
+	}
+	if result.ActiveRun {
+		t.Fatal("ActiveRun = true, want false")
+	}
+	if result.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", result.Status, domain.AgentIdle)
+	}
+	if result.State.LastRunID != "" {
+		t.Fatalf("State.LastRunID = %q, want empty", result.State.LastRunID)
 	}
 }
 
@@ -434,10 +443,16 @@ func TestResetAgentEndpointForceInterruptsBusyAgent(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	var agent domain.AgentState
-	decodeResponse(t, rr, &agent)
-	if agent.LastRunID != "" {
-		t.Fatalf("LastRunID = %q, want empty", agent.LastRunID)
+	var result domain.AgentResetResult
+	decodeResponse(t, rr, &result)
+	if !result.ActiveRun {
+		t.Fatal("ActiveRun = false, want true")
+	}
+	if result.PreviousRunID != run.RunID {
+		t.Fatalf("PreviousRunID = %q, want %q", result.PreviousRunID, run.RunID)
+	}
+	if result.State.LastRunID != "" {
+		t.Fatalf("State.LastRunID = %q, want empty", result.State.LastRunID)
 	}
 
 	interrupted, err := srv.orchestrator.Run(context.Background(), run.RunID)

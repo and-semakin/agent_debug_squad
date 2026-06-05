@@ -57,6 +57,26 @@ curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/reset?force=true'
 
 Reset keeps existing run artifacts and appends an `agent_reset` event to `transcript.jsonl`. The next run after reset includes the agent startup prompt again.
 
+The reset response includes both audit fields and the full updated agent state:
+
+```json
+{
+  "agent": "Reviewer",
+  "previous_backend_session_id": "thread_old",
+  "backend_session_id": "thread_new_or_empty",
+  "status": "idle",
+  "active_run": false,
+  "force": false,
+  "state": {
+    "name": "Reviewer",
+    "last_run_id": "",
+    "status": "idle"
+  }
+}
+```
+
+If `POST /agents/{name}/reset` returns `404`, check that the running server binary is up to date and that the request is going to the expected host and port. Older `agent-debug-squad` server processes do not have the reset route; reinstall with `go install ./cmd/agent-debug-squad` and restart the server.
+
 ## Output Layout
 
 State is written below:

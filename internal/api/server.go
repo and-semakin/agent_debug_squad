@@ -182,7 +182,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleResetAgent(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "true"
 
-	agent, err := s.orchestrator.ResetAgent(r.Context(), r.PathValue("name"), force)
+	result, err := s.orchestrator.ResetAgent(r.Context(), r.PathValue("name"), force)
 	if errors.Is(err, orchestrator.ErrAgentNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -199,7 +199,7 @@ func (s *Server) handleResetAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agent)
+	writeJSON(w, http.StatusOK, result)
 }
 
 type createRunRequest struct {

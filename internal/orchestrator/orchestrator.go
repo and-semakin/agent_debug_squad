@@ -313,14 +313,17 @@ func (o *Orchestrator) Transcript(ctx context.Context) ([]domain.TranscriptEvent
 	return o.store.ReadTranscript()
 }
 
-func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force bool) (domain.AgentState, error) {
+func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force bool) (domain.AgentResetResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return domain.AgentState{}, err
+		return domain.AgentResetResult{}, err
 	}
 
+	var previousBackendSessionID string
+	var previousRunID string
+	var activeRun bool
 	var activeRunID string
 	var cancel context.CancelFunc
 	var activeRunDone <-chan struct{}
@@ -329,17 +332,20 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 	rt, ok := o.runtimes[agentName]
 	if !ok {
 		o.mu.Unlock()
-		return domain.AgentState{}, ErrAgentNotFound
+		return domain.AgentResetResult{}, ErrAgentNotFound
 	}
+	previousBackendSessionID = rt.state.BackendSessionID
 	if rt.resetting {
 		o.mu.Unlock()
-		return domain.AgentState{}, ErrAgentBusy
+		return domain.AgentResetResult{}, ErrAgentBusy
 	}
 	if rt.busy {
 		if !force {
 			o.mu.Unlock()
-			return domain.AgentState{}, ErrAgentBusy
+			return domain.AgentResetResult{}, ErrAgentBusy
 		}
+		activeRun = true
+		previousRunID = rt.activeRunID
 		activeRunDone = rt.activeRunDone
 		if rt.runInterruptible && rt.activeRunID != "" {
 			activeRunID = rt.activeRunID
@@ -363,7 +369,7 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 	}
 	if activeRunDone != nil {
 		if err := waitForWorkerDone(ctx, activeRunDone, forceResetTimeout); err != nil {
-			return domain.AgentState{}, err
+			return domain.AgentResetResult{}, err
 		}
 	}
 
@@ -377,14 +383,14 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 	reset, err := adapter.Reset(ctx, spec, state)
 	if err != nil {
 		o.markAgentResetFailure(agentName, state, err)
-		return domain.AgentState{}, err
+		return domain.AgentResetResult{}, err
 	}
 	if reset.WorkspaceDir == "" {
 		reset.WorkspaceDir = o.cfg.WorkspaceDir
 	}
 	if err := o.store.SaveAgentState(reset); err != nil {
 		o.markAgentResetFailure(agentName, reset, err)
-		return domain.AgentState{}, err
+		return domain.AgentResetResult{}, err
 	}
 	if err := o.store.AppendTranscript(domain.TranscriptEvent{
 		Type:     "agent_reset",
@@ -394,7 +400,7 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 		At:       time.Now().UTC(),
 	}); err != nil {
 		o.markAgentResetFailure(agentName, reset, err)
-		return domain.AgentState{}, err
+		return domain.AgentResetResult{}, err
 	}
 
 	o.mu.Lock()
@@ -402,7 +408,16 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 		current.state = reset
 	}
 	o.mu.Unlock()
-	return reset, nil
+	return domain.AgentResetResult{
+		Agent:                    reset.Name,
+		PreviousBackendSessionID: previousBackendSessionID,
+		BackendSessionID:         reset.BackendSessionID,
+		Status:                   reset.Status,
+		ActiveRun:                activeRun,
+		PreviousRunID:            previousRunID,
+		Force:                    force,
+		State:                    reset,
+	}, nil
 }
 
 func waitForWorkerDone(ctx context.Context, done <-chan struct{}, timeout time.Duration) error {
