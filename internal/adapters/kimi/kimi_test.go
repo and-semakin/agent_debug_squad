@@ -110,15 +110,15 @@ func TestResetClearsSessionContinuity(t *testing.T) {
 	}
 }
 
-func TestBuildArgsAddsYoloByDefault(t *testing.T) {
-	args := buildArgs("hello", true)
-	if !containsString(args, "--yolo") {
-		t.Fatalf("args = %#v, want --yolo", args)
+func TestBuildArgsOmitsYoloInPromptMode(t *testing.T) {
+	args := buildArgs("hello")
+	if containsString(args, "--yolo") {
+		t.Fatalf("args = %#v, want no --yolo because Kimi prompt mode rejects it", args)
 	}
 }
 
 func TestBuildArgsOmitsYoloWhenDisabled(t *testing.T) {
-	args := buildArgs("hello", false)
+	args := buildArgs("hello")
 	if containsString(args, "--yolo") {
 		t.Fatalf("args = %#v, want no --yolo", args)
 	}
@@ -154,7 +154,7 @@ func TestSendIncludesStartupPromptEveryRun(t *testing.T) {
 	}
 }
 
-func TestSendAddsYoloByDefault(t *testing.T) {
+func TestSendOmitsYoloInPromptMode(t *testing.T) {
 	script, _, argvPath := kimiCommandScriptWithArgv(t, `{"type":"assistant","message":{"content":"done"}}`)
 	spec := domain.AgentSpec{
 		Name:          "Advocat",
@@ -171,8 +171,8 @@ func TestSendAddsYoloByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if args := readTextLines(t, argvPath); !containsString(args, "--yolo") {
-		t.Fatalf("argv = %#v, want --yolo", args)
+	if args := readTextLines(t, argvPath); containsString(args, "--yolo") {
+		t.Fatalf("argv = %#v, want no --yolo because Kimi prompt mode rejects it", args)
 	}
 }
 

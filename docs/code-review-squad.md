@@ -33,7 +33,7 @@ During a run, intermediate CLI output is written as it arrives:
 
 The same lines are also emitted to the `agent-debug-squad` server log with `run`, `agent`, and `stream` fields.
 
-YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Kimi uses `--yolo`. Set `options.yolo: false` on an agent to opt out.
+YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags. Set `options.yolo: false` on an agent to opt out.
 
 ## Agents
 
