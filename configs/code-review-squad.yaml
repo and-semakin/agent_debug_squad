@@ -41,6 +41,8 @@ agents:
       - в финальном ответе напечатай саммари прошедшей сессии: что обсуждали, какие улучшения были реализованы, какие коммиты появились, какие проблемы остались
     options:
       command: codex
+      model: gpt-5.5
+      reasoning: high
       env:
         - HTTP_PROXY=http://br0ke:neskaju@72.56.83.57:3128
         - HTTPS_PROXY=http://br0ke:neskaju@72.56.83.57:3128
@@ -69,6 +71,8 @@ agents:
       За всю сессию ожидается ровно 3 хода Implementer: по одному после каждого круга обсуждения.
     options:
       command: codex
+      model: gpt-5.3-codex
+      reasoning: medium
       env:
         - HTTP_PROXY=http://br0ke:neskaju@72.56.83.57:3128
         - HTTPS_PROXY=http://br0ke:neskaju@72.56.83.57:3128

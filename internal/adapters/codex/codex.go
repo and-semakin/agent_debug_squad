@@ -167,6 +167,12 @@ func buildArgs(spec domain.AgentSpec, state domain.AgentState, message string, y
 	if yolo {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	}
+	if model := spec.StringOptions["model"]; model != "" {
+		args = append(args, "--model", model)
+	}
+	if reasoning := spec.StringOptions["reasoning"]; reasoning != "" {
+		args = append(args, "-c", `model_reasoning_effort='"`+reasoning+`"'`)
+	}
 	if state.BackendSessionID != "" {
 		args = append(args, "resume", state.BackendSessionID)
 	}

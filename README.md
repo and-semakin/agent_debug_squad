@@ -64,8 +64,12 @@ agents:
     startup_prompt: Review the proposed fix and identify risks.
     options:
       command: codex
+      model: gpt-5.5
+      reasoning: medium
       inherit_env:
         - OPENAI_API_KEY
         - CODEX_HOME
         - PATH
 ```
+
+`model` maps to Codex `--model`. `reasoning` maps to Codex `model_reasoning_effort`; omit either key to use the default from Codex configuration.

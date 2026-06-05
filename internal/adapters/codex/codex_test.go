@@ -182,6 +182,67 @@ func TestBuildArgsOmitsYoloFlagWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildArgsAddsModelWhenConfigured(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:    "Reviewer",
+		Backend: "codex",
+		StringOptions: map[string]string{
+			"model": "gpt-5.5",
+		},
+	}
+
+	args := buildArgs(spec, domain.AgentState{}, "hello", false)
+
+	if !containsString(args, "--model") || !containsString(args, "gpt-5.5") {
+		t.Fatalf("args = %#v, want --model gpt-5.5", args)
+	}
+}
+
+func TestBuildArgsAddsReasoningWhenConfigured(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:    "Reviewer",
+		Backend: "codex",
+		StringOptions: map[string]string{
+			"reasoning": "medium",
+		},
+	}
+
+	args := buildArgs(spec, domain.AgentState{}, "hello", false)
+
+	if !containsString(args, "-c") || !containsString(args, `model_reasoning_effort='"medium"'`) {
+		t.Fatalf("args = %#v, want reasoning config override", args)
+	}
+}
+
+func TestBuildArgsPlacesModelAndReasoningBeforeResumeAndPrompt(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:    "Reviewer",
+		Backend: "codex",
+		StringOptions: map[string]string{
+			"model":     "gpt-5.3-codex",
+			"reasoning": "high",
+		},
+	}
+	state := domain.AgentState{BackendSessionID: "thread_123"}
+
+	args := buildArgs(spec, state, "hello", false)
+
+	want := []string{
+		"exec",
+		"--json",
+		"--model",
+		"gpt-5.3-codex",
+		"-c",
+		`model_reasoning_effort='"high"'`,
+		"resume",
+		"thread_123",
+		"hello",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
 func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 	script, promptPath := codexCommandScript(t, `{"type":"turn.completed"}`)
 	spec := domain.AgentSpec{
@@ -311,6 +372,42 @@ func TestSendOmitsYoloFlagWhenDisabled(t *testing.T) {
 	}
 	if args := readTextLines(t, argvPath); containsString(args, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("argv = %#v, want no yolo flag", args)
+	}
+}
+
+func TestSendIncludesModelAndReasoningArgs(t *testing.T) {
+	script, _, argvPath := codexCommandScriptWithArgv(t, `{"type":"turn.completed"}`)
+	spec := domain.AgentSpec{
+		Name:    "Reviewer",
+		Backend: "codex",
+		StringOptions: map[string]string{
+			"command":   script,
+			"model":     "gpt-5.3-codex",
+			"reasoning": "medium",
+		},
+	}
+	state := domain.AgentState{Name: "Reviewer", WorkspaceDir: t.TempDir()}
+
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Reviewer",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"exec",
+		"--json",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--model",
+		"gpt-5.3-codex",
+		"-c",
+		`model_reasoning_effort='"medium"'`,
+	}
+	if args := readTextLines(t, argvPath); !slices.Equal(args, want) {
+		t.Fatalf("argv = %#v, want %#v", args, want)
 	}
 }
 
