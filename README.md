@@ -34,6 +34,14 @@ curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/runs?wait=true&timeout_secon
   -d '{"message":"Review this debugging hypothesis."}'
 ```
 
+Wait for an existing run without starting another one:
+
+```sh
+curl -X GET 'http://127.0.0.1:8080/runs/run_000001?wait=true&timeout_seconds=600'
+```
+
+If the wait timeout expires before the run finishes, the response is still `200 OK` with the latest `RunRecord`, and the agent continues running in the background.
+
 Reset an idle or failed agent so its next run starts in a fresh backend session:
 
 ```sh
