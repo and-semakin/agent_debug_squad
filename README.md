@@ -41,6 +41,7 @@ curl -X GET 'http://127.0.0.1:8080/runs/run_000001?wait=true&timeout_seconds=600
 ```
 
 If the wait timeout expires before the run finishes, the response is still `200 OK` with the latest `RunRecord`, and the run continues in the background.
+When `timeout_seconds` is omitted, `POST /agents/{name}/runs?wait=true` waits up to 60 seconds and `GET /runs/{run_id}?wait=true` waits up to 30 seconds.
 
 Reset an idle or failed agent so its next run starts in a fresh backend session:
 
