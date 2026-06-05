@@ -122,6 +122,28 @@ func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.
 	return state, nil
 }
 
+func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	id, err := a.createSession(ctx)
+	if err != nil {
+		return state, err
+	}
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = time.Now().UTC()
+	}
+	state.Name = spec.Name
+	state.Backend = spec.Backend
+	state.Model = spec.StringOptions["model"]
+	state.StartupPrompt = spec.StartupPrompt
+	state.BackendSessionID = id
+	state.Status = domain.AgentIdle
+	state.LastRunID = ""
+	state.LastError = nil
+	return state, nil
+}
+
 func (a *Adapter) createSession(ctx context.Context) (string, error) {
 	var response sessionResponse
 	if err := a.postJSON(ctx, "/session", map[string]any{"title": a.spec.Name}, &response); err != nil {

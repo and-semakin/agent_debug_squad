@@ -3,6 +3,8 @@ package fake
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/andrey/agent-debug-squad/internal/domain"
@@ -42,7 +44,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	select {
 	case <-ctx.Done():
 		return domain.RunResult{}, state, ctx.Err()
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(a.delay()):
 	}
 	state.LastRunID = run.RunID
 	state.Status = domain.AgentIdle
@@ -57,4 +59,34 @@ func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.
 	}
 	state.Status = domain.AgentIdle
 	return state, nil
+}
+
+func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = time.Now().UTC()
+	}
+	state.Name = spec.Name
+	state.Backend = spec.Backend
+	state.Model = spec.StringOptions["model"]
+	state.StartupPrompt = spec.StartupPrompt
+	state.BackendSessionID = "fake_" + spec.Name + "_reset"
+	state.Status = domain.AgentIdle
+	state.LastRunID = ""
+	state.LastError = nil
+	return state, nil
+}
+
+func (a *Adapter) delay() time.Duration {
+	value := strings.TrimSpace(a.spec.StringOptions["delay_ms"])
+	if value == "" {
+		return 50 * time.Millisecond
+	}
+	ms, err := strconv.Atoi(value)
+	if err != nil || ms < 0 {
+		return 50 * time.Millisecond
+	}
+	return time.Duration(ms) * time.Millisecond
 }

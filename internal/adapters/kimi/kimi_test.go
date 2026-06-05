@@ -74,6 +74,42 @@ func TestBuildRunResultErrorsWhenNoAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestResetClearsSessionContinuity(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:          "Implementer",
+		Backend:       "kimi",
+		StartupPrompt: "Implement carefully.",
+	}
+	errText := "old error"
+	state := domain.AgentState{
+		Name:             "Implementer",
+		Backend:          "kimi",
+		StartupPrompt:    "Implement carefully.",
+		WorkspaceDir:     t.TempDir(),
+		BackendSessionID: "kimi_old",
+		Status:           domain.AgentFailed,
+		LastRunID:        "run_000123",
+		LastError:        &errText,
+	}
+
+	reset, err := New(spec).Reset(context.Background(), spec, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.BackendSessionID != "" {
+		t.Fatalf("BackendSessionID = %q, want empty", reset.BackendSessionID)
+	}
+	if reset.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", reset.LastRunID)
+	}
+	if reset.LastError != nil {
+		t.Fatalf("LastError = %v, want nil", reset.LastError)
+	}
+	if reset.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
+	}
+}
+
 func TestBuildArgsAddsYoloByDefault(t *testing.T) {
 	args := buildArgs("hello", true)
 	if !containsString(args, "--yolo") {

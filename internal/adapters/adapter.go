@@ -15,6 +15,7 @@ type AgentAdapter interface {
 	Init(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error)
 	Send(ctx context.Context, state domain.AgentState, run domain.RunRequest, sink domain.RunSink) (domain.RunResult, domain.AgentState, error)
 	Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error)
+	Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error)
 }
 
 func New(spec domain.AgentSpec) (AgentAdapter, error) {

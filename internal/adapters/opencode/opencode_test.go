@@ -40,6 +40,56 @@ func TestHTTPClientUsesConfiguredTimeoutSeconds(t *testing.T) {
 	}
 }
 
+func TestResetCreatesNewSessionAndClearsContinuity(t *testing.T) {
+	var sessionCreates int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/session" {
+			t.Fatalf("request = %s %s, want POST /session", r.Method, r.URL.Path)
+		}
+		sessionCreates++
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "session_new"})
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	errText := "old error"
+	state := domain.AgentState{
+		Name:             "Skeptic",
+		Backend:          "opencode",
+		StartupPrompt:    "Challenge assumptions.",
+		WorkspaceDir:     t.TempDir(),
+		BackendSessionID: "session_old",
+		Status:           domain.AgentFailed,
+		LastRunID:        "run_000123",
+		LastError:        &errText,
+	}
+
+	reset, err := New(spec).Reset(context.Background(), spec, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionCreates != 1 {
+		t.Fatalf("sessionCreates = %d, want 1", sessionCreates)
+	}
+	if reset.BackendSessionID != "session_new" {
+		t.Fatalf("BackendSessionID = %q, want session_new", reset.BackendSessionID)
+	}
+	if reset.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", reset.LastRunID)
+	}
+	if reset.LastError != nil {
+		t.Fatalf("LastError = %v, want nil", reset.LastError)
+	}
+	if reset.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
+	}
+}
+
 func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 	var gotPath string
 	var gotBody map[string]any
