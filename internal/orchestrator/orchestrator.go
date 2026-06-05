@@ -21,7 +21,10 @@ var (
 	ErrAgentBusy     = errors.New("agent busy")
 	ErrRunNotFound   = errors.New("run not found")
 	ErrWaitTimeout   = errors.New("wait timeout")
+	ErrResetTimeout  = errors.New("reset timeout")
 )
+
+const forceResetTimeout = 5 * time.Second
 
 type Orchestrator struct {
 	cfg     domain.SessionConfig
@@ -36,10 +39,16 @@ type Orchestrator struct {
 }
 
 type agentRuntime struct {
-	spec    domain.AgentSpec
-	state   domain.AgentState
-	adapter adapters.AgentAdapter
-	busy    bool
+	spec              domain.AgentSpec
+	state             domain.AgentState
+	adapter           adapters.AgentAdapter
+	busy              bool
+	resetting         bool
+	activeRunID       string
+	cancelActiveRun   context.CancelFunc
+	activeRunDone     chan struct{}
+	runInterruptible  bool
+	interruptingRunID string
 }
 
 func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orchestrator, error) {
@@ -154,14 +163,19 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 		o.mu.Unlock()
 		return domain.RunRecord{}, ErrAgentNotFound
 	}
-	if rt.busy {
+	if rt.busy || rt.resetting {
 		o.mu.Unlock()
 		return domain.RunRecord{}, ErrAgentBusy
 	}
 
 	runID := fmt.Sprintf("run_%06d", o.nextRun)
 	o.nextRun++
+	runCtx, cancel := context.WithCancel(o.execCtx)
 	rt.busy = true
+	rt.activeRunID = runID
+	rt.cancelActiveRun = cancel
+	rt.activeRunDone = make(chan struct{})
+	rt.runInterruptible = true
 	run := domain.RunRecord{
 		RunID:     runID,
 		Agent:     agentName,
@@ -174,6 +188,7 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 	o.mu.Unlock()
 
 	if err := o.store.SaveRun(run); err != nil {
+		cancel()
 		o.releaseAgent(agentName)
 		o.notify(runID)
 		return domain.RunRecord{}, err
@@ -186,13 +201,14 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 		Metadata: cloneMetadata(metadata),
 		At:       run.CreatedAt,
 	}); err != nil {
+		cancel()
 		o.releaseAgent(agentName)
 		o.notify(runID)
 		return domain.RunRecord{}, err
 	}
 
 	o.workerWG.Add(1)
-	go o.runWorker(o.execCtx, agentName, run, waiter)
+	go o.runWorker(runCtx, agentName, run, waiter)
 	return run, nil
 }
 
@@ -297,14 +313,124 @@ func (o *Orchestrator) Transcript(ctx context.Context) ([]domain.TranscriptEvent
 	return o.store.ReadTranscript()
 }
 
+func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force bool) (domain.AgentState, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return domain.AgentState{}, err
+	}
+
+	var activeRunID string
+	var cancel context.CancelFunc
+	var activeRunDone <-chan struct{}
+
+	o.mu.Lock()
+	rt, ok := o.runtimes[agentName]
+	if !ok {
+		o.mu.Unlock()
+		return domain.AgentState{}, ErrAgentNotFound
+	}
+	if rt.resetting {
+		o.mu.Unlock()
+		return domain.AgentState{}, ErrAgentBusy
+	}
+	if rt.busy {
+		if !force {
+			o.mu.Unlock()
+			return domain.AgentState{}, ErrAgentBusy
+		}
+		activeRunDone = rt.activeRunDone
+		if rt.runInterruptible && rt.activeRunID != "" {
+			activeRunID = rt.activeRunID
+			cancel = rt.cancelActiveRun
+			rt.interruptingRunID = activeRunID
+		}
+	}
+	rt.resetting = true
+	o.mu.Unlock()
+
+	defer func() {
+		o.mu.Lock()
+		if rt := o.runtimes[agentName]; rt != nil {
+			rt.resetting = false
+		}
+		o.mu.Unlock()
+	}()
+
+	if activeRunID != "" && cancel != nil {
+		cancel()
+	}
+	if activeRunDone != nil {
+		if err := waitForWorkerDone(ctx, activeRunDone, forceResetTimeout); err != nil {
+			return domain.AgentState{}, err
+		}
+	}
+
+	o.mu.Lock()
+	rt = o.runtimes[agentName]
+	state := rt.state
+	spec := rt.spec
+	adapter := rt.adapter
+	o.mu.Unlock()
+
+	reset, err := adapter.Reset(ctx, spec, state)
+	if err != nil {
+		o.markAgentResetFailure(agentName, state, err)
+		return domain.AgentState{}, err
+	}
+	if reset.WorkspaceDir == "" {
+		reset.WorkspaceDir = o.cfg.WorkspaceDir
+	}
+	if err := o.store.SaveAgentState(reset); err != nil {
+		o.markAgentResetFailure(agentName, reset, err)
+		return domain.AgentState{}, err
+	}
+	if err := o.store.AppendTranscript(domain.TranscriptEvent{
+		Type:     "agent_reset",
+		Agent:    agentName,
+		Status:   resetEventStatus(force, activeRunID),
+		Metadata: resetMetadata(force, activeRunID),
+		At:       time.Now().UTC(),
+	}); err != nil {
+		o.markAgentResetFailure(agentName, reset, err)
+		return domain.AgentState{}, err
+	}
+
+	o.mu.Lock()
+	if current := o.runtimes[agentName]; current != nil {
+		current.state = reset
+	}
+	o.mu.Unlock()
+	return reset, nil
+}
+
+func waitForWorkerDone(ctx context.Context, done <-chan struct{}, timeout time.Duration) error {
+	var timeoutC <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutC = timer.C
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-timeoutC:
+		return ErrResetTimeout
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run domain.RunRecord, waiter chan struct{}) {
 	defer func() {
 		defer o.workerWG.Done()
-		o.releaseAgent(agentName)
 		close(waiter)
 		o.mu.Lock()
 		delete(o.waiters, run.RunID)
 		o.mu.Unlock()
+		o.releaseAgent(agentName)
 	}()
 
 	started := time.Now().UTC()
@@ -352,7 +478,14 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		}
 	}
 
-	if sendErr != nil || result.ErrorMessage != "" {
+	interruptedByReset := o.finishRunInterruptible(agentName, run.RunID)
+	if interruptedByReset {
+		run.Status = domain.RunInterrupted
+		message := "interrupted by force reset"
+		run.Error = &message
+		newState.Status = domain.AgentIdle
+		newState.LastError = nil
+	} else if sendErr != nil || result.ErrorMessage != "" {
 		run.Status = domain.RunFailed
 		message := result.ErrorMessage
 		if message == "" {
@@ -404,12 +537,48 @@ func markPersistenceFailure(run *domain.RunRecord, state *domain.AgentState, err
 	state.LastError = &message
 }
 
+func (o *Orchestrator) markAgentResetFailure(agentName string, state domain.AgentState, err error) {
+	message := err.Error()
+	state.Status = domain.AgentFailed
+	state.LastError = &message
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if rt := o.runtimes[agentName]; rt != nil {
+		rt.state = state
+		_ = o.store.SaveAgentState(state)
+	}
+}
+
 func (o *Orchestrator) releaseAgent(agentName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if rt, ok := o.runtimes[agentName]; ok {
+		if rt.activeRunDone != nil {
+			close(rt.activeRunDone)
+		}
 		rt.busy = false
+		rt.activeRunID = ""
+		rt.cancelActiveRun = nil
+		rt.activeRunDone = nil
+		rt.runInterruptible = false
+		rt.interruptingRunID = ""
 	}
+}
+
+func (o *Orchestrator) finishRunInterruptible(agentName, runID string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	rt, ok := o.runtimes[agentName]
+	if !ok || rt.activeRunID != runID {
+		return false
+	}
+	rt.runInterruptible = false
+	if rt.interruptingRunID != runID {
+		return false
+	}
+	rt.interruptingRunID = ""
+	return true
 }
 
 func (o *Orchestrator) notify(runID string) {
@@ -463,6 +632,21 @@ func cloneMetadata(metadata map[string]string) map[string]string {
 		clone[k] = v
 	}
 	return clone
+}
+
+func resetMetadata(force bool, previousRunID string) map[string]string {
+	metadata := map[string]string{"force": strconv.FormatBool(force)}
+	if previousRunID != "" {
+		metadata["previous_run_id"] = previousRunID
+	}
+	return metadata
+}
+
+func resetEventStatus(force bool, previousRunID string) domain.RunStatus {
+	if force && previousRunID != "" {
+		return domain.RunInterrupted
+	}
+	return ""
 }
 
 func isTerminal(status domain.RunStatus) bool {
