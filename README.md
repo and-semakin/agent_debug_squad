@@ -74,7 +74,7 @@ State is written below:
 
 With `examples/squad.yaml`, that starts under `./.agent-debug-squad/sessions/<session_id>/`.
 
-CLI-backed agents stream intermediate stdout into `.events.jsonl` and stderr into `.stderr.log` while the run is still active. The same lines are emitted to the server log with `run`, `agent`, and `stream` fields. YOLO mode defaults to `defaults.yolo: true`; Codex uses `--dangerously-bypass-approvals-and-sandbox`, Kimi uses `--yolo`, and an agent can opt out with `options.yolo: false`.
+CLI-backed agents stream intermediate stdout into `.events.jsonl` and stderr into `.stderr.log` while the run is still active. The same lines are emitted to the server log with `run`, `agent`, and `stream` fields. YOLO mode defaults to `defaults.yolo: true`; Codex uses `--dangerously-bypass-approvals-and-sandbox`, while Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags. An agent can opt out with `options.yolo: false`.
 
 ## Codex Environment Whitelist
 

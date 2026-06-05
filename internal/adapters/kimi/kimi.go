@@ -85,11 +85,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		command = "kimi"
 	}
 
-	yolo := true
-	if a.spec.Yolo != nil {
-		yolo = *a.spec.Yolo
-	}
-	args := buildArgs(promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message), yolo)
+	args := buildArgs(promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message))
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
@@ -145,12 +141,8 @@ func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain
 	return state, nil
 }
 
-func buildArgs(prompt string, yolo bool) []string {
-	args := []string{"-p", prompt, "--output-format", "stream-json"}
-	if yolo {
-		args = append(args, "--yolo")
-	}
-	return args
+func buildArgs(prompt string) []string {
+	return []string{"-p", prompt, "--output-format", "stream-json"}
 }
 
 func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink) ([]byte, []byte, error) {
