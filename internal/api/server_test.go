@@ -137,6 +137,18 @@ func TestUnknownRunReturnsNotFound(t *testing.T) {
 	assertJSONContentType(t, rr)
 }
 
+func TestGetRunWaitUnknownRunReturnsNotFound(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/run_missing?wait=true&timeout_seconds=1", nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+}
+
 func TestWaitTrueCompletesWithOutputPath(t *testing.T) {
 	srv := newTestServer(t, "Reviewer")
 
@@ -158,6 +170,94 @@ func TestWaitTrueCompletesWithOutputPath(t *testing.T) {
 	}
 	if run.OutputPath == nil || *run.OutputPath == "" {
 		t.Fatalf("OutputPath = %v, want non-empty", run.OutputPath)
+	}
+}
+
+func TestGetRunWaitTrueCompletesWithOutputPath(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	create := httptest.NewRecorder()
+	srv.ServeHTTP(create, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{
+		Message: "finish",
+	}))
+	if create.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body = %s", create.Code, http.StatusAccepted, create.Body.String())
+	}
+	var created domain.RunRecord
+	decodeResponse(t, create, &created)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/"+created.RunID+"?wait=true&timeout_seconds=1", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+
+	var run domain.RunRecord
+	decodeResponse(t, rr, &run)
+	if run.RunID != created.RunID {
+		t.Fatalf("RunID = %q, want %q", run.RunID, created.RunID)
+	}
+	if run.Status != domain.RunCompleted {
+		t.Fatalf("Status = %q, want %q", run.Status, domain.RunCompleted)
+	}
+	if run.OutputPath == nil || *run.OutputPath == "" {
+		t.Fatalf("OutputPath = %v, want non-empty", run.OutputPath)
+	}
+}
+
+func TestGetRunWaitTimeoutReturnsCurrentRunAndDoesNotStopAgent(t *testing.T) {
+	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
+		cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "1500"}
+	}, "Reviewer")
+
+	create := httptest.NewRecorder()
+	srv.ServeHTTP(create, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{
+		Message: "slow",
+	}))
+	if create.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body = %s", create.Code, http.StatusAccepted, create.Body.String())
+	}
+	var created domain.RunRecord
+	decodeResponse(t, create, &created)
+	waitForAgentStatus(t, srv, "Reviewer", domain.AgentRunning)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/"+created.RunID+"?wait=true&timeout_seconds=1", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+
+	var run domain.RunRecord
+	decodeResponse(t, rr, &run)
+	if run.RunID != created.RunID {
+		t.Fatalf("RunID = %q, want %q", run.RunID, created.RunID)
+	}
+	if run.Status != domain.RunQueued && run.Status != domain.RunRunning {
+		t.Fatalf("Status = %q, want queued or running", run.Status)
+	}
+
+	completed, err := srv.orchestrator.Wait(context.Background(), created.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait(%q) error = %v", created.RunID, err)
+	}
+	if completed.Status != domain.RunCompleted {
+		t.Fatalf("Status after timeout = %q, want %q", completed.Status, domain.RunCompleted)
+	}
+}
+
+func TestTimeoutFromQueryUsesProvidedDefault(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/runs/run_000001?wait=true", nil)
+
+	timeout, err := timeoutFromQuery(req, defaultStatusWaitTimeout)
+	if err != nil {
+		t.Fatalf("timeoutFromQuery() error = %v", err)
+	}
+	if timeout != 30*time.Second {
+		t.Fatalf("timeout = %s, want 30s", timeout)
 	}
 }
 
@@ -183,6 +283,32 @@ func TestInvalidTimeoutSecondsReturnBadRequest(t *testing.T) {
 			if len(runs) != 0 {
 				t.Fatalf("len(runs) = %d, want 0", len(runs))
 			}
+		})
+	}
+}
+
+func TestGetRunWaitInvalidTimeoutSecondsReturnBadRequest(t *testing.T) {
+	for _, timeoutSeconds := range []string{"abc", "0"} {
+		t.Run(timeoutSeconds, func(t *testing.T) {
+			srv := newTestServer(t, "Reviewer")
+
+			create := httptest.NewRecorder()
+			srv.ServeHTTP(create, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{
+				Message: "finish",
+			}))
+			if create.Code != http.StatusAccepted {
+				t.Fatalf("create status = %d, want %d; body = %s", create.Code, http.StatusAccepted, create.Body.String())
+			}
+			var created domain.RunRecord
+			decodeResponse(t, create, &created)
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/"+created.RunID+"?wait=true&timeout_seconds="+timeoutSeconds, nil))
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+			assertJSONContentType(t, rr)
 		})
 	}
 }

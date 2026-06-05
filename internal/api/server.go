@@ -13,7 +13,10 @@ import (
 	"github.com/andrey/agent-debug-squad/internal/orchestrator"
 )
 
-const defaultWaitTimeout = 60 * time.Second
+const (
+	defaultWaitTimeout       = 60 * time.Second
+	defaultStatusWaitTimeout = 30 * time.Second
+)
 
 type Server struct {
 	orchestrator *orchestrator.Orchestrator
@@ -78,7 +81,28 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
-	run, err := s.orchestrator.Run(r.Context(), r.PathValue("run_id"))
+	wait := r.URL.Query().Get("wait") == "true"
+	timeout := defaultStatusWaitTimeout
+	if wait {
+		var err error
+		timeout, err = timeoutFromQuery(r, defaultStatusWaitTimeout)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+
+	var run domain.RunRecord
+	var err error
+	if wait {
+		run, err = s.orchestrator.Wait(r.Context(), r.PathValue("run_id"), timeout)
+	} else {
+		run, err = s.orchestrator.Run(r.Context(), r.PathValue("run_id"))
+	}
+	if errors.Is(err, orchestrator.ErrWaitTimeout) {
+		writeJSON(w, http.StatusOK, run)
+		return
+	}
 	if errors.Is(err, orchestrator.ErrRunNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -118,7 +142,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	timeout := defaultWaitTimeout
 	if wait {
 		var err error
-		timeout, err = timeoutFromQuery(r)
+		timeout, err = timeoutFromQuery(r, defaultWaitTimeout)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -183,10 +207,10 @@ type createRunRequest struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
-func timeoutFromQuery(r *http.Request) (time.Duration, error) {
+func timeoutFromQuery(r *http.Request, defaultTimeout time.Duration) (time.Duration, error) {
 	value := r.URL.Query().Get("timeout_seconds")
 	if value == "" {
-		return defaultWaitTimeout, nil
+		return defaultTimeout, nil
 	}
 	seconds, err := strconv.Atoi(value)
 	if err != nil || seconds <= 0 {
