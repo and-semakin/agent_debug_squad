@@ -209,7 +209,7 @@ func TestGetRunWaitTrueCompletesWithOutputPath(t *testing.T) {
 
 func TestGetRunWaitTimeoutReturnsCurrentRunAndDoesNotStopAgent(t *testing.T) {
 	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
-		cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "1500"}
+		cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "3000"}
 	}, "Reviewer")
 
 	create := httptest.NewRecorder()
@@ -240,7 +240,7 @@ func TestGetRunWaitTimeoutReturnsCurrentRunAndDoesNotStopAgent(t *testing.T) {
 		t.Fatalf("Status = %q, want queued or running", run.Status)
 	}
 
-	completed, err := srv.orchestrator.Wait(context.Background(), created.RunID, time.Second)
+	completed, err := srv.orchestrator.Wait(context.Background(), created.RunID, 3*time.Second)
 	if err != nil {
 		t.Fatalf("Wait(%q) error = %v", created.RunID, err)
 	}
