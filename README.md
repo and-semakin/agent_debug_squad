@@ -34,6 +34,20 @@ curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/runs?wait=true&timeout_secon
   -d '{"message":"Review this debugging hypothesis."}'
 ```
 
+Reset an idle or failed agent so its next run starts in a fresh backend session:
+
+```sh
+curl -X POST http://127.0.0.1:8080/agents/Reviewer/reset
+```
+
+If an agent is stuck in a run, interrupt that run and reset the agent explicitly:
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/reset?force=true'
+```
+
+Reset keeps existing run artifacts and appends an `agent_reset` event to `transcript.jsonl`. The next run after reset includes the agent startup prompt again.
+
 ## Output Layout
 
 State is written below:

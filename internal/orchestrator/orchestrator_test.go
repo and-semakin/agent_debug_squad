@@ -403,6 +403,287 @@ func TestRunFailsWhenFinalAgentStatePersistenceFails(t *testing.T) {
 	}
 }
 
+func TestResetAgentClearsIdleAgentContinuity(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "first", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	if _, err := o.Wait(ctx, run.RunID, time.Second); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+
+	reset, err := o.ResetAgent(ctx, "Reviewer", false)
+	if err != nil {
+		t.Fatalf("ResetAgent() error = %v", err)
+	}
+	if reset.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
+	}
+	if reset.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", reset.LastRunID)
+	}
+	if reset.LastError != nil {
+		t.Fatalf("LastError = %v, want nil", reset.LastError)
+	}
+	if reset.BackendSessionID != "fake_Reviewer_reset" {
+		t.Fatalf("BackendSessionID = %q, want fake_Reviewer_reset", reset.BackendSessionID)
+	}
+
+	events, err := o.Transcript(ctx)
+	if err != nil {
+		t.Fatalf("Transcript() error = %v", err)
+	}
+	last := events[len(events)-1]
+	if last.Type != "agent_reset" || last.Agent != "Reviewer" {
+		t.Fatalf("last transcript event = %#v, want agent_reset for Reviewer", last)
+	}
+	if last.Metadata["force"] != "false" {
+		t.Fatalf("force metadata = %q, want false", last.Metadata["force"])
+	}
+}
+
+func TestResetAgentTranscriptFailurePersistsResetDerivedFailedState(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	s := store.New(cfg)
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "first", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	if _, err := o.Wait(ctx, run.RunID, time.Second); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+
+	transcriptPath := filepath.Join(s.SessionDir(), "transcript.jsonl")
+	if err := os.Remove(transcriptPath); err != nil {
+		t.Fatalf("Remove(transcript) error = %v", err)
+	}
+	if err := os.Mkdir(transcriptPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(transcript path) error = %v", err)
+	}
+
+	_, err = o.ResetAgent(ctx, "Reviewer", false)
+	if err == nil {
+		t.Fatal("ResetAgent() error = nil, want transcript append error")
+	}
+
+	loaded, err := s.LoadAgentState("Reviewer")
+	if err != nil {
+		t.Fatalf("LoadAgentState() error = %v", err)
+	}
+	if loaded.Status != domain.AgentFailed {
+		t.Fatalf("Status = %q, want %q", loaded.Status, domain.AgentFailed)
+	}
+	if loaded.LastError == nil || *loaded.LastError == "" {
+		t.Fatalf("LastError = %v, want transcript append error", loaded.LastError)
+	}
+	if loaded.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty reset-derived state", loaded.LastRunID)
+	}
+	if loaded.BackendSessionID != "fake_Reviewer_reset" {
+		t.Fatalf("BackendSessionID = %q, want fake_Reviewer_reset", loaded.BackendSessionID)
+	}
+
+	runtime, ok := o.Agent("Reviewer")
+	if !ok {
+		t.Fatal("Agent(Reviewer) not found")
+	}
+	if runtime.Status != domain.AgentFailed || runtime.LastRunID != "" || runtime.BackendSessionID != "fake_Reviewer_reset" {
+		t.Fatalf("runtime state = %#v, want failed reset-derived state", runtime)
+	}
+}
+
+func TestResetAgentBusyWithoutForceReturnsConflict(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "5000"}
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "long run", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	waitForAgentStatus(t, o, "Reviewer", domain.AgentRunning)
+
+	_, err = o.ResetAgent(ctx, "Reviewer", false)
+	if !errors.Is(err, ErrAgentBusy) {
+		t.Fatalf("ResetAgent() error = %v, want %v", err, ErrAgentBusy)
+	}
+
+	if _, err := o.ResetAgent(ctx, "Reviewer", true); err != nil {
+		t.Fatalf("ResetAgent(force) cleanup error = %v", err)
+	}
+	completed, err := o.Run(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if completed.Status != domain.RunInterrupted {
+		t.Fatalf("Status = %q, want %q", completed.Status, domain.RunInterrupted)
+	}
+}
+
+func TestResetAgentForceInterruptsActiveRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "5000"}
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "long run", map[string]string{"kind": "test"})
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	waitForAgentStatus(t, o, "Reviewer", domain.AgentRunning)
+
+	reset, err := o.ResetAgent(ctx, "Reviewer", true)
+	if err != nil {
+		t.Fatalf("ResetAgent(force) error = %v", err)
+	}
+	if reset.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
+	}
+	if reset.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", reset.LastRunID)
+	}
+
+	interrupted, err := o.Run(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if interrupted.Status != domain.RunInterrupted {
+		t.Fatalf("Status = %q, want %q; error = %v", interrupted.Status, domain.RunInterrupted, interrupted.Error)
+	}
+	if interrupted.Error == nil || *interrupted.Error != "interrupted by force reset" {
+		t.Fatalf("Error = %v, want force reset message", interrupted.Error)
+	}
+}
+
+func TestResetAgentForceWaitsForReleaseAfterInterruptWindowClosed(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	o.mu.Lock()
+	rt := o.runtimes["Reviewer"]
+	rt.busy = true
+	rt.activeRunID = "run_000999"
+	rt.activeRunDone = make(chan struct{})
+	rt.runInterruptible = false
+	o.mu.Unlock()
+
+	type resetResult struct {
+		state domain.AgentState
+		err   error
+	}
+	resultCh := make(chan resetResult, 1)
+	go func() {
+		state, err := o.ResetAgent(ctx, "Reviewer", true)
+		resultCh <- resetResult{state: state, err: err}
+	}()
+
+	waitForRuntimeResetting(t, o, "Reviewer")
+	select {
+	case result := <-resultCh:
+		t.Fatalf("ResetAgent(force) returned before worker release: state = %#v, err = %v", result.state, result.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	o.releaseAgent("Reviewer")
+
+	var result resetResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("ResetAgent(force) did not return after worker release")
+	}
+	if result.err != nil {
+		t.Fatalf("ResetAgent(force) error = %v", result.err)
+	}
+	if result.state.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", result.state.Status, domain.AgentIdle)
+	}
+
+	events, err := o.Transcript(ctx)
+	if err != nil {
+		t.Fatalf("Transcript() error = %v", err)
+	}
+	last := events[len(events)-1]
+	if last.Type != "agent_reset" || last.Agent != "Reviewer" {
+		t.Fatalf("last transcript event = %#v, want agent_reset for Reviewer", last)
+	}
+	if last.Status != "" {
+		t.Fatalf("Status = %q, want empty", last.Status)
+	}
+	if last.Metadata["force"] != "true" {
+		t.Fatalf("force metadata = %q, want true", last.Metadata["force"])
+	}
+	if last.Metadata["previous_run_id"] != "" {
+		t.Fatalf("previous_run_id metadata = %q, want empty", last.Metadata["previous_run_id"])
+	}
+}
+
+func waitForAgentStatus(t *testing.T, o *Orchestrator, agentName string, want domain.AgentStatus) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, agent := range o.Agents() {
+			if agent.Name == agentName && agent.Status == want {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("agent %q did not reach status %q", agentName, want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForRuntimeResetting(t *testing.T, o *Orchestrator, agentName string) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		o.mu.Lock()
+		rt := o.runtimes[agentName]
+		resetting := rt != nil && rt.resetting
+		o.mu.Unlock()
+		if resetting {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("agent %q did not start resetting", agentName)
+		case <-ticker.C:
+		}
+	}
+}
+
 func testConfig(t *testing.T, agentNames ...string) domain.SessionConfig {
 	t.Helper()
 

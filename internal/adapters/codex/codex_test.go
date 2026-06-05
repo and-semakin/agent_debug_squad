@@ -77,6 +77,47 @@ func TestBuildEnvIncludesExplicitEnvOptions(t *testing.T) {
 	}
 }
 
+func TestResetClearsSessionContinuity(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:          "Reviewer",
+		Backend:       "codex",
+		StartupPrompt: "Review carefully.",
+		StringOptions: map[string]string{"model": "openai/gpt-5"},
+	}
+	errText := "old error"
+	state := domain.AgentState{
+		Name:             "Reviewer",
+		Backend:          "codex",
+		Model:            "old-model",
+		StartupPrompt:    "Review carefully.",
+		WorkspaceDir:     t.TempDir(),
+		BackendSessionID: "thread_old",
+		Status:           domain.AgentFailed,
+		LastRunID:        "run_000123",
+		LastError:        &errText,
+	}
+
+	reset, err := New(spec).Reset(context.Background(), spec, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.BackendSessionID != "" {
+		t.Fatalf("BackendSessionID = %q, want empty", reset.BackendSessionID)
+	}
+	if reset.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", reset.LastRunID)
+	}
+	if reset.LastError != nil {
+		t.Fatalf("LastError = %v, want nil", reset.LastError)
+	}
+	if reset.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", reset.Status, domain.AgentIdle)
+	}
+	if reset.Model != "openai/gpt-5" {
+		t.Fatalf("Model = %q, want openai/gpt-5", reset.Model)
+	}
+}
+
 func TestParseJSONLFindsCompletionAndFinalMessage(t *testing.T) {
 	data := []byte(`{"type":"item.completed","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first"}]}}
 {"type":"item.completed","item":{"type":"message","role":"assistant","text":"last"}}

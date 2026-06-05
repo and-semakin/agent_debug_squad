@@ -127,6 +127,24 @@ func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.
 	return state, nil
 }
 
+func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = time.Now().UTC()
+	}
+	state.Name = spec.Name
+	state.Backend = spec.Backend
+	state.Model = spec.StringOptions["model"]
+	state.StartupPrompt = spec.StartupPrompt
+	state.BackendSessionID = ""
+	state.Status = domain.AgentIdle
+	state.LastRunID = ""
+	state.LastError = nil
+	return state, nil
+}
+
 func buildArgs(prompt string, yolo bool) []string {
 	args := []string{"-p", prompt, "--output-format", "stream-json"}
 	if yolo {
