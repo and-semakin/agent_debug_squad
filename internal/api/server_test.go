@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -236,6 +237,104 @@ func TestUnsafeRunPathReturnsClientError(t *testing.T) {
 	assertJSONContentType(t, rr)
 }
 
+func TestResetAgentEndpointReturnsUpdatedState(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	runRR := httptest.NewRecorder()
+	srv.ServeHTTP(runRR, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs?wait=true&timeout_seconds=1", runPayload{Message: "first"}))
+	if runRR.Code != http.StatusAccepted {
+		t.Fatalf("run status = %d, want %d; body = %s", runRR.Code, http.StatusAccepted, runRR.Body.String())
+	}
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/agents/Reviewer/reset", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+
+	var agent domain.AgentState
+	decodeResponse(t, rr, &agent)
+	if agent.Name != "Reviewer" {
+		t.Fatalf("Name = %q, want Reviewer", agent.Name)
+	}
+	if agent.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", agent.LastRunID)
+	}
+	if agent.Status != domain.AgentIdle {
+		t.Fatalf("Status = %q, want %q", agent.Status, domain.AgentIdle)
+	}
+}
+
+func TestResetAgentEndpointReturnsConflictWhenBusyWithoutForce(t *testing.T) {
+	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
+		cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "5000"}
+	}, "Reviewer")
+
+	first := httptest.NewRecorder()
+	srv.ServeHTTP(first, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{Message: "long"}))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d; body = %s", first.Code, http.StatusAccepted, first.Body.String())
+	}
+	waitForAgentStatus(t, srv, "Reviewer", domain.AgentRunning)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/agents/Reviewer/reset", nil))
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+}
+
+func TestResetAgentEndpointForceInterruptsBusyAgent(t *testing.T) {
+	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
+		cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "5000"}
+	}, "Reviewer")
+
+	first := httptest.NewRecorder()
+	srv.ServeHTTP(first, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{Message: "long"}))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d; body = %s", first.Code, http.StatusAccepted, first.Body.String())
+	}
+	var run domain.RunRecord
+	decodeResponse(t, first, &run)
+	waitForAgentStatus(t, srv, "Reviewer", domain.AgentRunning)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/agents/Reviewer/reset?force=true", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var agent domain.AgentState
+	decodeResponse(t, rr, &agent)
+	if agent.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty", agent.LastRunID)
+	}
+
+	interrupted, err := srv.orchestrator.Run(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if interrupted.Status != domain.RunInterrupted {
+		t.Fatalf("Status = %q, want %q", interrupted.Status, domain.RunInterrupted)
+	}
+}
+
+func TestResetAgentEndpointReturnsNotFoundForUnknownAgent(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/agents/Missing/reset", nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+}
+
 func TestWriteJSONLogsEncodeErrors(t *testing.T) {
 	var logs bytes.Buffer
 	previousWriter := log.Writer()
@@ -262,7 +361,16 @@ type runPayload struct {
 func newTestServer(t *testing.T, agentNames ...string) *Server {
 	t.Helper()
 
+	return newTestServerWithConfig(t, nil, agentNames...)
+}
+
+func newTestServerWithConfig(t *testing.T, mutate func(*domain.SessionConfig), agentNames ...string) *Server {
+	t.Helper()
+
 	cfg := testConfig(t, agentNames...)
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	o, err := orchestrator.New(context.Background(), cfg, store.New(cfg))
 	if err != nil {
 		t.Fatalf("orchestrator.New() error = %v", err)
@@ -275,6 +383,16 @@ func newTestServer(t *testing.T, agentNames ...string) *Server {
 		}
 		for _, run := range runs {
 			if _, err := o.Wait(context.Background(), run.RunID, time.Second); err != nil {
+				if errors.Is(err, orchestrator.ErrWaitTimeout) {
+					if _, resetErr := o.ResetAgent(context.Background(), run.Agent, true); resetErr != nil {
+						t.Errorf("ResetAgent(%q) cleanup error = %v", run.Agent, resetErr)
+						continue
+					}
+					if _, waitErr := o.Wait(context.Background(), run.RunID, time.Second); waitErr != nil {
+						t.Errorf("Wait(%q) after reset cleanup error = %v", run.RunID, waitErr)
+					}
+					continue
+				}
 				t.Errorf("Wait(%q) cleanup error = %v", run.RunID, err)
 			}
 		}

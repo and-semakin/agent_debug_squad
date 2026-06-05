@@ -44,6 +44,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{run_id}", s.handleRun)
 	s.mux.HandleFunc("GET /transcript", s.handleTranscript)
 	s.mux.HandleFunc("POST /agents/{name}/runs", s.handleCreateRun)
+	s.mux.HandleFunc("POST /agents/{name}/reset", s.handleResetAgent)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +153,29 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (s *Server) handleResetAgent(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("force") == "true"
+
+	agent, err := s.orchestrator.ResetAgent(r.Context(), r.PathValue("name"), force)
+	if errors.Is(err, orchestrator.ErrAgentNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if errors.Is(err, orchestrator.ErrAgentBusy) {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, orchestrator.ErrResetTimeout) {
+		writeError(w, http.StatusGatewayTimeout, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agent)
 }
 
 type createRunRequest struct {
