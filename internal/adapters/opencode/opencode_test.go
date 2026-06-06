@@ -21,7 +21,13 @@ type captureSink struct {
 	stderr []string
 }
 
+type signalingSink struct {
+	inner   domain.RunSink
+	signals map[string]chan struct{}
+}
+
 const currentRunMarkerEvent = `{"type":"message.updated","properties":{"sessionID":"session_123","info":{"id":"msg_ads_run_1","role":"user"}}}`
+const postPromptSignalEvent = `{"type":"session.next.text.delta","properties":{"sessionID":"session_123","delta":"ready"}}`
 
 func (s *captureSink) StdoutLine(line string) {
 	s.stdout = append(s.stdout, line)
@@ -33,6 +39,24 @@ func (s *captureSink) StderrLine(line string) {
 
 func (s *captureSink) Err() error {
 	return nil
+}
+
+func (s *signalingSink) StdoutLine(line string) {
+	s.inner.StdoutLine(line)
+	if ch := s.signals[line]; ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *signalingSink) StderrLine(line string) {
+	s.inner.StderrLine(line)
+}
+
+func (s *signalingSink) Err() error {
+	return s.inner.Err()
 }
 
 func writeConnectedAndIdleAfterPrompt(t *testing.T, w http.ResponseWriter, promptSeen <-chan struct{}) {
@@ -647,6 +671,7 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 
 func TestSendUsesFallbackTextWhenHistoryHasNoAssistant(t *testing.T) {
 	promptSeen := make(chan struct{})
+	messageFetched := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -674,7 +699,17 @@ func TestSendUsesFallbackTextWhenHistoryHasNoAssistant(t *testing.T) {
 			close(promptSeen)
 			w.WriteHeader(http.StatusNoContent)
 		case "/session/session_123/message":
-			_ = json.NewEncoder(w).Encode([]map[string]any{})
+			messageFetched <- struct{}{}
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_old", "role": "assistant", "parentID": "msg_other"},
+					"parts": []map[string]any{{"type": "text", "text": "wrong answer"}},
+				},
+				{
+					"info":  map[string]any{"id": "msg_user", "role": "user", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "not an assistant"}},
+				},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -699,6 +734,11 @@ func TestSendUsesFallbackTextWhenHistoryHasNoAssistant(t *testing.T) {
 	}
 	if result.FinalMessage != "fallback final" {
 		t.Fatalf("FinalMessage = %q, want fallback final", result.FinalMessage)
+	}
+	select {
+	case <-messageFetched:
+	default:
+		t.Fatal("message history was not fetched")
 	}
 	if nextState.LastRunID != "run_1" {
 		t.Fatalf("LastRunID = %q, want run_1", nextState.LastRunID)
@@ -755,6 +795,59 @@ func TestSendFailsOnSessionError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "model quota exceeded") {
 		t.Fatalf("error = %q, want useful session.error message", err.Error())
+	}
+	if result.ErrorMessage != err.Error() {
+		t.Fatalf("ErrorMessage = %q, want %q", result.ErrorMessage, err.Error())
+	}
+}
+
+func TestSendFailsOnSessionErrorBeforeCurrentRunMarker(t *testing.T) {
+	promptSeen := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			fmt.Fprintln(w, `data: {"type":"session.error","properties":{"sessionID":"session_123","message":"provider disconnected"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			close(promptSeen)
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			t.Fatal("message history should not be fetched after session.error")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err == nil {
+		t.Fatal("Send() error = nil, want session error")
+	}
+	if !strings.Contains(err.Error(), "provider disconnected") {
+		t.Fatalf("error = %q, want session.error message", err.Error())
 	}
 	if result.ErrorMessage != err.Error() {
 		t.Fatalf("ErrorMessage = %q, want %q", result.ErrorMessage, err.Error())
@@ -992,6 +1085,9 @@ func TestSendIgnoresStaleIdleAfterPromptAccepted(t *testing.T) {
 func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
 	promptSeen := make(chan struct{})
 	abortSeen := make(chan struct{}, 1)
+	markerSeen := make(chan struct{}, 1)
+	postPromptSeen := make(chan struct{}, 1)
+	stopPostPrompt := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -1008,7 +1104,19 @@ func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
 			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
 			fmt.Fprintln(w)
 			flusher.Flush()
-			<-r.Context().Done()
+			for {
+				fmt.Fprintln(w, "data: "+postPromptSignalEvent)
+				fmt.Fprintln(w)
+				flusher.Flush()
+				select {
+				case <-stopPostPrompt:
+					<-r.Context().Done()
+					return
+				case <-r.Context().Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 		case "/session/session_123/prompt_async":
 			w.WriteHeader(http.StatusNoContent)
 			close(promptSeen)
@@ -1038,13 +1146,20 @@ func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
 	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	sink := &signalingSink{
+		inner: domain.DiscardRunSink(),
+		signals: map[string]chan struct{}{
+			currentRunMarkerEvent: markerSeen,
+			postPromptSignalEvent: postPromptSeen,
+		},
+	}
 
 	go func() {
 		_, _, err := New(spec).Send(ctx, state, domain.RunRequest{
 			RunID:   "run_1",
 			Agent:   "Skeptic",
 			Message: "hello",
-		}, domain.DiscardRunSink())
+		}, sink)
 		done <- err
 	}()
 
@@ -1053,7 +1168,17 @@ func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("prompt_async did not arrive")
 	}
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-markerSeen:
+	case <-time.After(time.Second):
+		t.Fatal("current run marker was not streamed")
+	}
+	select {
+	case <-postPromptSeen:
+	case <-time.After(time.Second):
+		t.Fatal("post-prompt event was not streamed")
+	}
+	close(stopPostPrompt)
 	cancel()
 
 	select {
@@ -1074,6 +1199,9 @@ func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
 func TestSendAbortErrorDoesNotMaskCancellation(t *testing.T) {
 	promptSeen := make(chan struct{})
 	abortSeen := make(chan struct{}, 1)
+	markerSeen := make(chan struct{}, 1)
+	postPromptSeen := make(chan struct{}, 1)
+	stopPostPrompt := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -1090,7 +1218,19 @@ func TestSendAbortErrorDoesNotMaskCancellation(t *testing.T) {
 			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
 			fmt.Fprintln(w)
 			flusher.Flush()
-			<-r.Context().Done()
+			for {
+				fmt.Fprintln(w, "data: "+postPromptSignalEvent)
+				fmt.Fprintln(w)
+				flusher.Flush()
+				select {
+				case <-stopPostPrompt:
+					<-r.Context().Done()
+					return
+				case <-r.Context().Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 		case "/session/session_123/prompt_async":
 			w.WriteHeader(http.StatusNoContent)
 			close(promptSeen)
@@ -1112,13 +1252,20 @@ func TestSendAbortErrorDoesNotMaskCancellation(t *testing.T) {
 	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	sink := &signalingSink{
+		inner: domain.DiscardRunSink(),
+		signals: map[string]chan struct{}{
+			currentRunMarkerEvent: markerSeen,
+			postPromptSignalEvent: postPromptSeen,
+		},
+	}
 
 	go func() {
 		_, _, err := New(spec).Send(ctx, state, domain.RunRequest{
 			RunID:   "run_1",
 			Agent:   "Skeptic",
 			Message: "hello",
-		}, domain.DiscardRunSink())
+		}, sink)
 		done <- err
 	}()
 
@@ -1127,7 +1274,17 @@ func TestSendAbortErrorDoesNotMaskCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("prompt_async did not arrive")
 	}
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-markerSeen:
+	case <-time.After(time.Second):
+		t.Fatal("current run marker was not streamed")
+	}
+	select {
+	case <-postPromptSeen:
+	case <-time.After(time.Second):
+		t.Fatal("post-prompt event was not streamed")
+	}
+	close(stopPostPrompt)
 	cancel()
 
 	select {
@@ -1298,10 +1455,10 @@ func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 
 func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 	promptSeen := make(chan struct{})
-	authedPaths := map[string]bool{}
+	authedPaths := make(chan string, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertBasicAuth(t, r, "custom", "secret")
-		authedPaths[r.URL.Path] = true
+		authedPaths <- r.URL.Path
 		switch r.URL.Path {
 		case "/event":
 			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
@@ -1341,8 +1498,17 @@ func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seen := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		select {
+		case path := <-authedPaths:
+			seen[path] = true
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for authenticated requests")
+		}
+	}
 	for _, path := range []string{"/event", "/session/session_123/prompt_async", "/session/session_123/message"} {
-		if !authedPaths[path] {
+		if !seen[path] {
 			t.Fatalf("%s was not requested with BasicAuth", path)
 		}
 	}

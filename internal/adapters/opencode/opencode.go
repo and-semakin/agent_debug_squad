@@ -337,7 +337,7 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 		if !prompted && !messageSpecific {
 			return false
 		}
-		if !currentRunSeen && !messageSpecific {
+		if !currentRunSeen && !messageSpecific && eventType != "session.error" {
 			return false
 		}
 
