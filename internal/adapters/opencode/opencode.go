@@ -33,11 +33,6 @@ type sessionResponse struct {
 	ID string `json:"id"`
 }
 
-type messageResponse struct {
-	Info  messageInfo `json:"info"`
-	Parts []part      `json:"parts"`
-}
-
 type sessionMessage struct {
 	Info  messageInfo `json:"info"`
 	Parts []part      `json:"parts"`
@@ -105,8 +100,11 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		message = promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message)
 	}
 
+	sendCtx, cancelSend := context.WithTimeout(ctx, a.httpTimeout())
+	defer cancelSend()
+
 	messageID := generatedMessageID(run.RunID)
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancel := context.WithCancel(sendCtx)
 	defer cancel()
 
 	ready := make(chan error, 1)
@@ -119,7 +117,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 
-	if err := a.doJSON(ctx, http.MethodPost, "/session/"+state.BackendSessionID+"/prompt_async", a.promptBody(message, messageID), nil); err != nil {
+	if err := a.doJSON(sendCtx, http.MethodPost, "/session/"+state.BackendSessionID+"/prompt_async", a.promptBody(message, messageID), nil); err != nil {
 		cancel()
 		<-streamDone
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
@@ -134,7 +132,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return domain.RunResult{ErrorMessage: stream.ErrorMessage}, state, err
 	}
 
-	final, err := a.fetchFinalMessage(ctx, state.BackendSessionID, messageID, stream.FallbackText)
+	final, err := a.fetchFinalMessage(sendCtx, state.BackendSessionID, messageID, stream.FallbackText)
 	if err != nil {
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
@@ -587,10 +585,6 @@ func stringValue(value any) string {
 		return value
 	}
 	return ""
-}
-
-func (r messageResponse) finalText() string {
-	return joinTextParts(r.Parts)
 }
 
 func finalTextFromMessages(messages []sessionMessage, messageID string, fallback string) (string, error) {

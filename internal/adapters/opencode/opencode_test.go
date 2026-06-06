@@ -277,6 +277,119 @@ func TestHTTPClientUsesConfiguredTimeoutSeconds(t *testing.T) {
 	}
 }
 
+func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{
+			"base_url":        server.URL,
+			"timeout_seconds": "1",
+		},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	start := time.Now()
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Send() error = nil, want timeout")
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("Send() elapsed = %v, want well under 3s", elapsed)
+	}
+	if !strings.Contains(err.Error(), "deadline") && !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("error = %q, want timeout/deadline", err.Error())
+	}
+	if result.ErrorMessage != err.Error() {
+		t.Fatalf("ErrorMessage = %q, want %q", result.ErrorMessage, err.Error())
+	}
+}
+
+func TestSendTimeoutBudgetIncludesStreamingBeforeFinalMessageFetch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			time.Sleep(800 * time.Millisecond)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{
+			"base_url":        server.URL,
+			"timeout_seconds": "1",
+		},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	start := time.Now()
+	_, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Send() error = nil, want timeout")
+	}
+	if elapsed >= 1500*time.Millisecond {
+		t.Fatalf("Send() elapsed = %v, want shared 1s budget", elapsed)
+	}
+	if !strings.Contains(err.Error(), "deadline") && !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("error = %q, want timeout/deadline", err.Error())
+	}
+}
+
 func TestResetCreatesNewSessionAndClearsContinuity(t *testing.T) {
 	var sessionCreates int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
