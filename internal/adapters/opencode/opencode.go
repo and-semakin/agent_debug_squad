@@ -104,6 +104,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	defer cancelSend()
 
 	messageID := generatedMessageID(run.RunID)
+	promptSubmitted := make(chan struct{})
 	promptAccepted := make(chan struct{})
 	streamCtx, cancel := context.WithCancel(sendCtx)
 	defer cancel()
@@ -111,7 +112,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	ready := make(chan error, 1)
 	streamDone := make(chan streamResult, 1)
 	go func() {
-		streamDone <- a.streamEvents(streamCtx, state.BackendSessionID, messageID, promptAccepted, sink, ready)
+		streamDone <- a.streamEvents(streamCtx, state.BackendSessionID, messageID, promptSubmitted, promptAccepted, sink, ready)
 	}()
 
 	if err := <-ready; err != nil {
@@ -119,6 +120,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	}
 
 	promptAcceptedByServer := false
+	close(promptSubmitted)
 	if err := a.doJSON(sendCtx, http.MethodPost, "/session/"+state.BackendSessionID+"/prompt_async", a.promptBody(message, messageID), nil); err != nil {
 		cancel()
 		<-streamDone
@@ -271,7 +273,7 @@ func (a *Adapter) promptBody(message string, messageID string) map[string]any {
 	return body
 }
 
-func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID string, promptAccepted <-chan struct{}, sink domain.RunSink, ready chan<- error) streamResult {
+func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID string, promptSubmitted <-chan struct{}, promptAccepted <-chan struct{}, sink domain.RunSink, ready chan<- error) streamResult {
 	req, err := a.newRequest(ctx, http.MethodGet, "/event", nil)
 	if err != nil {
 		ready <- err
@@ -304,6 +306,7 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 
 	var fallback string
 	var handleErr error
+	var submitted bool
 	var prompted bool
 	var currentRunSeen bool
 	err = scanSSEEvents(resp.Body, func(raw string) bool {
@@ -327,6 +330,13 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 		if messageSpecific {
 			currentRunSeen = true
 		}
+		if !submitted {
+			select {
+			case <-promptSubmitted:
+				submitted = true
+			default:
+			}
+		}
 		if !prompted {
 			select {
 			case <-promptAccepted:
@@ -335,7 +345,9 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			}
 		}
 		if !prompted && !messageSpecific {
-			return false
+			if eventType != "session.error" || !submitted {
+				return false
+			}
 		}
 		if !currentRunSeen && !messageSpecific && eventType != "session.error" {
 			return false

@@ -802,7 +802,8 @@ func TestSendFailsOnSessionError(t *testing.T) {
 }
 
 func TestSendFailsOnSessionErrorBeforeCurrentRunMarker(t *testing.T) {
-	promptSeen := make(chan struct{})
+	promptReceived := make(chan struct{})
+	errorSent := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -812,15 +813,21 @@ func TestSendFailsOnSessionErrorBeforeCurrentRunMarker(t *testing.T) {
 			fmt.Fprintln(w)
 			flusher.Flush()
 			select {
-			case <-promptSeen:
+			case <-promptReceived:
 			case <-time.After(time.Second):
 				t.Fatal("prompt_async did not arrive")
 			}
 			fmt.Fprintln(w, `data: {"type":"session.error","properties":{"sessionID":"session_123","message":"provider disconnected"}}`)
 			fmt.Fprintln(w)
 			flusher.Flush()
+			close(errorSent)
 		case "/session/session_123/prompt_async":
-			close(promptSeen)
+			close(promptReceived)
+			select {
+			case <-errorSent:
+			case <-time.After(time.Second):
+				t.Fatal("session.error was not sent")
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case "/session/session_123/message":
 			t.Fatal("message history should not be fetched after session.error")
