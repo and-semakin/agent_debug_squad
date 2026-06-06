@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -326,24 +327,84 @@ func TestResetCreatesNewSessionAndClearsContinuity(t *testing.T) {
 	}
 }
 
-func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
-	var gotPath string
+func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 	var gotBody map[string]any
+	eventOpened := make(chan struct{})
+	connectedSent := make(chan struct{})
+	promptSeen := make(chan struct{})
+	releaseEvent := make(chan struct{})
+	toolEvent := `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_1"},"tool":"read"}}`
+	idleEvent := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+		switch r.URL.Path {
+		case "/event":
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			close(eventOpened)
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("response writer does not flush")
+			}
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			close(connectedSent)
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive after server.connected")
+			}
+			fmt.Fprintln(w, "data: "+toolEvent)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "data: "+idleEvent)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-releaseEvent:
+			case <-r.Context().Done():
+			case <-time.After(time.Second):
+				t.Fatal("stream was not closed after session.idle")
+			}
+		case "/session/session_123/prompt_async":
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			select {
+			case <-eventOpened:
+			default:
+				t.Fatal("prompt_async arrived before /event was opened")
+			}
+			select {
+			case <-connectedSent:
+			default:
+				t.Fatal("prompt_async arrived before server.connected")
+			}
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatal(err)
+			}
+			close(promptSeen)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/session/session_123/message":
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_old", "role": "assistant", "parentID": "msg_other"},
+					"parts": []map[string]any{{"type": "text", "text": "wrong answer"}},
+				},
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatal(err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"info": map[string]any{"id": "msg_1"},
-			"parts": []map[string]any{
-				{"type": "text", "text": "Final OpenCode answer"},
-			},
-		})
 	}))
+	defer close(releaseEvent)
 	defer server.Close()
 
 	spec := domain.AgentSpec{
@@ -357,17 +418,18 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 		},
 	}
 	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+	sink := &captureSink{}
 
 	result, nextState, err := New(spec).Send(context.Background(), state, domain.RunRequest{
 		RunID:   "run_1",
 		Agent:   "Skeptic",
 		Message: "hello",
-	}, domain.DiscardRunSink())
+	}, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/session/session_123/message" {
-		t.Fatalf("path = %s, want %s", gotPath, "/session/session_123/message")
+	if gotBody["messageID"] != "msg_ads_run_1" {
+		t.Fatalf("messageID = %v, want msg_ads_run_1; body = %#v", gotBody["messageID"], gotBody)
 	}
 	model, ok := gotBody["model"].(map[string]any)
 	if !ok {
@@ -387,6 +449,9 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 	if !ok || part["text"] != "hello" {
 		t.Fatalf("part = %#v, want text hello", parts[0])
 	}
+	if len(sink.stdout) != 2 || sink.stdout[0] != toolEvent || sink.stdout[1] != idleEvent {
+		t.Fatalf("stdout = %#v, want tool and idle events", sink.stdout)
+	}
 	if result.FinalMessage != "Final OpenCode answer" {
 		t.Fatalf("FinalMessage = %q, want %q", result.FinalMessage, "Final OpenCode answer")
 	}
@@ -398,14 +463,30 @@ func TestSendPostsMessageToSessionAndExtractsFinalText(t *testing.T) {
 func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatal(err)
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"parts": []map[string]any{
-				{"type": "text", "text": "Final OpenCode answer"},
-			},
-		})
 	}))
 	defer server.Close()
 
@@ -443,14 +524,30 @@ func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 func TestSendOmitsEmptyModelAndAgent(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatal(err)
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"parts": []map[string]any{
-				{"type": "text", "text": "Final OpenCode answer"},
-			},
-		})
 	}))
 	defer server.Close()
 
@@ -487,11 +584,27 @@ func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 		if username != "opencode" || password != "secret" {
 			t.Fatalf("BasicAuth = %q/%q, want %q/%q", username, password, "opencode", "secret")
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"parts": []map[string]any{
-				{"type": "text", "text": "Final OpenCode answer"},
-			},
-		})
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
@@ -525,11 +638,27 @@ func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 		if username != "custom" || password != "secret" {
 			t.Fatalf("BasicAuth = %q/%q, want %q/%q", username, password, "custom", "secret")
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"parts": []map[string]any{
-				{"type": "text", "text": "Final OpenCode answer"},
-			},
-		})
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
@@ -557,7 +686,22 @@ func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 
 func TestSendReturnsHTTPStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "backend failed", http.StatusInternalServerError)
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(time.Second):
+			}
+		case "/session/session_123/prompt_async":
+			http.Error(w, "backend failed", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
@@ -617,9 +761,27 @@ func TestSendLogsUnsupportedYoloWarning(t *testing.T) {
 	t.Cleanup(func() { logger = previous })
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"parts": []map[string]any{{"type": "text", "text": "ok"}},
-		})
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "ok"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 

@@ -43,6 +43,12 @@ type sessionMessage struct {
 	Parts []part      `json:"parts"`
 }
 
+type streamResult struct {
+	FallbackText string
+	ErrorMessage string
+	Err          error
+}
+
 type messageInfo struct {
 	ID       string `json:"id"`
 	Role     string `json:"role"`
@@ -99,25 +105,42 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		message = promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message)
 	}
 
-	body := map[string]any{
-		"parts": []map[string]any{
-			{"type": "text", "text": message},
-		},
-	}
-	if model := a.spec.StringOptions["model"]; model != "" {
-		body["model"] = modelPayload(model)
-	}
-	if agent := a.spec.StringOptions["agent"]; agent != "" {
-		body["agent"] = agent
-	}
-	var response messageResponse
-	if err := a.postJSON(ctx, "/session/"+state.BackendSessionID+"/message", body, &response); err != nil {
+	messageID := generatedMessageID(run.RunID)
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	ready := make(chan error, 1)
+	streamDone := make(chan streamResult, 1)
+	go func() {
+		streamDone <- a.streamEvents(streamCtx, state.BackendSessionID, messageID, sink, ready)
+	}()
+
+	if err := <-ready; err != nil {
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 
+	if err := a.doJSON(ctx, http.MethodPost, "/session/"+state.BackendSessionID+"/prompt_async", a.promptBody(message, messageID), nil); err != nil {
+		cancel()
+		<-streamDone
+		return domain.RunResult{ErrorMessage: err.Error()}, state, err
+	}
+
+	stream := <-streamDone
+	if stream.Err != nil {
+		return domain.RunResult{ErrorMessage: stream.Err.Error()}, state, stream.Err
+	}
+	if stream.ErrorMessage != "" {
+		err := errors.New(stream.ErrorMessage)
+		return domain.RunResult{ErrorMessage: stream.ErrorMessage}, state, err
+	}
+
+	final, err := a.fetchFinalMessage(ctx, state.BackendSessionID, messageID, stream.FallbackText)
+	if err != nil {
+		return domain.RunResult{ErrorMessage: err.Error()}, state, err
+	}
 	state.Status = domain.AgentIdle
 	state.LastRunID = run.RunID
-	return domain.RunResult{FinalMessage: response.finalText()}, state, nil
+	return domain.RunResult{FinalMessage: final}, state, nil
 }
 
 func (a *Adapter) startupPrompt(state domain.AgentState) string {
@@ -169,15 +192,26 @@ func (a *Adapter) createSession(ctx context.Context) (string, error) {
 }
 
 func (a *Adapter) postJSON(ctx context.Context, path string, body any, out any) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
+	return a.doJSON(ctx, http.MethodPost, path, body, out)
+}
+
+func (a *Adapter) newRequest(ctx context.Context, method string, path string, body any) (*http.Request, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL()+path, bytes.NewReader(data))
+
+	req, err := http.NewRequestWithContext(ctx, method, a.baseURL()+path, reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if password := a.spec.StringOptions["password"]; password != "" {
 		username := a.spec.StringOptions["username"]
 		if username == "" {
@@ -185,7 +219,14 @@ func (a *Adapter) postJSON(ctx context.Context, path string, body any, out any) 
 		}
 		req.SetBasicAuth(username, password)
 	}
+	return req, nil
+}
 
+func (a *Adapter) doJSON(ctx context.Context, method string, path string, body any, out any) error {
+	req, err := a.newRequest(ctx, method, path, body)
+	if err != nil {
+		return err
+	}
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
 		return err
@@ -195,7 +236,132 @@ func (a *Adapter) postJSON(ctx context.Context, path string, body any, out any) 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpStatusError(path, resp)
 	}
+	if out == nil {
+		return nil
+	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (a *Adapter) promptBody(message string, messageID string) map[string]any {
+	body := map[string]any{
+		"messageID": messageID,
+		"parts": []map[string]any{
+			{"type": "text", "text": message},
+		},
+	}
+	if model := a.spec.StringOptions["model"]; model != "" {
+		body["model"] = modelPayload(model)
+	}
+	if agent := a.spec.StringOptions["agent"]; agent != "" {
+		body["agent"] = agent
+	}
+	return body
+}
+
+func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID string, sink domain.RunSink, ready chan<- error) streamResult {
+	req, err := a.newRequest(ctx, http.MethodGet, "/event", nil)
+	if err != nil {
+		ready <- err
+		return streamResult{Err: err}
+	}
+
+	resp, err := a.httpClient().Do(req)
+	if err != nil {
+		ready <- err
+		return streamResult{Err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		err := httpStatusError("/event", resp)
+		ready <- err
+		return streamResult{Err: err}
+	}
+
+	var result streamResult
+	var terminal bool
+	var readySent bool
+	sendReady := func(err error) {
+		if readySent {
+			return
+		}
+		readySent = true
+		ready <- err
+	}
+
+	var fallback string
+	var handleErr error
+	err = scanSSEEvents(resp.Body, func(raw string) bool {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			handleErr = err
+			sendReady(err)
+			return true
+		}
+
+		eventType := stringValue(event["type"])
+		if eventType == "server.connected" {
+			sendReady(nil)
+			return false
+		}
+
+		if !isRunEvent(event, sessionID, messageID) {
+			return false
+		}
+
+		sink.StdoutLine(raw)
+		if err := sink.Err(); err != nil {
+			handleErr = err
+			return true
+		}
+
+		update := fallbackTextFromEvent(event, messageID)
+		if update.Replace {
+			fallback = update.Text
+		} else if update.Text != "" {
+			fallback += update.Text
+		}
+
+		switch eventType {
+		case "session.idle":
+			terminal = true
+			result.FallbackText = fallback
+			return true
+		case "session.error":
+			terminal = true
+			result.FallbackText = fallback
+			result.ErrorMessage = errorMessageFromEvent(event)
+			return true
+		default:
+			return false
+		}
+	})
+	if handleErr != nil {
+		return streamResult{FallbackText: fallback, Err: handleErr}
+	}
+	if err != nil {
+		sendReady(err)
+		return streamResult{FallbackText: fallback, Err: err}
+	}
+	if !readySent {
+		err := errors.New("opencode event stream ended before server.connected")
+		sendReady(err)
+		return streamResult{FallbackText: fallback, Err: err}
+	}
+	if terminal {
+		return result
+	}
+
+	err = errors.New("opencode event stream ended before session.idle")
+	return streamResult{FallbackText: fallback, Err: err}
+}
+
+func (a *Adapter) fetchFinalMessage(ctx context.Context, sessionID string, messageID string, fallback string) (string, error) {
+	var messages []sessionMessage
+	if err := a.doJSON(ctx, http.MethodGet, "/session/"+sessionID+"/message", nil, &messages); err != nil {
+		return "", err
+	}
+	return finalTextFromMessages(messages, messageID, fallback)
 }
 
 func (a *Adapter) baseURL() string {
@@ -295,6 +461,49 @@ func decodeSSEEvents(r io.Reader) ([]string, error) {
 	return events, nil
 }
 
+func scanSSEEvents(r io.Reader, handle func(string) bool) error {
+	reader := bufio.NewReader(r)
+
+	var frame []string
+	flush := func() bool {
+		if len(frame) == 0 {
+			return false
+		}
+		event := strings.Join(frame, "\n")
+		frame = nil
+		return handle(event)
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if strings.HasSuffix(line, "\n") {
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+		}
+		if line == "" {
+			if flush() {
+				return nil
+			}
+		} else if strings.HasPrefix(line, "data:") {
+			data := strings.TrimPrefix(line, "data:")
+			if strings.HasPrefix(data, " ") {
+				data = data[1:]
+			}
+			frame = append(frame, data)
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	if flush() {
+		return nil
+	}
+	return nil
+}
+
 func isRunEvent(event map[string]any, sessionID string, messageID string) bool {
 	properties, ok := event["properties"].(map[string]any)
 	if !ok || stringValue(properties["sessionID"]) != sessionID {
@@ -352,6 +561,25 @@ func fallbackTextFromEvent(event map[string]any, messageID string) fallbackTextU
 	default:
 		return fallbackTextUpdate{}
 	}
+}
+
+func errorMessageFromEvent(event map[string]any) string {
+	properties, ok := event["properties"].(map[string]any)
+	if !ok {
+		return "opencode session.error"
+	}
+	if message := stringValue(properties["message"]); message != "" {
+		return message
+	}
+	if err := stringValue(properties["error"]); err != "" {
+		return err
+	}
+	if err, ok := properties["error"].(map[string]any); ok {
+		if message := stringValue(err["message"]); message != "" {
+			return message
+		}
+	}
+	return "opencode session.error"
 }
 
 func stringValue(value any) string {
