@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -241,6 +242,102 @@ func generatedMessageID(runID string) string {
 		}
 	}
 	return b.String()
+}
+
+func decodeSSEEvents(r io.Reader) ([]string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var events []string
+	var frame []string
+	flush := func() {
+		if len(frame) == 0 {
+			return
+		}
+		events = append(events, strings.Join(frame, "\n"))
+		frame = nil
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimPrefix(line, "data:")
+			if strings.HasPrefix(data, " ") {
+				data = data[1:]
+			}
+			frame = append(frame, data)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return events, nil
+}
+
+func isRunEvent(event map[string]any, sessionID string, messageID string) bool {
+	properties, ok := event["properties"].(map[string]any)
+	if !ok || stringValue(properties["sessionID"]) != sessionID {
+		return false
+	}
+
+	if part, ok := properties["part"].(map[string]any); ok {
+		partMessageID := stringValue(part["messageID"])
+		if partMessageID != "" {
+			return partMessageID == messageID
+		}
+	}
+
+	if info, ok := properties["info"].(map[string]any); ok {
+		parentID := stringValue(info["parentID"])
+		if parentID != "" {
+			return parentID == messageID
+		}
+		if stringValue(info["role"]) == "user" {
+			infoID := stringValue(info["id"])
+			if infoID != "" {
+				return infoID == messageID
+			}
+		}
+	}
+
+	return true
+}
+
+func fallbackTextFromEvent(event map[string]any, messageID string) string {
+	properties, ok := event["properties"].(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	switch stringValue(event["type"]) {
+	case "session.next.text.delta":
+		return stringValue(properties["delta"])
+	case "session.next.text.ended":
+		return stringValue(properties["text"])
+	case "message.part.updated":
+		part, ok := properties["part"].(map[string]any)
+		if !ok {
+			return ""
+		}
+		if stringValue(part["messageID"]) != messageID || stringValue(part["type"]) != "text" {
+			return ""
+		}
+		return stringValue(part["text"])
+	default:
+		return ""
+	}
+}
+
+func stringValue(value any) string {
+	if value, ok := value.(string); ok {
+		return value
+	}
+	return ""
 }
 
 func (r messageResponse) finalText() string {

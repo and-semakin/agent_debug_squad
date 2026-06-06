@@ -43,6 +43,100 @@ func TestGeneratedMessageIDSanitizesUnsafeCharacters(t *testing.T) {
 	}
 }
 
+func TestDecodeSSEEventsParsesDataFrames(t *testing.T) {
+	input := strings.NewReader("data: {\"type\":\"server.connected\"}\n\n" +
+		"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"session_123\"}}\n\n")
+
+	events, err := decodeSSEEvents(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(events))
+	}
+	if events[0] != "{\"type\":\"server.connected\"}" {
+		t.Fatalf("events[0] = %q", events[0])
+	}
+	if events[1] != "{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"session_123\"}}" {
+		t.Fatalf("events[1] = %q", events[1])
+	}
+}
+
+func TestDecodeSSEEventsIgnoresCommentsAndNonDataLines(t *testing.T) {
+	input := strings.NewReader(": keepalive\nid: evt_1\nevent: message\ndata: {\"type\":\"server.connected\"}\n\n")
+
+	events, err := decodeSSEEvents(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0] != "{\"type\":\"server.connected\"}" {
+		t.Fatalf("events = %#v, want one server.connected payload", events)
+	}
+}
+
+func TestIsRunEventFiltersBySessionID(t *testing.T) {
+	event := map[string]any{
+		"type": "session.next.tool.called",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"tool":      "read",
+		},
+	}
+	if !isRunEvent(event, "session_123", "msg_ads_run_1") {
+		t.Fatal("isRunEvent() = false, want true")
+	}
+	if isRunEvent(event, "session_other", "msg_ads_run_1") {
+		t.Fatal("isRunEvent() = true for other session, want false")
+	}
+}
+
+func TestIsRunEventFiltersMessagePartByMessageID(t *testing.T) {
+	event := map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"part": map[string]any{
+				"messageID": "msg_ads_run_1",
+				"type":      "text",
+			},
+		},
+	}
+	if !isRunEvent(event, "session_123", "msg_ads_run_1") {
+		t.Fatal("isRunEvent() = false, want true")
+	}
+	if isRunEvent(event, "session_123", "msg_ads_other") {
+		t.Fatal("isRunEvent() = true for other message, want false")
+	}
+}
+
+func TestFallbackTextFromEvent(t *testing.T) {
+	delta := map[string]any{
+		"type": "session.next.text.delta",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"delta":     "hello",
+		},
+	}
+	if got := fallbackTextFromEvent(delta, "msg_ads_run_1"); got != "hello" {
+		t.Fatalf("fallbackTextFromEvent(delta) = %q, want hello", got)
+	}
+
+	part := map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"part": map[string]any{
+				"messageID": "msg_ads_run_1",
+				"type":      "text",
+				"text":      "final",
+			},
+		},
+	}
+	if got := fallbackTextFromEvent(part, "msg_ads_run_1"); got != "final" {
+		t.Fatalf("fallbackTextFromEvent(part) = %q, want final", got)
+	}
+}
+
 func TestHTTPClientUsesDefaultTimeout(t *testing.T) {
 	spec := domain.AgentSpec{
 		Name:          "Skeptic",
