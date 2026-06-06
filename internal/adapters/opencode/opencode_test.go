@@ -74,6 +74,19 @@ func TestDecodeSSEEventsIgnoresCommentsAndNonDataLines(t *testing.T) {
 	}
 }
 
+func TestDecodeSSEEventsHandlesLargeDataLines(t *testing.T) {
+	payload := strings.Repeat("x", 1024*1024+1)
+	input := strings.NewReader("data: " + payload + "\n\n")
+
+	events, err := decodeSSEEvents(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0] != payload {
+		t.Fatalf("decoded large events len=%d", len(events))
+	}
+}
+
 func TestIsRunEventFiltersBySessionID(t *testing.T) {
 	event := map[string]any{
 		"type": "session.next.tool.called",
@@ -117,8 +130,8 @@ func TestFallbackTextFromEvent(t *testing.T) {
 			"delta":     "hello",
 		},
 	}
-	if got := fallbackTextFromEvent(delta, "msg_ads_run_1"); got != "hello" {
-		t.Fatalf("fallbackTextFromEvent(delta) = %q, want hello", got)
+	if got := fallbackTextFromEvent(delta, "msg_ads_run_1"); got.Text != "hello" || got.Replace {
+		t.Fatalf("fallbackTextFromEvent(delta) = %#v, want append hello", got)
 	}
 
 	part := map[string]any{
@@ -132,8 +145,64 @@ func TestFallbackTextFromEvent(t *testing.T) {
 			},
 		},
 	}
-	if got := fallbackTextFromEvent(part, "msg_ads_run_1"); got != "final" {
-		t.Fatalf("fallbackTextFromEvent(part) = %q, want final", got)
+	if got := fallbackTextFromEvent(part, "msg_ads_run_1"); got.Text != "final" || !got.Replace {
+		t.Fatalf("fallbackTextFromEvent(part) = %#v, want replacement final", got)
+	}
+}
+
+func TestFallbackTextUpdatesDistinguishAppendAndReplace(t *testing.T) {
+	delta := map[string]any{
+		"type": "session.next.text.delta",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"delta":     "hello",
+		},
+	}
+	if got := fallbackTextFromEvent(delta, "msg_ads_run_1"); got.Text != "hello" || got.Replace {
+		t.Fatalf("fallbackTextFromEvent(delta) = %#v, want append hello", got)
+	}
+
+	ended := map[string]any{
+		"type": "session.next.text.ended",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"text":      "hello world",
+		},
+	}
+	if got := fallbackTextFromEvent(ended, "msg_ads_run_1"); got.Text != "hello world" || !got.Replace {
+		t.Fatalf("fallbackTextFromEvent(ended) = %#v, want replacement hello world", got)
+	}
+}
+
+func TestFallbackTextUpdateMessagePartIsReplacement(t *testing.T) {
+	first := map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"part": map[string]any{
+				"messageID": "msg_ads_run_1",
+				"type":      "text",
+				"text":      "hello",
+			},
+		},
+	}
+	if got := fallbackTextFromEvent(first, "msg_ads_run_1"); got.Text != "hello" || !got.Replace {
+		t.Fatalf("fallbackTextFromEvent(first) = %#v, want replacement hello", got)
+	}
+
+	second := map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"sessionID": "session_123",
+			"part": map[string]any{
+				"messageID": "msg_ads_run_1",
+				"type":      "text",
+				"text":      "hello world",
+			},
+		},
+	}
+	if got := fallbackTextFromEvent(second, "msg_ads_run_1"); got.Text != "hello world" || !got.Replace {
+		t.Fatalf("fallbackTextFromEvent(second) = %#v, want replacement hello world", got)
 	}
 }
 

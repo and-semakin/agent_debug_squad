@@ -245,8 +245,7 @@ func generatedMessageID(runID string) string {
 }
 
 func decodeSSEEvents(r io.Reader) ([]string, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReader(r)
 
 	var events []string
 	var frame []string
@@ -258,22 +257,27 @@ func decodeSSEEvents(r io.Reader) ([]string, error) {
 		frame = nil
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		if strings.HasSuffix(line, "\n") {
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+		}
 		if line == "" {
 			flush()
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
+		} else if strings.HasPrefix(line, "data:") {
 			data := strings.TrimPrefix(line, "data:")
 			if strings.HasPrefix(data, " ") {
 				data = data[1:]
 			}
 			frame = append(frame, data)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		if err == io.EOF {
+			break
+		}
 	}
 	flush()
 	return events, nil
@@ -308,28 +312,33 @@ func isRunEvent(event map[string]any, sessionID string, messageID string) bool {
 	return true
 }
 
-func fallbackTextFromEvent(event map[string]any, messageID string) string {
+type fallbackTextUpdate struct {
+	Text    string
+	Replace bool
+}
+
+func fallbackTextFromEvent(event map[string]any, messageID string) fallbackTextUpdate {
 	properties, ok := event["properties"].(map[string]any)
 	if !ok {
-		return ""
+		return fallbackTextUpdate{}
 	}
 
 	switch stringValue(event["type"]) {
 	case "session.next.text.delta":
-		return stringValue(properties["delta"])
+		return fallbackTextUpdate{Text: stringValue(properties["delta"])}
 	case "session.next.text.ended":
-		return stringValue(properties["text"])
+		return fallbackTextUpdate{Text: stringValue(properties["text"]), Replace: true}
 	case "message.part.updated":
 		part, ok := properties["part"].(map[string]any)
 		if !ok {
-			return ""
+			return fallbackTextUpdate{}
 		}
 		if stringValue(part["messageID"]) != messageID || stringValue(part["type"]) != "text" {
-			return ""
+			return fallbackTextUpdate{}
 		}
-		return stringValue(part["text"])
+		return fallbackTextUpdate{Text: stringValue(part["text"]), Replace: true}
 	default:
-		return ""
+		return fallbackTextUpdate{}
 	}
 }
 
