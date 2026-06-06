@@ -144,8 +144,8 @@ func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 			writeEvent(w, currentRunMarkerEvent)
 			writeEvent(w, toolEvent)
 			writeEvent(w, idleEvent)
-			flusher.Flush()
 			close(idleSent)
+			flusher.Flush()
 		case "/session/session_123/prompt_async":
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)
