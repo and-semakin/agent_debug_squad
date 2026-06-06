@@ -56,6 +56,18 @@ func writeConnectedAndIdleAfterPrompt(t *testing.T, w http.ResponseWriter, promp
 	flusher.Flush()
 }
 
+func assertBasicAuth(t *testing.T, r *http.Request, wantUsername string, wantPassword string) {
+	t.Helper()
+
+	username, password, ok := r.BasicAuth()
+	if !ok {
+		t.Fatalf("%s BasicAuth missing", r.URL.Path)
+	}
+	if username != wantUsername || password != wantPassword {
+		t.Fatalf("%s BasicAuth = %q/%q, want %q/%q", r.URL.Path, username, password, wantUsername, wantPassword)
+	}
+}
+
 func TestGeneratedMessageIDUsesRunID(t *testing.T) {
 	if got := generatedMessageID("run_000123"); got != "msg_ads_run_000123" {
 		t.Fatalf("generatedMessageID() = %q, want %q", got, "msg_ads_run_000123")
@@ -633,6 +645,176 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 	}
 }
 
+func TestSendUsesFallbackTextWhenHistoryHasNoAssistant(t *testing.T) {
+	promptSeen := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(25 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.next.text.delta","properties":{"sessionID":"session_123","delta":"partial"}}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.next.text.ended","properties":{"sessionID":"session_123","text":"fallback final"}}`)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			close(promptSeen)
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	result, nextState, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "fallback final" {
+		t.Fatalf("FinalMessage = %q, want fallback final", result.FinalMessage)
+	}
+	if nextState.LastRunID != "run_1" {
+		t.Fatalf("LastRunID = %q, want run_1", nextState.LastRunID)
+	}
+}
+
+func TestSendFailsOnSessionError(t *testing.T) {
+	promptSeen := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(25 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, `data: {"type":"session.error","properties":{"sessionID":"session_123","message":"model quota exceeded"}}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			close(promptSeen)
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			t.Fatal("message history should not be fetched after session.error")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err == nil {
+		t.Fatal("Send() error = nil, want session error")
+	}
+	if !strings.Contains(err.Error(), "model quota exceeded") {
+		t.Fatalf("error = %q, want useful session.error message", err.Error())
+	}
+	if result.ErrorMessage != err.Error() {
+		t.Fatalf("ErrorMessage = %q, want %q", result.ErrorMessage, err.Error())
+	}
+}
+
+func TestSendFailsWhenSSEEndsBeforeIdle(t *testing.T) {
+	promptSeen := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(25 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			close(promptSeen)
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			t.Fatal("message history should not be fetched before session.idle")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, domain.DiscardRunSink())
+	if err == nil {
+		t.Fatal("Send() error = nil, want event stream ended error")
+	}
+	if !strings.Contains(err.Error(), "ended before session.idle") {
+		t.Fatalf("error = %q, want ended before session.idle", err.Error())
+	}
+	if result.ErrorMessage != err.Error() {
+		t.Fatalf("ErrorMessage = %q, want %q", result.ErrorMessage, err.Error())
+	}
+}
+
 func TestSendIgnoresPrePromptIdle(t *testing.T) {
 	promptSeen := make(chan struct{})
 	realIdleSent := make(chan struct{})
@@ -834,13 +1016,7 @@ func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
 			if r.Method != http.MethodPost {
 				t.Fatalf("abort method = %s, want POST", r.Method)
 			}
-			username, password, ok := r.BasicAuth()
-			if !ok {
-				t.Fatal("abort BasicAuth missing")
-			}
-			if username != "custom" || password != "secret" {
-				t.Fatalf("abort BasicAuth = %q/%q, want custom/secret", username, password)
-			}
+			assertBasicAuth(t, r, "custom", "secret")
 			abortSeen <- struct{}{}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -1079,13 +1255,7 @@ func TestSendOmitsEmptyModelAndAgent(t *testing.T) {
 func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok {
-			t.Fatal("BasicAuth missing")
-		}
-		if username != "opencode" || password != "secret" {
-			t.Fatalf("BasicAuth = %q/%q, want %q/%q", username, password, "opencode", "secret")
-		}
+		assertBasicAuth(t, r, "opencode", "secret")
 		switch r.URL.Path {
 		case "/event":
 			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
@@ -1128,14 +1298,10 @@ func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 
 func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 	promptSeen := make(chan struct{})
+	authedPaths := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok {
-			t.Fatal("BasicAuth missing")
-		}
-		if username != "custom" || password != "secret" {
-			t.Fatalf("BasicAuth = %q/%q, want %q/%q", username, password, "custom", "secret")
-		}
+		assertBasicAuth(t, r, "custom", "secret")
+		authedPaths[r.URL.Path] = true
 		switch r.URL.Path {
 		case "/event":
 			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
@@ -1174,6 +1340,11 @@ func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 	}, domain.DiscardRunSink())
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, path := range []string{"/event", "/session/session_123/prompt_async", "/session/session_123/message"} {
+		if !authedPaths[path] {
+			t.Fatalf("%s was not requested with BasicAuth", path)
+		}
 	}
 }
 
