@@ -223,6 +223,26 @@ func modelPayload(model string) map[string]string {
 	}
 }
 
+func generatedMessageID(runID string) string {
+	var b strings.Builder
+	b.WriteString("msg_ads_")
+	for _, r := range runID {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
 func (r messageResponse) finalText() string {
 	var out []string
 	for _, part := range r.Parts {

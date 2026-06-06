@@ -14,6 +14,35 @@ import (
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
+type captureSink struct {
+	stdout []string
+	stderr []string
+}
+
+func (s *captureSink) StdoutLine(line string) {
+	s.stdout = append(s.stdout, line)
+}
+
+func (s *captureSink) StderrLine(line string) {
+	s.stderr = append(s.stderr, line)
+}
+
+func (s *captureSink) Err() error {
+	return nil
+}
+
+func TestGeneratedMessageIDUsesRunID(t *testing.T) {
+	if got := generatedMessageID("run_000123"); got != "msg_ads_run_000123" {
+		t.Fatalf("generatedMessageID() = %q, want %q", got, "msg_ads_run_000123")
+	}
+}
+
+func TestGeneratedMessageIDSanitizesUnsafeCharacters(t *testing.T) {
+	if got := generatedMessageID("run/../bad id"); got != "msg_ads_run____bad_id" {
+		t.Fatalf("generatedMessageID() = %q, want sanitized id", got)
+	}
+}
+
 func TestHTTPClientUsesDefaultTimeout(t *testing.T) {
 	spec := domain.AgentSpec{
 		Name:          "Skeptic",
