@@ -118,15 +118,23 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 
+	promptAcceptedByServer := false
 	if err := a.doJSON(sendCtx, http.MethodPost, "/session/"+state.BackendSessionID+"/prompt_async", a.promptBody(message, messageID), nil); err != nil {
 		cancel()
 		<-streamDone
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
+	promptAcceptedByServer = true
 	close(promptAccepted)
 
 	stream := <-streamDone
 	if stream.Err != nil {
+		if promptAcceptedByServer {
+			if err := sendContextErr(ctx, sendCtx); err != nil {
+				a.abortSession(state.BackendSessionID)
+				return domain.RunResult{ErrorMessage: err.Error()}, state, err
+			}
+		}
 		return domain.RunResult{ErrorMessage: stream.Err.Error()}, state, stream.Err
 	}
 	if stream.ErrorMessage != "" {
@@ -292,6 +300,7 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 	var fallback string
 	var handleErr error
 	var prompted bool
+	var currentRunSeen bool
 	err = scanSSEEvents(resp.Body, func(raw string) bool {
 		var event map[string]any
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
@@ -309,6 +318,10 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 		if !isRunEvent(event, sessionID, messageID) {
 			return false
 		}
+		messageSpecific := isMessageSpecificEvent(event, messageID)
+		if messageSpecific {
+			currentRunSeen = true
+		}
 		if !prompted {
 			select {
 			case <-promptAccepted:
@@ -316,7 +329,10 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			default:
 			}
 		}
-		if !prompted && !isMessageSpecificEvent(event, messageID) {
+		if !prompted && !messageSpecific {
+			return false
+		}
+		if !currentRunSeen && !messageSpecific {
 			return false
 		}
 
@@ -373,6 +389,19 @@ func (a *Adapter) fetchFinalMessage(ctx context.Context, sessionID string, messa
 		return "", err
 	}
 	return finalTextFromMessages(messages, messageID, fallback)
+}
+
+func (a *Adapter) abortSession(sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = a.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/abort", nil, nil)
+}
+
+func sendContextErr(parent context.Context, sendCtx context.Context) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	return sendCtx.Err()
 }
 
 func (a *Adapter) baseURL() string {

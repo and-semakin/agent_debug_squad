@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,6 +20,8 @@ type captureSink struct {
 	stdout []string
 	stderr []string
 }
+
+const currentRunMarkerEvent = `{"type":"message.updated","properties":{"sessionID":"session_123","info":{"id":"msg_ads_run_1","role":"user"}}}`
 
 func (s *captureSink) StdoutLine(line string) {
 	s.stdout = append(s.stdout, line)
@@ -46,6 +49,8 @@ func writeConnectedAndIdleAfterPrompt(t *testing.T, w http.ResponseWriter, promp
 		t.Fatal("prompt_async did not arrive")
 	}
 	time.Sleep(25 * time.Millisecond)
+	fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
 	fmt.Fprintln(w)
 	flusher.Flush()
@@ -312,6 +317,8 @@ func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
 				t.Fatal("prompt_async did not arrive")
 			}
 			time.Sleep(25 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
 			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
 			fmt.Fprintln(w)
 			flusher.Flush()
@@ -379,6 +386,8 @@ func TestSendTimeoutBudgetIncludesStreamingBeforeFinalMessageFetch(t *testing.T)
 			}
 			time.Sleep(25 * time.Millisecond)
 			time.Sleep(800 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
 			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
 			fmt.Fprintln(w)
 			flusher.Flush()
@@ -506,6 +515,8 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 				t.Fatal("prompt_async did not arrive after server.connected")
 			}
 			time.Sleep(25 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+toolEvent)
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+idleEvent)
@@ -599,8 +610,8 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 	if !ok || part["text"] != "hello" {
 		t.Fatalf("part = %#v, want text hello", parts[0])
 	}
-	if len(sink.stdout) != 2 || sink.stdout[0] != toolEvent || sink.stdout[1] != idleEvent {
-		t.Fatalf("stdout = %#v, want tool and idle events", sink.stdout)
+	if len(sink.stdout) != 3 || sink.stdout[0] != currentRunMarkerEvent || sink.stdout[1] != toolEvent || sink.stdout[2] != idleEvent {
+		t.Fatalf("stdout = %#v, want marker, tool, and idle events", sink.stdout)
 	}
 	if result.FinalMessage != "Final OpenCode answer" {
 		t.Fatalf("FinalMessage = %q, want %q", result.FinalMessage, "Final OpenCode answer")
@@ -633,6 +644,8 @@ func TestSendIgnoresPrePromptIdle(t *testing.T) {
 				t.Fatal("prompt_async did not arrive")
 			}
 			time.Sleep(100 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+toolEvent)
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+realIdle)
@@ -693,8 +706,254 @@ func TestSendIgnoresPrePromptIdle(t *testing.T) {
 	default:
 		t.Fatal("message was not fetched")
 	}
-	if len(sink.stdout) != 2 || sink.stdout[0] != toolEvent || sink.stdout[1] != realIdle {
-		t.Fatalf("stdout = %#v, want only real tool and idle events", sink.stdout)
+	if len(sink.stdout) != 3 || sink.stdout[0] != currentRunMarkerEvent || sink.stdout[1] != toolEvent || sink.stdout[2] != realIdle {
+		t.Fatalf("stdout = %#v, want marker, real tool, and idle events", sink.stdout)
+	}
+}
+
+func TestSendIgnoresStaleIdleAfterPromptAccepted(t *testing.T) {
+	promptSeen := make(chan struct{})
+	realIdleSent := make(chan struct{})
+	messageFetched := make(chan struct{}, 1)
+	staleIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
+	toolEvent := `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_1"},"tool":"read"}}`
+	realIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(100 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+staleIdle)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "data: "+toolEvent)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "data: "+realIdle)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			close(realIdleSent)
+		case "/session/session_123/prompt_async":
+			w.WriteHeader(http.StatusNoContent)
+			close(promptSeen)
+		case "/session/session_123/message":
+			select {
+			case <-realIdleSent:
+			default:
+				http.Error(w, "message fetched before real idle", http.StatusInternalServerError)
+				return
+			}
+			messageFetched <- struct{}{}
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+	sink := &captureSink{}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "Final OpenCode answer" {
+		t.Fatalf("FinalMessage = %q, want final answer", result.FinalMessage)
+	}
+	select {
+	case <-messageFetched:
+	default:
+		t.Fatal("message was not fetched")
+	}
+	if len(sink.stdout) != 3 || sink.stdout[0] != currentRunMarkerEvent || sink.stdout[1] != toolEvent || sink.stdout[2] != realIdle {
+		t.Fatalf("stdout = %#v, want marker, real tool, and real idle events", sink.stdout)
+	}
+}
+
+func TestSendCancelAfterPromptAcceptedAbortsSessionWithBasicAuth(t *testing.T) {
+	promptSeen := make(chan struct{})
+	abortSeen := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			<-r.Context().Done()
+		case "/session/session_123/prompt_async":
+			w.WriteHeader(http.StatusNoContent)
+			close(promptSeen)
+		case "/session/session_123/abort":
+			if r.Method != http.MethodPost {
+				t.Fatalf("abort method = %s, want POST", r.Method)
+			}
+			username, password, ok := r.BasicAuth()
+			if !ok {
+				t.Fatal("abort BasicAuth missing")
+			}
+			if username != "custom" || password != "secret" {
+				t.Fatalf("abort BasicAuth = %q/%q, want custom/secret", username, password)
+			}
+			abortSeen <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{
+			"base_url": server.URL,
+			"username": "custom",
+			"password": "secret",
+		},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		_, _, err := New(spec).Send(ctx, state, domain.RunRequest{
+			RunID:   "run_1",
+			Agent:   "Skeptic",
+			Message: "hello",
+		}, domain.DiscardRunSink())
+		done <- err
+	}()
+
+	select {
+	case <-promptSeen:
+	case <-time.After(time.Second):
+		t.Fatal("prompt_async did not arrive")
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send() did not return after cancellation")
+	}
+	select {
+	case <-abortSeen:
+	case <-time.After(time.Second):
+		t.Fatal("abort was not called")
+	}
+}
+
+func TestSendAbortErrorDoesNotMaskCancellation(t *testing.T) {
+	promptSeen := make(chan struct{})
+	abortSeen := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			<-r.Context().Done()
+		case "/session/session_123/prompt_async":
+			w.WriteHeader(http.StatusNoContent)
+			close(promptSeen)
+		case "/session/session_123/abort":
+			abortSeen <- struct{}{}
+			http.Error(w, "abort failed", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		_, _, err := New(spec).Send(ctx, state, domain.RunRequest{
+			RunID:   "run_1",
+			Agent:   "Skeptic",
+			Message: "hello",
+		}, domain.DiscardRunSink())
+		done <- err
+	}()
+
+	select {
+	case <-promptSeen:
+	case <-time.After(time.Second):
+		t.Fatal("prompt_async did not arrive")
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send() did not return after cancellation")
+	}
+	select {
+	case <-abortSeen:
+	case <-time.After(time.Second):
+		t.Fatal("abort was not called")
 	}
 }
 
