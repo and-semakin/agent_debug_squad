@@ -34,7 +34,19 @@ type sessionResponse struct {
 }
 
 type messageResponse struct {
-	Parts []part `json:"parts"`
+	Info  messageInfo `json:"info"`
+	Parts []part      `json:"parts"`
+}
+
+type sessionMessage struct {
+	Info  messageInfo `json:"info"`
+	Parts []part      `json:"parts"`
+}
+
+type messageInfo struct {
+	ID       string `json:"id"`
+	Role     string `json:"role"`
+	ParentID string `json:"parentID"`
 }
 
 type part struct {
@@ -350,9 +362,31 @@ func stringValue(value any) string {
 }
 
 func (r messageResponse) finalText() string {
+	return joinTextParts(r.Parts)
+}
+
+func finalTextFromMessages(messages []sessionMessage, messageID string, fallback string) (string, error) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if message.Info.Role != "assistant" || message.Info.ParentID != messageID {
+			continue
+		}
+		if text := joinTextParts(message.Parts); text != "" {
+			return text, nil
+		}
+	}
+
+	if text := strings.TrimSpace(fallback); text != "" {
+		return fallback, nil
+	}
+
+	return "", fmt.Errorf("opencode run completed without assistant message for messageID %s", messageID)
+}
+
+func joinTextParts(parts []part) string {
 	var out []string
-	for _, part := range r.Parts {
-		if part.Text != "" {
+	for _, part := range parts {
+		if part.Type == "text" && part.Text != "" {
 			out = append(out, part.Text)
 		}
 	}

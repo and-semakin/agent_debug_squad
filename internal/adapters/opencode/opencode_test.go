@@ -206,6 +206,50 @@ func TestFallbackTextUpdateMessagePartIsReplacement(t *testing.T) {
 	}
 }
 
+func TestMessageHistoryFinalTextSelectsAssistantByParentID(t *testing.T) {
+	messages := []sessionMessage{
+		{
+			Info:  messageInfo{ID: "msg_old", Role: "assistant", ParentID: "msg_old_parent"},
+			Parts: []part{{Type: "text", Text: "old"}},
+		},
+		{
+			Info: messageInfo{ID: "msg_assistant", Role: "assistant", ParentID: "msg_ads_run_1"},
+			Parts: []part{
+				{Type: "text", Text: "line one"},
+				{Type: "text", Text: "line two"},
+			},
+		},
+	}
+
+	got, err := finalTextFromMessages(messages, "msg_ads_run_1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "line one\nline two" {
+		t.Fatalf("finalTextFromMessages() = %q", got)
+	}
+}
+
+func TestMessageHistoryFinalTextUsesFallbackWhenAssistantMissing(t *testing.T) {
+	got, err := finalTextFromMessages(nil, "msg_ads_run_1", "fallback text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "fallback text" {
+		t.Fatalf("finalTextFromMessages() = %q, want fallback text", got)
+	}
+}
+
+func TestMessageHistoryFinalTextErrorsWhenNoText(t *testing.T) {
+	_, err := finalTextFromMessages(nil, "msg_ads_run_1", "")
+	if err == nil {
+		t.Fatal("finalTextFromMessages() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "without assistant message") {
+		t.Fatalf("error = %q, want assistant message error", err.Error())
+	}
+}
+
 func TestHTTPClientUsesDefaultTimeout(t *testing.T) {
 	spec := domain.AgentSpec{
 		Name:          "Skeptic",
