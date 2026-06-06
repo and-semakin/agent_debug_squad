@@ -31,6 +31,8 @@ During a run, intermediate CLI output is written as it arrives:
 .agent-review-artifacts/sessions/<session_id>/runs/<run_id>/<agent>.stderr.log
 ```
 
+For OpenCode agents, `<agent>.events.jsonl` contains raw OpenCode `/event` payloads for the active session, including `session.next.*`, `message.*`, `session.error`, and `session.idle` events. The final `<agent>.txt` output is assembled from OpenCode message history after the session returns to idle.
+
 The same lines are also emitted to the `agent-debug-squad` server log with `run`, `agent`, and `stream` fields.
 
 YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags. Set `options.yolo: false` on an agent to opt out.
