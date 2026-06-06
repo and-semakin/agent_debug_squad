@@ -301,6 +301,23 @@ func TestMessageHistoryFinalTextUsesFallbackWhenAssistantMissing(t *testing.T) {
 	}
 }
 
+func TestMessageHistoryFinalTextErrorsWhenMatchingAssistantHasNoText(t *testing.T) {
+	messages := []sessionMessage{
+		{
+			Info:  messageInfo{ID: "msg_assistant", Role: "assistant", ParentID: "msg_ads_run_1"},
+			Parts: []part{{Type: "text", Text: "   "}},
+		},
+	}
+
+	_, err := finalTextFromMessages(messages, "msg_ads_run_1", "fallback text")
+	if err == nil {
+		t.Fatal("finalTextFromMessages() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "without assistant message") {
+		t.Fatalf("error = %q, want assistant message error", err.Error())
+	}
+}
+
 func TestMessageHistoryFinalTextErrorsWhenNoText(t *testing.T) {
 	_, err := finalTextFromMessages(nil, "msg_ads_run_1", "")
 	if err == nil {
@@ -1005,12 +1022,11 @@ func TestSendIgnoresPrePromptIdle(t *testing.T) {
 	}
 }
 
-func TestSendIgnoresStaleIdleAfterPromptAccepted(t *testing.T) {
+func TestSendAcceptsSessionScopedEventsWithoutCurrentRunMarker(t *testing.T) {
 	promptSeen := make(chan struct{})
-	realIdleSent := make(chan struct{})
+	idleSent := make(chan struct{})
 	messageFetched := make(chan struct{}, 1)
-	staleIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
-	toolEvent := `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_1"},"tool":"read"}}`
+	toolEvent := `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","tool":"read"}}`
 	realIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1025,23 +1041,18 @@ func TestSendIgnoresStaleIdleAfterPromptAccepted(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("prompt_async did not arrive")
 			}
-			time.Sleep(100 * time.Millisecond)
-			fmt.Fprintln(w, "data: "+staleIdle)
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "data: "+currentRunMarkerEvent)
-			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+toolEvent)
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+realIdle)
 			fmt.Fprintln(w)
-			close(realIdleSent)
+			close(idleSent)
 			flusher.Flush()
 		case "/session/session_123/prompt_async":
 			w.WriteHeader(http.StatusNoContent)
 			close(promptSeen)
 		case "/session/session_123/message":
 			select {
-			case <-realIdleSent:
+			case <-idleSent:
 			default:
 				http.Error(w, "message fetched before real idle", http.StatusInternalServerError)
 				return
@@ -1084,8 +1095,8 @@ func TestSendIgnoresStaleIdleAfterPromptAccepted(t *testing.T) {
 	default:
 		t.Fatal("message was not fetched")
 	}
-	if len(sink.stdout) != 3 || sink.stdout[0] != currentRunMarkerEvent || sink.stdout[1] != toolEvent || sink.stdout[2] != realIdle {
-		t.Fatalf("stdout = %#v, want marker, real tool, and real idle events", sink.stdout)
+	if len(sink.stdout) != 2 || sink.stdout[0] != toolEvent || sink.stdout[1] != realIdle {
+		t.Fatalf("stdout = %#v, want tool and idle events", sink.stdout)
 	}
 }
 

@@ -124,6 +124,9 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	if err := a.doJSON(sendCtx, http.MethodPost, "/session/"+state.BackendSessionID+"/prompt_async", a.promptBody(message, messageID), nil); err != nil {
 		cancel()
 		<-streamDone
+		if sendContextErr(ctx, sendCtx) != nil {
+			a.abortSession(state.BackendSessionID)
+		}
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 	promptAcceptedByServer = true
@@ -308,7 +311,7 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 	var handleErr error
 	var submitted bool
 	var prompted bool
-	var currentRunSeen bool
+	var activitySeen bool
 	err = scanSSEEvents(resp.Body, func(raw string) bool {
 		var event map[string]any
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
@@ -327,9 +330,6 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			return false
 		}
 		messageSpecific := isMessageSpecificEvent(event, messageID)
-		if messageSpecific {
-			currentRunSeen = true
-		}
 		if !submitted {
 			select {
 			case <-promptSubmitted:
@@ -344,12 +344,10 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			default:
 			}
 		}
-		if !prompted && !messageSpecific {
-			if eventType != "session.error" || !submitted {
-				return false
-			}
+		if !submitted && !messageSpecific {
+			return false
 		}
-		if !currentRunSeen && !messageSpecific && eventType != "session.error" {
+		if eventType == "session.idle" && !activitySeen {
 			return false
 		}
 
@@ -357,6 +355,9 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 		if err := sink.Err(); err != nil {
 			handleErr = err
 			return true
+		}
+		if eventType != "session.idle" && eventType != "session.error" {
+			activitySeen = true
 		}
 
 		update := fallbackTextFromEvent(event, messageID)
@@ -669,17 +670,19 @@ func stringValue(value any) string {
 }
 
 func finalTextFromMessages(messages []sessionMessage, messageID string, fallback string) (string, error) {
+	foundAssistant := false
 	for i := len(messages) - 1; i >= 0; i-- {
 		message := messages[i]
 		if message.Info.Role != "assistant" || message.Info.ParentID != messageID {
 			continue
 		}
-		if text := joinTextParts(message.Parts); text != "" {
+		foundAssistant = true
+		if text := joinTextParts(message.Parts); strings.TrimSpace(text) != "" {
 			return text, nil
 		}
 	}
 
-	if text := strings.TrimSpace(fallback); text != "" {
+	if !foundAssistant && strings.TrimSpace(fallback) != "" {
 		return fallback, nil
 	}
 
