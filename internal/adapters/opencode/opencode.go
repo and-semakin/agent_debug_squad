@@ -104,13 +104,14 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	defer cancelSend()
 
 	messageID := generatedMessageID(run.RunID)
+	promptAccepted := make(chan struct{})
 	streamCtx, cancel := context.WithCancel(sendCtx)
 	defer cancel()
 
 	ready := make(chan error, 1)
 	streamDone := make(chan streamResult, 1)
 	go func() {
-		streamDone <- a.streamEvents(streamCtx, state.BackendSessionID, messageID, sink, ready)
+		streamDone <- a.streamEvents(streamCtx, state.BackendSessionID, messageID, promptAccepted, sink, ready)
 	}()
 
 	if err := <-ready; err != nil {
@@ -122,6 +123,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		<-streamDone
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
+	close(promptAccepted)
 
 	stream := <-streamDone
 	if stream.Err != nil {
@@ -256,7 +258,7 @@ func (a *Adapter) promptBody(message string, messageID string) map[string]any {
 	return body
 }
 
-func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID string, sink domain.RunSink, ready chan<- error) streamResult {
+func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID string, promptAccepted <-chan struct{}, sink domain.RunSink, ready chan<- error) streamResult {
 	req, err := a.newRequest(ctx, http.MethodGet, "/event", nil)
 	if err != nil {
 		ready <- err
@@ -289,6 +291,7 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 
 	var fallback string
 	var handleErr error
+	var prompted bool
 	err = scanSSEEvents(resp.Body, func(raw string) bool {
 		var event map[string]any
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
@@ -304,6 +307,16 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 		}
 
 		if !isRunEvent(event, sessionID, messageID) {
+			return false
+		}
+		if !prompted {
+			select {
+			case <-promptAccepted:
+				prompted = true
+			default:
+			}
+		}
+		if !prompted && !isMessageSpecificEvent(event, messageID) {
 			return false
 		}
 
@@ -529,6 +542,28 @@ func isRunEvent(event map[string]any, sessionID string, messageID string) bool {
 	}
 
 	return true
+}
+
+func isMessageSpecificEvent(event map[string]any, messageID string) bool {
+	properties, ok := event["properties"].(map[string]any)
+	if !ok {
+		return false
+	}
+
+	if part, ok := properties["part"].(map[string]any); ok && stringValue(part["messageID"]) == messageID {
+		return true
+	}
+
+	if info, ok := properties["info"].(map[string]any); ok {
+		if stringValue(info["parentID"]) == messageID {
+			return true
+		}
+		if stringValue(info["role"]) == "user" && stringValue(info["id"]) == messageID {
+			return true
+		}
+	}
+
+	return false
 }
 
 type fallbackTextUpdate struct {

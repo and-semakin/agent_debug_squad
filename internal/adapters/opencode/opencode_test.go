@@ -32,6 +32,25 @@ func (s *captureSink) Err() error {
 	return nil
 }
 
+func writeConnectedAndIdleAfterPrompt(t *testing.T, w http.ResponseWriter, promptSeen <-chan struct{}) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher := w.(http.Flusher)
+	fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+	fmt.Fprintln(w)
+	flusher.Flush()
+	select {
+	case <-promptSeen:
+	case <-time.After(time.Second):
+		t.Fatal("prompt_async did not arrive")
+	}
+	time.Sleep(25 * time.Millisecond)
+	fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+	fmt.Fprintln(w)
+	flusher.Flush()
+}
+
 func TestGeneratedMessageIDUsesRunID(t *testing.T) {
 	if got := generatedMessageID("run_000123"); got != "msg_ads_run_000123" {
 		t.Fatalf("generatedMessageID() = %q, want %q", got, "msg_ads_run_000123")
@@ -278,6 +297,7 @@ func TestHTTPClientUsesConfiguredTimeoutSeconds(t *testing.T) {
 }
 
 func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
+	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -285,10 +305,18 @@ func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
 			flusher := w.(http.Flusher)
 			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
 			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(25 * time.Millisecond)
 			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
 			fmt.Fprintln(w)
 			flusher.Flush()
 		case "/session/session_123/prompt_async":
+			close(promptSeen)
 			w.WriteHeader(http.StatusNoContent)
 		case "/session/session_123/message":
 			select {
@@ -335,6 +363,7 @@ func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
 }
 
 func TestSendTimeoutBudgetIncludesStreamingBeforeFinalMessageFetch(t *testing.T) {
+	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -343,11 +372,18 @@ func TestSendTimeoutBudgetIncludesStreamingBeforeFinalMessageFetch(t *testing.T)
 			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
 			fmt.Fprintln(w)
 			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(25 * time.Millisecond)
 			time.Sleep(800 * time.Millisecond)
 			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
 			fmt.Fprintln(w)
 			flusher.Flush()
 		case "/session/session_123/prompt_async":
+			close(promptSeen)
 			w.WriteHeader(http.StatusNoContent)
 		case "/session/session_123/message":
 			select {
@@ -469,6 +505,7 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("prompt_async did not arrive after server.connected")
 			}
+			time.Sleep(25 * time.Millisecond)
 			fmt.Fprintln(w, "data: "+toolEvent)
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+idleEvent)
@@ -573,8 +610,13 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 	}
 }
 
-func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
-	var gotBody map[string]any
+func TestSendIgnoresPrePromptIdle(t *testing.T) {
+	promptSeen := make(chan struct{})
+	realIdleSent := make(chan struct{})
+	messageFetched := make(chan struct{}, 1)
+	prePromptIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
+	toolEvent := `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_1"},"tool":"read"}}`
+	realIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -582,14 +624,93 @@ func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 			flusher := w.(http.Flusher)
 			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
 			fmt.Fprintln(w)
-			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
+			fmt.Fprintln(w, "data: "+prePromptIdle)
 			fmt.Fprintln(w)
 			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			time.Sleep(100 * time.Millisecond)
+			fmt.Fprintln(w, "data: "+toolEvent)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "data: "+realIdle)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			close(realIdleSent)
+		case "/session/session_123/prompt_async":
+			close(promptSeen)
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			select {
+			case <-promptSeen:
+			default:
+				http.Error(w, "message fetched before prompt_async", http.StatusInternalServerError)
+				return
+			}
+			select {
+			case <-realIdleSent:
+			default:
+				http.Error(w, "message fetched before real idle", http.StatusInternalServerError)
+				return
+			}
+			messageFetched <- struct{}{}
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_ads_run_1"},
+					"parts": []map[string]any{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+	sink := &captureSink{}
+
+	result, _, err := New(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID:   "run_1",
+		Agent:   "Skeptic",
+		Message: "hello",
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "Final OpenCode answer" {
+		t.Fatalf("FinalMessage = %q, want final answer", result.FinalMessage)
+	}
+	select {
+	case <-messageFetched:
+	default:
+		t.Fatal("message was not fetched")
+	}
+	if len(sink.stdout) != 2 || sink.stdout[0] != toolEvent || sink.stdout[1] != realIdle {
+		t.Fatalf("stdout = %#v, want only real tool and idle events", sink.stdout)
+	}
+}
+
+func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
+	var gotBody map[string]any
+	promptSeen := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
 		case "/session/session_123/prompt_async":
 			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 				t.Fatal(err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			close(promptSeen)
 		case "/session/session_123/message":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
@@ -636,21 +757,17 @@ func TestSendIncludesStartupPromptOnFirstRun(t *testing.T) {
 
 func TestSendOmitsEmptyModelAndAgent(t *testing.T) {
 	var gotBody map[string]any
+	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
-			w.Header().Set("Content-Type", "text/event-stream")
-			flusher := w.(http.Flusher)
-			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
-			fmt.Fprintln(w)
-			flusher.Flush()
+			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
 		case "/session/session_123/prompt_async":
 			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 				t.Fatal(err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			close(promptSeen)
 		case "/session/session_123/message":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
@@ -689,6 +806,7 @@ func TestSendOmitsEmptyModelAndAgent(t *testing.T) {
 }
 
 func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
+	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		username, password, ok := r.BasicAuth()
 		if !ok {
@@ -699,15 +817,10 @@ func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/event":
-			w.Header().Set("Content-Type", "text/event-stream")
-			flusher := w.(http.Flusher)
-			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
-			fmt.Fprintln(w)
-			flusher.Flush()
+			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
 		case "/session/session_123/prompt_async":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			close(promptSeen)
 		case "/session/session_123/message":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
@@ -743,6 +856,7 @@ func TestSendUsesDefaultBasicAuthUsername(t *testing.T) {
 }
 
 func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
+	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		username, password, ok := r.BasicAuth()
 		if !ok {
@@ -753,15 +867,10 @@ func TestSendUsesConfiguredBasicAuthUsername(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/event":
-			w.Header().Set("Content-Type", "text/event-stream")
-			flusher := w.(http.Flusher)
-			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
-			fmt.Fprintln(w)
-			flusher.Flush()
+			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
 		case "/session/session_123/prompt_async":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			close(promptSeen)
 		case "/session/session_123/message":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
@@ -873,18 +982,14 @@ func TestSendLogsUnsupportedYoloWarning(t *testing.T) {
 	logger = log.New(&logs, "", 0)
 	t.Cleanup(func() { logger = previous })
 
+	promptSeen := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
-			w.Header().Set("Content-Type", "text/event-stream")
-			flusher := w.(http.Flusher)
-			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, `data: {"type":"session.idle","properties":{"sessionID":"session_123"}}`)
-			fmt.Fprintln(w)
-			flusher.Flush()
+			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
 		case "/session/session_123/prompt_async":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			close(promptSeen)
 		case "/session/session_123/message":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
