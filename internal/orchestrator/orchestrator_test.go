@@ -2,7 +2,11 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +94,157 @@ func TestRunWorkerWritesStreamingEvents(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "Reviewer received run run_000001") {
 		t.Fatalf("events = %q, want fake stream line", string(data))
+	}
+}
+
+func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
+	ctx := context.Background()
+	const agentName = "Reviewer"
+	const messageID = "msg_ads_run_000001"
+	const currentRunMarkerEvent = `{"type":"message.updated","properties":{"sessionID":"session_123","info":{"id":"msg_ads_run_000001","role":"user"}}}`
+	const toolEvent = `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_000001"},"tool":"read"}}`
+	const idleEvent = `{"type":"session.idle","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_000001"}}}`
+
+	eventOpened := make(chan struct{})
+	connectedSent := make(chan struct{})
+	promptSeen := make(chan struct{})
+	idleSent := make(chan struct{})
+	var gotPrompt map[string]any
+
+	writeEvent := func(w http.ResponseWriter, raw string) {
+		fmt.Fprintln(w, "data: "+raw)
+		fmt.Fprintln(w)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session":
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "session_123"})
+		case "/event":
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			close(eventOpened)
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("response writer does not flush")
+			}
+			writeEvent(w, `{"type":"server.connected"}`)
+			flusher.Flush()
+			close(connectedSent)
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			writeEvent(w, currentRunMarkerEvent)
+			writeEvent(w, toolEvent)
+			writeEvent(w, idleEvent)
+			flusher.Flush()
+			close(idleSent)
+		case "/session/session_123/prompt_async":
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			select {
+			case <-eventOpened:
+			default:
+				t.Fatal("prompt_async arrived before /event was opened")
+			}
+			select {
+			case <-connectedSent:
+			default:
+				t.Fatal("prompt_async arrived before server.connected")
+			}
+			if err := json.NewDecoder(r.Body).Decode(&gotPrompt); err != nil {
+				t.Fatal(err)
+			}
+			close(promptSeen)
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case "/session/session_123/message":
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			select {
+			case <-idleSent:
+			default:
+				t.Fatal("message history fetched before session.idle")
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"info":  map[string]string{"id": "msg_old", "role": "assistant", "parentID": "msg_other"},
+					"parts": []map[string]string{{"type": "text", "text": "wrong answer"}},
+				},
+				{
+					"info":  map[string]string{"id": "msg_assistant", "role": "assistant", "parentID": messageID},
+					"parts": []map[string]string{{"type": "text", "text": "Final OpenCode answer"}},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig(t, agentName)
+	cfg.Agents[0].Backend = "opencode"
+	cfg.Agents[0].StringOptions = map[string]string{
+		"base_url":        server.URL,
+		"timeout_seconds": "3",
+	}
+	s := store.New(cfg)
+	o, err := New(ctx, cfg, s)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, agentName, "stream via opencode", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	completed, err := o.Wait(ctx, run.RunID, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if completed.Status != domain.RunCompleted {
+		t.Fatalf("completed Status = %q, want %q; error = %v", completed.Status, domain.RunCompleted, completed.Error)
+	}
+	if gotPrompt["messageID"] != messageID {
+		t.Fatalf("prompt messageID = %v, want %q; prompt = %#v", gotPrompt["messageID"], messageID, gotPrompt)
+	}
+	if completed.OutputPath == nil {
+		t.Fatal("OutputPath = nil, want final answer artifact")
+	}
+	output, err := os.ReadFile(*completed.OutputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(output) error = %v", err)
+	}
+	if !strings.Contains(string(output), "Final OpenCode answer") {
+		t.Fatalf("output = %q, want final answer", string(output))
+	}
+
+	path := filepath.Join(cfg.WorkspaceDir, cfg.StateDirName, "sessions", cfg.SessionID, "runs", run.RunID, agentName+".events.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(events) error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{currentRunMarkerEvent, toolEvent, idleEvent}
+	if len(lines) != len(want) {
+		t.Fatalf("events lines = %#v, want %#v", lines, want)
+	}
+	for i, line := range lines {
+		if line != want[i] {
+			t.Fatalf("events[%d] = %q, want %q; all events = %q", i, line, want[i], string(data))
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("events[%d] is not JSON: %v", i, err)
+		}
 	}
 }
 
