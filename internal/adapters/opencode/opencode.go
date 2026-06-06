@@ -144,6 +144,11 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 
 	final, err := a.fetchFinalMessage(sendCtx, state.BackendSessionID, messageID, stream.FallbackText)
 	if err != nil {
+		if promptAcceptedByServer {
+			if sendContextErr(ctx, sendCtx) != nil {
+				a.abortSession(state.BackendSessionID)
+			}
+		}
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 	state.Status = domain.AgentIdle

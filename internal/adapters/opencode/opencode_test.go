@@ -303,6 +303,7 @@ func TestHTTPClientUsesConfiguredTimeoutSeconds(t *testing.T) {
 
 func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
 	promptSeen := make(chan struct{})
+	abortSeen := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/event":
@@ -330,6 +331,12 @@ func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
 			case <-r.Context().Done():
 			case <-time.After(2 * time.Second):
 			}
+		case "/session/session_123/abort":
+			if r.Method != http.MethodPost {
+				t.Fatalf("abort method = %s, want POST", r.Method)
+			}
+			abortSeen <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -366,6 +373,11 @@ func TestSendTimeoutCancelsBlockedFinalMessageFetch(t *testing.T) {
 	}
 	if result.ErrorMessage != err.Error() {
 		t.Fatalf("ErrorMessage = %q, want %q", result.ErrorMessage, err.Error())
+	}
+	select {
+	case <-abortSeen:
+	case <-time.After(time.Second):
+		t.Fatal("abort was not called")
 	}
 }
 
@@ -650,8 +662,8 @@ func TestSendIgnoresPrePromptIdle(t *testing.T) {
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+realIdle)
 			fmt.Fprintln(w)
-			flusher.Flush()
 			close(realIdleSent)
+			flusher.Flush()
 		case "/session/session_123/prompt_async":
 			close(promptSeen)
 			w.WriteHeader(http.StatusNoContent)
@@ -740,8 +752,8 @@ func TestSendIgnoresStaleIdleAfterPromptAccepted(t *testing.T) {
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, "data: "+realIdle)
 			fmt.Fprintln(w)
-			flusher.Flush()
 			close(realIdleSent)
+			flusher.Flush()
 		case "/session/session_123/prompt_async":
 			w.WriteHeader(http.StatusNoContent)
 			close(promptSeen)
