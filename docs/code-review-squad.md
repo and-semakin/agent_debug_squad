@@ -51,6 +51,8 @@ A Cursor agent can replace or complement one of the discussion roles without cha
       model: composer-2.5
       mode: ask
       yolo: false
+      env:
+        - NODE_USE_ENV_PROXY=1
       inherit_env:
         - PATH
         - HOME
@@ -59,7 +61,7 @@ A Cursor agent can replace or complement one of the discussion roles without cha
         - NO_PROXY
 ```
 
-`mode: ask` provides Cursor's read-only execution boundary. `HOME` is needed for a browser-authenticated CLI; use `CURSOR_API_KEY` instead for service authentication. Cursor NDJSON events are written to the normal `.events.jsonl` artifact, and its session id is resumed between turns until the agent is reset.
+`mode: ask` provides Cursor's read-only execution boundary. `HOME` is needed for a browser-authenticated CLI; use `CURSOR_API_KEY` instead for service authentication. `NODE_USE_ENV_PROXY=1` makes the Node-based CLI honor inherited HTTP(S) proxy variables. Cursor NDJSON events are written to the normal `.events.jsonl` artifact, and its session id is resumed between turns until the agent is reset.
 
 ## Agents
 

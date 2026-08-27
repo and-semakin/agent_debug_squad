@@ -16,6 +16,8 @@ agents:
       model: composer-2.5
       mode: ask
       sandbox: enabled
+      env:
+        - NODE_USE_ENV_PROXY=1
       inherit_env:
         - PATH
         - HOME
@@ -25,3 +27,4 @@ agents:
         - HTTPS_PROXY
         - ALL_PROXY
         - NO_PROXY
+        - NODE_EXTRA_CA_CERTS

@@ -4,6 +4,13 @@ Agent Debug Squad is a small local HTTP service for coordinating a named set of 
 
 ## Run Locally
 
+Install the current checkout as a reusable CLI on a typical user `PATH`:
+
+```sh
+GOBIN="$HOME/.local/bin" go install ./cmd/agent-debug-squad
+command -v agent-debug-squad
+```
+
 Start the sample fake-backend squad:
 
 ```sh
@@ -144,6 +151,7 @@ agents:
       env:
         - HTTP_PROXY=http://proxy.example:3128
         - HTTPS_PROXY=http://proxy.example:3128
+        - NODE_USE_ENV_PROXY=1
       inherit_env:
         - PATH
         - HOME
@@ -153,6 +161,22 @@ agents:
 
 `HOME` lets the child process use credentials saved by `cursor-agent login`. Alternatively, inherit `CURSOR_API_KEY` from the service environment. For proxy access, either put explicit `KEY=value` entries in `options.env` or name existing variables in `options.inherit_env`; do not export backend-specific proxy settings globally from a squad launcher.
 
+Cursor's Node-based CLI also needs `NODE_USE_ENV_PROXY=1` when routing through `HTTP_PROXY` or `HTTPS_PROXY`. If the proxy performs TLS inspection, pass `NODE_EXTRA_CA_CERTS` to the Cursor child process as well.
+
 `model` maps to Cursor `--model`. `mode` maps to `--mode` (`ask` and `plan` are read-only Cursor modes), and `sandbox` maps to `--sandbox`. Agent Debug Squad passes `--force` when YOLO is enabled. Reviewer roles should therefore set both `mode: ask` and `yolo: false`.
 
 The first successful Cursor event supplies a `session_id`, which is persisted as `backend_session_id`. Later turns use `--resume <session_id>`. `POST /agents/{name}/reset` clears this continuity so the next turn starts a new Cursor conversation and receives the startup prompt again.
+
+### Preferred Cursor Models
+
+Run `cursor-agent --list-models` after login before copying model IDs because Cursor's account-specific catalog changes over time. The current preferred shortlist is:
+
+| Purpose | Cursor CLI model ID | Notes |
+| --- | --- | --- |
+| Grok 4.6 High | `cursor-grok-4.6-high` | Cursor model pool |
+| Composer 2.5 | `composer-2.5` | No separate High variant; `composer-2.5-fast` is the speed-priced variant |
+| Claude Sonnet 5 High Thinking | `claude-sonnet-5-thinking-high` | Third-party model pool |
+| Claude Opus 5 High Thinking | `claude-opus-5-thinking-high` | Third-party model pool |
+| Claude Fable 5 High Thinking | `claude-fable-5-thinking-high` | Third-party model pool; currently marked `NO ZDR` by Cursor CLI |
+
+Use one of these exact values in `options.model`. Do not infer a model ID from its display name.
