@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/andrey/agent-debug-squad/internal/api"
-	"github.com/andrey/agent-debug-squad/internal/config"
-	"github.com/andrey/agent-debug-squad/internal/orchestrator"
-	"github.com/andrey/agent-debug-squad/internal/store"
+	"github.com/and-semakin/agent_debug_squad/internal/api"
+	"github.com/and-semakin/agent_debug_squad/internal/config"
+	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
+	"github.com/and-semakin/agent_debug_squad/internal/store"
 )
 
 const serverShutdownTimeout = 5 * time.Second

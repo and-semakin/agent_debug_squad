@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andrey/agent-debug-squad/internal/domain"
-	"github.com/andrey/agent-debug-squad/internal/orchestrator"
+	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 )
 
 const (

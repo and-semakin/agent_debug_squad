@@ -47,7 +47,7 @@ A Cursor agent can replace or complement one of the discussion roles without cha
     startup_prompt: |
       Review only. Do not change files or commit.
     options:
-      command: /Users/andrey/.local/bin/cursor-agent
+      command: cursor-agent
       model: composer-2.5
       mode: ask
       yolo: false
@@ -68,7 +68,7 @@ A Cursor agent can replace or complement one of the discussion roles without cha
 - `Facilitator`: Codex. Owns the session flow and final summary.
 - `Implementer`: Codex. Edits code only when Facilitator gives a concrete implementation request.
 - `Critic`: OpenCode with model `zai-coding-plan/glm-5.1`. Reads and critiques only.
-- `Advocat`: Kimi at `/Users/andrey/.kimi-code/bin/kimi`. Reads and defends current decisions objectively.
+- `Advocat`: Kimi. Reads and defends current decisions objectively.
 
 ## Scenario
 

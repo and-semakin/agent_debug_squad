@@ -265,7 +265,7 @@ func TestLoadProjectCodeReviewSquadConfig(t *testing.T) {
 	if advocat.Name != "Advocat" {
 		t.Fatalf("fourth agent = %q, want Advocat", advocat.Name)
 	}
-	if advocat.StringOptions["command"] != "/Users/andrey/.kimi-code/bin/kimi" {
+	if advocat.StringOptions["command"] != "kimi" {
 		t.Fatalf("Advocat command = %q", advocat.StringOptions["command"])
 	}
 }

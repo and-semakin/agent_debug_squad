@@ -1,182 +1,183 @@
 # Agent Debug Squad
 
-Agent Debug Squad is a small local HTTP service for coordinating a named set of debugging agents. It loads a squad configuration, initializes agent state, accepts run requests over HTTP, and persists session state and run artifacts under the configured workspace.
+Agent Debug Squad is a local, REST-controlled coordinator for long-lived coding-agent sessions. It gives a facilitator a small common API for starting turns, preserving backend sessions, collecting streamed artifacts, and resetting individual agents without losing the rest of the review.
 
-## Run Locally
+The project is intentionally lightweight: one Go process owns one YAML-configured squad and stores all state as readable files inside the target workspace.
 
-Install the current checkout as a reusable CLI on a typical user `PATH`:
+## Why It Exists
+
+Coding-agent CLIs expose different flags, session formats, and streaming protocols. Agent Debug Squad normalizes the lifecycle around a few operations:
+
+- configure named agents with distinct roles and models;
+- run different agents independently or in parallel;
+- resume each backend's conversation across turns;
+- stream stdout and backend events into inspectable artifacts;
+- interrupt and reset one stuck agent without restarting the squad;
+- let an external facilitator coordinate review, critique, and implementation rounds through HTTP.
+
+Supported backends are Codex CLI, Cursor Agent CLI, OpenCode, Kimi CLI, and a deterministic fake backend for local smoke tests.
+
+## Quick Start
+
+Requirements:
+
+- Go 1.22 or newer;
+- the CLI or service required by every backend in your chosen YAML config.
+
+Install the current release from GitHub:
 
 ```sh
-GOBIN="$HOME/.local/bin" go install ./cmd/agent-debug-squad
-command -v agent-debug-squad
+go install github.com/and-semakin/agent_debug_squad/cmd/agent-debug-squad@latest
 ```
 
-Start the sample fake-backend squad:
+Or run the checkout directly with the fake-backend example, which requires no external AI service:
 
 ```sh
+git clone https://github.com/and-semakin/agent_debug_squad.git
+cd agent_debug_squad
 go run ./cmd/agent-debug-squad serve --config examples/squad.yaml
 ```
 
-The server listens on `127.0.0.1:8080` with the sample config.
-
-List agents:
+The example listens only on `127.0.0.1:8080`. In another terminal:
 
 ```sh
 curl http://127.0.0.1:8080/agents
-```
 
-Submit a run to Reviewer:
-
-```sh
-curl -X POST http://127.0.0.1:8080/agents/Reviewer/runs \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Review this debugging hypothesis.","metadata":{"source":"local-smoke"}}'
-```
-
-Wait for a run to complete in the same request:
-
-```sh
-curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/runs?wait=true&timeout_seconds=5' \
+curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/runs?wait=true&timeout_seconds=30' \
   -H 'Content-Type: application/json' \
   -d '{"message":"Review this debugging hypothesis."}'
 ```
 
-Wait for an existing run without starting another one:
+## Configuration
 
-```sh
-curl -X GET 'http://127.0.0.1:8080/runs/run_000001?wait=true&timeout_seconds=600'
+A squad is a YAML file with session storage, a loopback address, and one or more named agents:
+
+```yaml
+session_name: local-review
+workspace_dir: .
+state_dir_name: .agent-debug-squad
+host: 127.0.0.1
+port: 8080
+defaults:
+  yolo: false
+agents:
+  - name: Reviewer
+    backend: cursor
+    startup_prompt: |
+      Review the repository. Report concrete findings and do not edit files.
+    options:
+      command: cursor-agent
+      model: composer-2.5
+      mode: ask
+      yolo: false
+      env:
+        - NODE_USE_ENV_PROXY=1
+      inherit_env:
+        - PATH
+        - HOME
+        - HTTP_PROXY
+        - HTTPS_PROXY
+        - NO_PROXY
 ```
 
-If the wait timeout expires before the run finishes, the response is still `200 OK` with the latest `RunRecord`, and the run continues in the background.
-When `timeout_seconds` is omitted, `POST /agents/{name}/runs?wait=true` waits up to 60 seconds and `GET /runs/{run_id}?wait=true` waits up to 30 seconds.
+See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, [examples/cursor-squad.yaml](examples/cursor-squad.yaml) for a read-only Cursor reviewer, and [configs/code-review-squad.yaml](configs/code-review-squad.yaml) for a larger facilitator/implementer/critic setup.
 
-Reset an idle or failed agent so its next run starts in a fresh backend session:
+### Backend Notes
+
+| Backend | Connection | Session continuity | Important options |
+| --- | --- | --- | --- |
+| `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
+| `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
+| `opencode` | Local HTTP server | OpenCode session ID | `base_url`, `model`, `timeout_seconds` |
+| `kimi` | CLI process | Kimi local session | `command`, `model` |
+| `fake` | In process | Deterministic state | none |
+
+`defaults.yolo` is `true` when omitted. Codex maps YOLO to its approval/sandbox bypass flags, and Cursor maps it to `--force`. Reviewer roles should explicitly use `yolo: false`; Cursor reviewers should additionally use a read-only `mode` such as `ask` or `plan`.
+
+Cursor model IDs depend on the account and current catalog. Verify them before use:
+
+```sh
+cursor-agent --list-models
+```
+
+## Environment And Secrets
+
+CLI-backed agents receive a constrained environment rather than the server's complete ambient environment:
+
+- `options.env` sets explicit `KEY=value` entries on one agent process;
+- `options.inherit_env` copies only the named variables from the server process;
+- later explicit entries override inherited values.
+
+Keep credentials out of committed YAML. Prefer environment variables, an OS credential store, or a private ignored launcher/config. The checked-in proxy URLs use the reserved `.example` domain and are non-functional placeholders.
+
+Cursor browser authentication normally requires inheriting `HOME`; API-key authentication requires `CURSOR_API_KEY`. When Cursor uses `HTTP_PROXY` or `HTTPS_PROXY`, also set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if the proxy performs TLS inspection.
+
+## HTTP API
+
+The main endpoints are:
+
+```text
+GET  /health
+GET  /agents
+GET  /runs
+GET  /runs/{run_id}
+POST /agents/{agent}/runs
+POST /agents/{agent}/reset
+GET  /transcript
+```
+
+Append `?wait=true&timeout_seconds=N` when creating a run or reading one by ID to long-poll for progress. A wait timeout does not cancel the run; it returns the latest `RunRecord`. Starting a second run for an already-busy agent returns `409 Conflict`.
+
+Reset an idle agent so its next turn starts a fresh backend session:
 
 ```sh
 curl -X POST http://127.0.0.1:8080/agents/Reviewer/reset
 ```
 
-If an agent is stuck in a run, interrupt that run and reset the agent explicitly:
+Force-reset a stuck agent and mark its active run as interrupted:
 
 ```sh
 curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/reset?force=true'
 ```
 
-Reset keeps existing run artifacts and appends an `agent_reset` event to `transcript.jsonl`. The next run after reset includes the agent startup prompt again.
+The service deliberately accepts only loopback hosts because the v1 API has no authentication. Do not expose it directly to a network.
 
-The reset response includes both audit fields and the full updated agent state:
+## Artifacts
 
-```json
-{
-  "agent": "Reviewer",
-  "previous_backend_session_id": "thread_old",
-  "backend_session_id": "thread_new_or_empty",
-  "status": "idle",
-  "active_run": false,
-  "force": false,
-  "state": {
-    "name": "Reviewer",
-    "last_run_id": "",
-    "status": "idle"
-  }
-}
-```
-
-If `POST /agents/{name}/reset` returns `404`, check that the running server binary is up to date and that the request is going to the expected host and port. Older `agent-debug-squad` server processes do not have the reset route; reinstall with `go install ./cmd/agent-debug-squad` and restart the server.
-
-## Output Layout
-
-State is written below:
+Each session is stored below `<workspace_dir>/<state_dir_name>/sessions/<session_id>/`:
 
 ```text
-<workspace_dir>/<state_dir_name>/sessions/<session_id>/
-  config.json
-  transcript.jsonl
-  agents/<agent_name>/state.json
-  runs/<run_id>/run.json
-  runs/<run_id>/<agent_name>.events.jsonl
-  runs/<run_id>/<agent_name>.txt
-  runs/<run_id>/<agent_name>.stderr.log
+config.json
+transcript.jsonl
+agents/<agent_name>/state.json
+runs/<run_id>/run.json
+runs/<run_id>/<agent_name>.events.jsonl
+runs/<run_id>/<agent_name>.txt
+runs/<run_id>/<agent_name>.stderr.log
 ```
 
-With `examples/squad.yaml`, that starts under `./.agent-debug-squad/sessions/<session_id>/`.
+The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.
 
-CLI-backed agents stream intermediate stdout into `.events.jsonl` and stderr into `.stderr.log` while the run is still active. OpenCode-backed agents stream raw OpenCode `/event` JSON into `.events.jsonl` while the run is active, then write the final assistant response to `<agent>.txt` after `session.idle`. The same lines are emitted to the server log with `run`, `agent`, and `stream` fields. YOLO mode defaults to `defaults.yolo: true`; Codex uses `--dangerously-bypass-approvals-and-sandbox`, Cursor uses `--force`, while Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags and OpenCode HTTP mode does not expose an equivalent permission bypass. An agent can opt out with `options.yolo: false`.
+## Codex Skill
 
-## Codex Environment Whitelist
+A portable Codex skill for operating Agent Debug Squad is included at [skills/agent-debug-squad/SKILL.md](skills/agent-debug-squad/SKILL.md). Copy the `agent-debug-squad` directory into your Codex skills directory if you want it available outside this repository. Keep machine-specific paths and credentials in local configuration rather than editing the tracked copy.
 
-Codex-backed agents can pass a constrained environment through `options.inherit_env`. Keep this list explicit and minimal:
+## Development
 
-```yaml
-agents:
-  - name: Reviewer
-    backend: codex
-    startup_prompt: Review the proposed fix and identify risks.
-    options:
-      command: codex
-      model: gpt-5.5
-      reasoning: medium
-      inherit_env:
-        - OPENAI_API_KEY
-        - CODEX_HOME
-        - PATH
-```
-
-`model` maps to Codex `--model`. `reasoning` maps to Codex `model_reasoning_effort`; omit either key to use the default from Codex configuration.
-
-## Cursor Backend
-
-Install and authenticate Cursor Agent CLI before starting a Cursor-backed squad:
+Run the complete test suite:
 
 ```sh
-curl https://cursor.com/install -fsS | bash
-cursor-agent login
-cursor-agent status
-cursor-agent --list-models
+go test ./...
 ```
 
-Cursor agents support a specific model, stateful resume, enforced read-only modes, sandbox selection, and the same constrained child-process environment pattern as Codex:
+Build the CLI:
 
-```yaml
-agents:
-  - name: CursorCritic
-    backend: cursor
-    startup_prompt: Review the code and report evidence. Do not edit files.
-    options:
-      command: /Users/andrey/.local/bin/cursor-agent
-      model: composer-2.5
-      mode: ask
-      sandbox: enabled
-      yolo: false
-      env:
-        - HTTP_PROXY=http://proxy.example:3128
-        - HTTPS_PROXY=http://proxy.example:3128
-        - NODE_USE_ENV_PROXY=1
-      inherit_env:
-        - PATH
-        - HOME
-        - CURSOR_API_KEY
-        - NO_PROXY
+```sh
+go build ./cmd/agent-debug-squad
 ```
 
-`HOME` lets the child process use credentials saved by `cursor-agent login`. Alternatively, inherit `CURSOR_API_KEY` from the service environment. For proxy access, either put explicit `KEY=value` entries in `options.env` or name existing variables in `options.inherit_env`; do not export backend-specific proxy settings globally from a squad launcher.
+The design records and implementation plans under [docs/superpowers](docs/superpowers) document the project's SDD history. [docs/code-review-squad.md](docs/code-review-squad.md) describes the larger example workflow.
 
-Cursor's Node-based CLI also needs `NODE_USE_ENV_PROXY=1` when routing through `HTTP_PROXY` or `HTTPS_PROXY`. If the proxy performs TLS inspection, pass `NODE_EXTRA_CA_CERTS` to the Cursor child process as well.
+## Current Scope
 
-`model` maps to Cursor `--model`. `mode` maps to `--mode` (`ask` and `plan` are read-only Cursor modes), and `sandbox` maps to `--sandbox`. Agent Debug Squad passes `--force` when YOLO is enabled. Reviewer roles should therefore set both `mode: ask` and `yolo: false`.
-
-The first successful Cursor event supplies a `session_id`, which is persisted as `backend_session_id`. Later turns use `--resume <session_id>`. `POST /agents/{name}/reset` clears this continuity so the next turn starts a new Cursor conversation and receives the startup prompt again.
-
-### Preferred Cursor Models
-
-Run `cursor-agent --list-models` after login before copying model IDs because Cursor's account-specific catalog changes over time. The current preferred shortlist is:
-
-| Purpose | Cursor CLI model ID | Notes |
-| --- | --- | --- |
-| Grok 4.6 High | `cursor-grok-4.6-high` | Cursor model pool |
-| Composer 2.5 | `composer-2.5` | No separate High variant; `composer-2.5-fast` is the speed-priced variant |
-| Claude Sonnet 5 High Thinking | `claude-sonnet-5-thinking-high` | Third-party model pool |
-| Claude Opus 5 High Thinking | `claude-opus-5-thinking-high` | Third-party model pool |
-| Claude Fable 5 High Thinking | `claude-fable-5-thinking-high` | Third-party model pool; currently marked `NO ZDR` by Cursor CLI |
-
-Use one of these exact values in `options.model`. Do not infer a model ID from its display name.
+Agent Debug Squad is a local developer tool, not a hosted multi-tenant service. It does not provide API authentication, distributed scheduling, a browser UI, or automatic agent-to-agent broadcast. A facilitator must send explicit turns, and agents exchange longer results through the persisted artifact files.

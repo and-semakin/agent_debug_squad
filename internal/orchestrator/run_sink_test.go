@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/andrey/agent-debug-squad/internal/domain"
-	"github.com/andrey/agent-debug-squad/internal/store"
+	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/store"
 )
 
 func TestRunSinkWritesArtifactsAndLogs(t *testing.T) {

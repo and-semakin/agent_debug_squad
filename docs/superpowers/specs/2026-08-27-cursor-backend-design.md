@@ -36,7 +36,7 @@ agents:
     startup_prompt: |
       Review only. Do not edit files.
     options:
-      command: /Users/andrey/.local/bin/cursor-agent
+      command: cursor-agent
       model: composer-2.5
       mode: ask
       sandbox: enabled

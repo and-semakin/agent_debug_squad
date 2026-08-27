@@ -1,4 +1,4 @@
-module github.com/andrey/agent-debug-squad
+module github.com/and-semakin/agent_debug_squad
 
 go 1.22
 

@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/andrey/agent-debug-squad/internal/adapters/codex"
-	"github.com/andrey/agent-debug-squad/internal/adapters/cursor"
-	"github.com/andrey/agent-debug-squad/internal/adapters/fake"
-	"github.com/andrey/agent-debug-squad/internal/adapters/kimi"
-	"github.com/andrey/agent-debug-squad/internal/adapters/opencode"
-	"github.com/andrey/agent-debug-squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/codex"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/cursor"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/fake"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/kimi"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode"
+	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
 type AgentAdapter interface {

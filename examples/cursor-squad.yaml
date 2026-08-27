@@ -12,7 +12,7 @@ agents:
       Review the repository in read-only mode. Report concrete findings with evidence.
       Do not edit files, run commands that write, or create commits.
     options:
-      command: /Users/andrey/.local/bin/cursor-agent
+      command: cursor-agent
       model: composer-2.5
       mode: ask
       sandbox: enabled
