@@ -17,6 +17,7 @@ import (
 const (
 	defaultWaitTimeout       = 60 * time.Second
 	defaultStatusWaitTimeout = 30 * time.Second
+	maxRunRequestBody        = 1 << 20
 )
 
 type Server struct {
@@ -226,8 +227,14 @@ func (s *Server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRunRequestBody)
 	var body createRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, errors.New("request body exceeds 1 MiB limit"))
+			return
+		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

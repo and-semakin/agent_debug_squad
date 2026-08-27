@@ -161,6 +161,27 @@ func TestBlankMessageReturnsBadRequest(t *testing.T) {
 	assertJSONContentType(t, rr)
 }
 
+func TestRunEndpointRejectsOversizedRequestWithoutCreatingRun(t *testing.T) {
+	srv := newTestServer(t, "Reviewer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{
+		Message: strings.Repeat("x", maxRunRequestBody+1),
+	}))
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusRequestEntityTooLarge, rr.Body.String())
+	}
+	assertJSONContentType(t, rr)
+	runs, err := srv.orchestrator.Runs(context.Background())
+	if err != nil {
+		t.Fatalf("Runs() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("len(runs) = %d, want 0", len(runs))
+	}
+}
+
 func TestUnknownRunReturnsNotFound(t *testing.T) {
 	srv := newTestServer(t, "Reviewer")
 
