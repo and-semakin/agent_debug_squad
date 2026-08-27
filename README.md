@@ -1,5 +1,7 @@
 # Agent Debug Squad
 
+[![CI](https://github.com/and-semakin/agent_debug_squad/actions/workflows/ci.yml/badge.svg)](https://github.com/and-semakin/agent_debug_squad/actions/workflows/ci.yml)
+
 Agent Debug Squad is a local, REST-controlled coordinator for long-lived coding-agent sessions. It gives a facilitator a small common API for starting turns, preserving backend sessions, collecting streamed artifacts, and resetting individual agents without losing the rest of the review.
 
 The project is intentionally lightweight: one Go process owns one YAML-configured squad and stores all state as readable files inside the target workspace.
@@ -181,3 +183,7 @@ The design records and implementation plans under [docs/superpowers](docs/superp
 ## Current Scope
 
 Agent Debug Squad is a local developer tool, not a hosted multi-tenant service. It does not provide API authentication, distributed scheduling, a browser UI, or automatic agent-to-agent broadcast. A facilitator must send explicit turns, and agents exchange longer results through the persisted artifact files.
+
+## License
+
+Agent Debug Squad is released under the [BSD 3-Clause License](LICENSE).
