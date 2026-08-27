@@ -10,18 +10,38 @@ import (
 )
 
 type runSink struct {
-	store  *store.Store
-	run    domain.RunRecord
-	logger *log.Logger
-	mu     sync.Mutex
-	err    error
+	store    *store.Store
+	run      domain.RunRecord
+	logger   *log.Logger
+	mu       sync.Mutex
+	err      error
+	progress domain.RunProgress
 }
 
 func newRunSink(st *store.Store, run domain.RunRecord, logger *log.Logger) *runSink {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &runSink{store: st, run: run, logger: logger}
+	sink := &runSink{store: st, run: run, logger: logger}
+	if run.Progress != nil {
+		sink.progress = *run.Progress
+	}
+	return sink
+}
+
+func (s *runSink) Progress(progress domain.RunProgress) {
+	s.mu.Lock()
+	s.progress = progress
+	s.mu.Unlock()
+	if err := s.store.UpdateRunProgress(s.run.RunID, progress); err != nil {
+		s.recordError(fmt.Errorf("update run progress: %w", err))
+	}
+}
+
+func (s *runSink) ProgressSnapshot() domain.RunProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneRunProgress(s.progress)
 }
 
 func (s *runSink) StdoutLine(line string) {
@@ -47,10 +67,24 @@ func (s *runSink) write(stream string, line string) {
 		_, err = s.store.AppendRunEvents(s.run, line)
 	}
 	if err != nil {
-		s.mu.Lock()
-		if s.err == nil {
-			s.err = fmt.Errorf("write %s stream: %w", stream, err)
-		}
-		s.mu.Unlock()
+		s.recordError(fmt.Errorf("write %s stream: %w", stream, err))
 	}
+}
+
+func (s *runSink) recordError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err == nil {
+		s.err = err
+	}
+}
+
+func cloneRunProgress(progress domain.RunProgress) domain.RunProgress {
+	cloned := progress
+	cloned.Subagents = append([]domain.SubagentProgress(nil), progress.Subagents...)
+	if progress.ChildLastActivityAt != nil {
+		at := *progress.ChildLastActivityAt
+		cloned.ChildLastActivityAt = &at
+	}
+	return cloned
 }

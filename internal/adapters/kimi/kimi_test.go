@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
@@ -225,6 +227,38 @@ func TestSendStreamsStdoutAndStderr(t *testing.T) {
 	}
 }
 
+func TestProgressTrackerWaitsForAgentToolAndReturnsToRunning(t *testing.T) {
+	sink := &recordingSink{}
+	tracker := newProgressTracker(sink)
+
+	tracker.handleRootEvent(`{"role":"assistant","tool_calls":[{"id":"tool_agent_1","function":{"name":"Agent"}}]}`, time.Now().UTC())
+	progress := sink.lastProgress(t)
+	if progress.Phase != domain.RunPhaseWaitingForSubagent {
+		t.Fatalf("phase = %q, want %q", progress.Phase, domain.RunPhaseWaitingForSubagent)
+	}
+
+	childActivity := time.Now().UTC().Add(time.Second)
+	tracker.updateSubagents([]domain.SubagentProgress{{
+		ID:             "agent-0",
+		ParentID:       "main",
+		Status:         "running",
+		LastActivityAt: childActivity,
+	}})
+	progress = sink.lastProgress(t)
+	if progress.ChildLastActivityAt == nil || !progress.ChildLastActivityAt.Equal(childActivity) {
+		t.Fatalf("child_last_activity_at = %v, want %v", progress.ChildLastActivityAt, childActivity)
+	}
+
+	tracker.handleRootEvent(`{"role":"tool","tool_call_id":"tool_agent_1","content":"done"}`, time.Now().UTC().Add(2*time.Second))
+	progress = sink.lastProgress(t)
+	if progress.Phase != domain.RunPhaseRunning {
+		t.Fatalf("phase = %q, want %q", progress.Phase, domain.RunPhaseRunning)
+	}
+	if progress.Subagents[0].Status != "completed" {
+		t.Fatalf("subagent status = %q, want completed", progress.Subagents[0].Status)
+	}
+}
+
 func kimiCommandScript(t *testing.T, stdout string) (string, string) {
 	t.Helper()
 
@@ -257,13 +291,38 @@ EOF
 }
 
 type recordingSink struct {
-	stdout []string
-	stderr []string
+	mu       sync.Mutex
+	stdout   []string
+	stderr   []string
+	progress []domain.RunProgress
 }
 
-func (s *recordingSink) StdoutLine(line string) { s.stdout = append(s.stdout, line) }
-func (s *recordingSink) StderrLine(line string) { s.stderr = append(s.stderr, line) }
-func (s *recordingSink) Err() error             { return nil }
+func (s *recordingSink) StdoutLine(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stdout = append(s.stdout, line)
+}
+func (s *recordingSink) StderrLine(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stderr = append(s.stderr, line)
+}
+func (s *recordingSink) Err() error { return nil }
+func (s *recordingSink) Progress(progress domain.RunProgress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.progress = append(s.progress, cloneProgress(progress))
+}
+
+func (s *recordingSink) lastProgress(t *testing.T) domain.RunProgress {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.progress) == 0 {
+		t.Fatal("no progress was reported")
+	}
+	return cloneProgress(s.progress[len(s.progress)-1])
+}
 
 func containsString(items []string, want string) bool {
 	for _, item := range items {

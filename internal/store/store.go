@@ -18,6 +18,7 @@ import (
 type Store struct {
 	cfg          domain.SessionConfig
 	transcriptMu sync.RWMutex
+	runMu        sync.RWMutex
 }
 
 func New(cfg domain.SessionConfig) *Store {
@@ -59,6 +60,12 @@ func (s *Store) LoadAgentState(name string) (domain.AgentState, error) {
 }
 
 func (s *Store) SaveRun(run domain.RunRecord) error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.saveRun(run)
+}
+
+func (s *Store) saveRun(run domain.RunRecord) error {
 	path, err := s.runPath(run.RunID)
 	if err != nil {
 		return err
@@ -67,6 +74,12 @@ func (s *Store) SaveRun(run domain.RunRecord) error {
 }
 
 func (s *Store) LoadRun(runID string) (domain.RunRecord, error) {
+	s.runMu.RLock()
+	defer s.runMu.RUnlock()
+	return s.loadRun(runID)
+}
+
+func (s *Store) loadRun(runID string) (domain.RunRecord, error) {
 	var run domain.RunRecord
 	path, err := s.runPath(runID)
 	if err != nil {
@@ -74,6 +87,18 @@ func (s *Store) LoadRun(runID string) (domain.RunRecord, error) {
 	}
 	err = readJSON(path, &run)
 	return run, err
+}
+
+func (s *Store) UpdateRunProgress(runID string, progress domain.RunProgress) error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
+	run, err := s.loadRun(runID)
+	if err != nil {
+		return err
+	}
+	run.Progress = &progress
+	return s.saveRun(run)
 }
 
 func (s *Store) ListRuns() ([]domain.RunRecord, error) {

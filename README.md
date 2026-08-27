@@ -91,7 +91,7 @@ See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, 
 | `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
 | `opencode` | Local HTTP server | OpenCode session ID | `base_url`, `model`, `timeout_seconds` |
-| `kimi` | CLI process | Kimi local session | `command`, `model` |
+| `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `fake` | In process | Deterministic state | none |
 
 `defaults.yolo` is `true` when omitted. Codex maps YOLO to its approval/sandbox bypass flags, and Cursor maps it to `--force`. Reviewer roles should explicitly use `yolo: false`; Cursor reviewers should additionally use a read-only `mode` such as `ask` or `plan`.
@@ -129,6 +129,29 @@ GET  /transcript
 ```
 
 Append `?wait=true&timeout_seconds=N` when creating a run or reading one by ID to long-poll for progress. A wait timeout does not cancel the run; it returns the latest `RunRecord`. Starting a second run for an already-busy agent returns `409 Conflict`.
+
+Active run records include observable progress:
+
+```json
+{
+  "status": "running",
+  "progress": {
+    "phase": "waiting_for_subagent",
+    "last_activity_at": "2026-08-27T14:07:48Z",
+    "child_last_activity_at": "2026-08-27T14:07:48Z",
+    "subagents": [
+      {
+        "id": "agent-0",
+        "parent_id": "main",
+        "status": "running",
+        "last_activity_at": "2026-08-27T14:07:48Z"
+      }
+    ]
+  }
+}
+```
+
+The same fields are returned by `GET /runs`, `GET /runs/{run_id}`, and timed-out long polls. Kimi runs enter `waiting_for_subagent` when the root stream calls the `Agent` tool and return to `running` when that tool result arrives. While the root stream is waiting, the Kimi adapter watches the matching local Kimi session's `state.json` and child `wire.jsonl` files so `child_last_activity_at` continues to advance. This visibility is a liveness signal for facilitators; the service does not automatically force-reset a quiet run.
 
 Reset an idle agent so its next turn starts a fresh backend session:
 

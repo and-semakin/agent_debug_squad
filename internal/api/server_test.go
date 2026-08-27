@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +43,84 @@ func TestRunEndpointReturnsRunIDAndStatus(t *testing.T) {
 	}
 	if run.Status != domain.RunQueued && run.Status != domain.RunRunning && run.Status != domain.RunCompleted {
 		t.Fatalf("Status = %q, want an accepted run status", run.Status)
+	}
+}
+
+func TestRunEndpointExposesKimiSubagentProgress(t *testing.T) {
+	workspace := t.TempDir()
+	sessionRoot := t.TempDir()
+	scriptPath := filepath.Join(t.TempDir(), "fake-kimi.sh")
+	sessionDir := filepath.Join(sessionRoot, "wd_test", "session_test")
+	script := `#!/bin/sh
+mkdir -p '` + filepath.Join(sessionDir, "agents", "main") + `' '` + filepath.Join(sessionDir, "agents", "agent-0") + `'
+printf '%s\n' '{"id":"session_test","cwd":"` + workspace + `","agents":{"main":{"type":"main"},"agent-0":{"type":"sub","parentAgentId":"main"}}}' > '` + filepath.Join(sessionDir, "state.json") + `'
+printf '%s\n' '{"type":"llm.request"}' > '` + filepath.Join(sessionDir, "agents", "agent-0", "wire.jsonl") + `'
+printf '%s\n' '{"role":"assistant","tool_calls":[{"id":"tool_agent_1","function":{"name":"Agent"}}]}'
+sleep 2
+printf '%s\n' '{"type":"tool.call"}' >> '` + filepath.Join(sessionDir, "agents", "agent-0", "wire.jsonl") + `'
+sleep 2
+printf '%s\n' '{"role":"tool","tool_call_id":"tool_agent_1","content":"done"}'
+printf '%s\n' '{"role":"assistant","content":"Final answer"}'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
+		cfg.WorkspaceDir = workspace
+		cfg.Agents[0].Backend = "kimi"
+		cfg.Agents[0].StringOptions = map[string]string{
+			"command":      scriptPath,
+			"session_root": sessionRoot,
+		}
+	}, "Reviewer")
+
+	created := httptest.NewRecorder()
+	srv.ServeHTTP(created, newJSONRequest(t, http.MethodPost, "/agents/Reviewer/runs", runPayload{Message: "review"}))
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body = %s", created.Code, http.StatusAccepted, created.Body.String())
+	}
+	var accepted domain.RunRecord
+	decodeResponse(t, created, &accepted)
+
+	deadline := time.After(5 * time.Second)
+	var firstChildActivity time.Time
+	for {
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/"+accepted.RunID, nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("get status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var run domain.RunRecord
+		decodeResponse(t, rr, &run)
+		if run.Progress != nil && run.Progress.Phase == domain.RunPhaseWaitingForSubagent && run.Progress.ChildLastActivityAt != nil && len(run.Progress.Subagents) == 1 {
+			if run.Progress.Subagents[0].ID != "agent-0" {
+				t.Fatalf("subagent id = %q, want agent-0", run.Progress.Subagents[0].ID)
+			}
+			firstChildActivity = *run.Progress.ChildLastActivityAt
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("run did not expose Kimi subagent progress: %#v", run.Progress)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	deadline = time.After(5 * time.Second)
+	for {
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/runs/"+accepted.RunID, nil))
+		var run domain.RunRecord
+		decodeResponse(t, rr, &run)
+		if run.Progress != nil && run.Progress.Phase == domain.RunPhaseWaitingForSubagent && run.Progress.ChildLastActivityAt != nil && run.Progress.ChildLastActivityAt.After(firstChildActivity) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("child_last_activity_at did not advance beyond %v: %#v", firstChildActivity, run.Progress)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

@@ -451,6 +451,10 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	started := time.Now().UTC()
 	run.Status = domain.RunRunning
 	run.StartedAt = &started
+	run.Progress = &domain.RunProgress{
+		Phase:          domain.RunPhaseRunning,
+		LastActivityAt: started,
+	}
 	_ = o.store.SaveRun(run)
 
 	o.mu.Lock()
@@ -474,6 +478,9 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 
 	completed := time.Now().UTC()
 	run.CompletedAt = &completed
+	progress := sink.ProgressSnapshot()
+	progress.LastActivityAt = completed
+	run.Progress = &progress
 	if result.Stderr != "" {
 		stderrPath, err := o.store.WriteRunStderr(run, result.Stderr)
 		if err != nil && sendErr == nil {
@@ -496,6 +503,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	interruptedByReset := o.finishRunInterruptible(agentName, run.RunID)
 	if interruptedByReset {
 		run.Status = domain.RunInterrupted
+		run.Progress.Phase = domain.RunPhaseInterrupted
 		message := "interrupted by force reset"
 		run.Error = &message
 		newState.Status = domain.AgentIdle
@@ -503,6 +511,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		newState.LastRunID = state.LastRunID
 	} else if sendErr != nil || result.ErrorMessage != "" {
 		run.Status = domain.RunFailed
+		run.Progress.Phase = domain.RunPhaseFailed
 		message := result.ErrorMessage
 		if message == "" {
 			message = sendErr.Error()
@@ -513,6 +522,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		newState.LastRunID = state.LastRunID
 	} else {
 		run.Status = domain.RunCompleted
+		run.Progress.Phase = domain.RunPhaseCompleted
 		newState.Status = domain.AgentIdle
 		newState.LastError = nil
 		newState.LastRunID = run.RunID

@@ -103,7 +103,7 @@ If the HTTP wait expires while the run is still active, wait on that run instead
 curl -sS 'http://127.0.0.1:8080/runs/run_000001?wait=true&timeout_seconds=600'
 ```
 
-The wait timeout does not cancel or reset the backend run. For immediate status, use `GET /runs` or `GET /runs/{run_id}`.
+The wait timeout does not cancel or reset the backend run. For immediate status, use `GET /runs` or `GET /runs/{run_id}`. Active run records include a `progress` object. For Kimi, inspect `progress.phase`, `progress.child_last_activity_at`, and `progress.subagents` before deciding that a quiet parent run is stuck. `waiting_for_subagent` with advancing child activity means the nested agent is still working.
 
 Use artifact files as the cross-agent channel:
 

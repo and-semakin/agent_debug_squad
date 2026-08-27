@@ -35,6 +35,8 @@ For OpenCode agents, `<agent>.events.jsonl` contains raw OpenCode `/event` paylo
 
 The same lines are also emitted to the `agent-debug-squad` server log with `run`, `agent`, and `stream` fields.
 
+`GET /runs` and `GET /runs/<run_id>` also expose a `progress` object. For Kimi, a root `Agent` tool call sets `progress.phase` to `waiting_for_subagent`. The adapter observes Kimi's local session tree and updates `progress.subagents` plus `progress.child_last_activity_at` as child `wire.jsonl` files change. When the root receives the `Agent` tool result, the phase returns to `running` and the observed child entries become `completed`.
+
 YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Cursor uses `--force`; Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags, and OpenCode HTTP mode does not expose an equivalent permission bypass. Set `options.yolo: false` on an agent to opt out.
 
 ## Optional Cursor Role

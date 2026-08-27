@@ -20,6 +20,30 @@ const (
 	RunInterrupted RunStatus = "interrupted"
 )
 
+type RunPhase string
+
+const (
+	RunPhaseRunning            RunPhase = "running"
+	RunPhaseWaitingForSubagent RunPhase = "waiting_for_subagent"
+	RunPhaseCompleted          RunPhase = "completed"
+	RunPhaseFailed             RunPhase = "failed"
+	RunPhaseInterrupted        RunPhase = "interrupted"
+)
+
+type SubagentProgress struct {
+	ID             string    `json:"id"`
+	ParentID       string    `json:"parent_id,omitempty"`
+	Status         string    `json:"status"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+}
+
+type RunProgress struct {
+	Phase               RunPhase           `json:"phase"`
+	LastActivityAt      time.Time          `json:"last_activity_at"`
+	ChildLastActivityAt *time.Time         `json:"child_last_activity_at,omitempty"`
+	Subagents           []SubagentProgress `json:"subagents,omitempty"`
+}
+
 type AgentSpec struct {
 	Name          string              `json:"name"`
 	Backend       string              `json:"backend"`
@@ -87,6 +111,7 @@ type RunRecord struct {
 	CompletedAt *time.Time        `json:"completed_at,omitempty"`
 	OutputPath  *string           `json:"output_path"`
 	Error       *string           `json:"error"`
+	Progress    *RunProgress      `json:"progress,omitempty"`
 }
 
 type RunRequest struct {
@@ -108,6 +133,16 @@ type RunSink interface {
 	StdoutLine(line string)
 	StderrLine(line string)
 	Err() error
+}
+
+type RunProgressSink interface {
+	Progress(progress RunProgress)
+}
+
+func ReportRunProgress(sink RunSink, progress RunProgress) {
+	if progressSink, ok := sink.(RunProgressSink); ok {
+		progressSink.Progress(progress)
+	}
 }
 
 type discardRunSink struct{}

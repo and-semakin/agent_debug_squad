@@ -90,7 +90,10 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
 
-	stdout, stderr, err := runCommandStreaming(ctx, cmd, sink)
+	tracker := newProgressTracker(sink)
+	streamSink := &progressTrackingSink{RunSink: sink, tracker: tracker}
+	observer := prepareSessionObserver(a.spec, command, state.WorkspaceDir, tracker)
+	stdout, stderr, err := runCommandStreaming(ctx, cmd, streamSink, observer)
 	state.Status = domain.AgentIdle
 	if err != nil {
 		return domain.RunResult{
@@ -144,7 +147,7 @@ func buildArgs(prompt string) []string {
 	return []string{"-p", prompt, "--output-format", "stream-json"}
 }
 
-func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink) ([]byte, []byte, error) {
+func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink, observer *sessionObserver) ([]byte, []byte, error) {
 	if sink == nil {
 		sink = domain.DiscardRunSink()
 	}
@@ -157,6 +160,9 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink
 		return nil, nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		if observer != nil {
+			observer.abort()
+		}
 		return nil, nil, err
 	}
 
@@ -193,7 +199,14 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink
 	wg.Add(2)
 	go scan(stdoutPipe, "stdout")
 	go scan(stderrPipe, "stderr")
+	var stopObserver func()
+	if observer != nil {
+		stopObserver = observer.discoverAndWatch(ctx)
+	}
 	wg.Wait()
+	if stopObserver != nil {
+		stopObserver()
+	}
 	waitErr := cmd.Wait()
 	if scanErr != nil {
 		return stdout.Bytes(), stderr.Bytes(), scanErr
