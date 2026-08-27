@@ -1,9 +1,12 @@
 package store
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +101,44 @@ func TestStoreWritesAgentRunOutputAndTranscript(t *testing.T) {
 	}
 }
 
+func TestSaveConfigKeepsRecoveryValuesOwnerReadable(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{
+		SessionID:    "session_test",
+		WorkspaceDir: root,
+		StateDirName: ".agent-debug-squad",
+		Agents: []domain.AgentSpec{{
+			Name:    "Reviewer",
+			Backend: "opencode",
+			Options: map[string]any{"password": "recovery-secret"},
+		}},
+	}
+	s := New(cfg)
+	if err := s.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	path := filepath.Join(s.SessionDir(), "config.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(config.json) error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config.json mode = %#o, want 0600", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(config.json) error = %v", err)
+	}
+	var saved domain.SessionConfig
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("Unmarshal(config.json) error = %v", err)
+	}
+	if got := saved.Agents[0].Options["password"]; got != "recovery-secret" {
+		t.Fatalf("persisted password = %#v, want recovery value", got)
+	}
+}
+
 func TestStoreAppendsRunEventsAndStderr(t *testing.T) {
 	root := t.TempDir()
 	cfg := domain.SessionConfig{
@@ -133,6 +174,53 @@ func TestStoreAppendsRunEventsAndStderr(t *testing.T) {
 	}
 	if string(stderr) != "err one\n" {
 		t.Fatalf("stderr = %q", string(stderr))
+	}
+}
+
+func TestStoreSerializesConcurrentTranscriptAppends(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{SessionID: "session_test", WorkspaceDir: root, StateDirName: ".agent-debug-squad"}
+	s := New(cfg)
+
+	const count = 200
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- s.AppendTranscript(domain.TranscriptEvent{
+				Type:  "facilitator_message",
+				RunID: fmt.Sprintf("run_%06d", i),
+				Text:  strings.Repeat(fmt.Sprintf("message-%d-", i), 128),
+				At:    time.Now().UTC(),
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendTranscript() error = %v", err)
+		}
+	}
+
+	events, err := s.ReadTranscript()
+	if err != nil {
+		t.Fatalf("ReadTranscript() error = %v", err)
+	}
+	if len(events) != count {
+		t.Fatalf("len(events) = %d, want %d", len(events), count)
+	}
+	seen := make(map[string]bool, count)
+	for _, event := range events {
+		seen[event.RunID] = true
+	}
+	for i := 0; i < count; i++ {
+		runID := fmt.Sprintf("run_%06d", i)
+		if !seen[runID] {
+			t.Fatalf("transcript is missing %s", runID)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 const (
 	defaultWaitTimeout       = 60 * time.Second
 	defaultStatusWaitTimeout = 30 * time.Second
+	maxRunRequestBody        = 1 << 20
 )
 
 type Server struct {
@@ -55,7 +57,104 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.cfg)
+	writeJSON(w, http.StatusOK, redactedSessionConfig(s.cfg))
+}
+
+func redactedSessionConfig(cfg domain.SessionConfig) domain.SessionConfig {
+	redacted := cfg
+	redacted.Agents = append([]domain.AgentSpec(nil), cfg.Agents...)
+	for i := range redacted.Agents {
+		redacted.Agents[i].Options = redactedOptions(cfg.Agents[i].Options)
+	}
+	return redacted
+}
+
+func redactedOptions(options map[string]any) map[string]any {
+	if options == nil {
+		return nil
+	}
+	redacted := make(map[string]any, len(options))
+	for key, value := range options {
+		switch {
+		case isSensitiveOptionKey(key):
+			redacted[key] = "[REDACTED]"
+		case strings.EqualFold(key, "env"):
+			redacted[key] = redactedEnvValues(value)
+		default:
+			redacted[key] = redactedOptionValue(value)
+		}
+	}
+	return redacted
+}
+
+func isSensitiveOptionKey(key string) bool {
+	normalized := strings.NewReplacer("-", "_", ".", "_").Replace(strings.ToLower(key))
+	for _, marker := range []string{"password", "passwd", "token", "secret", "api_key", "apikey", "authorization", "credential"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactedEnvValues(value any) any {
+	redact := func(item string) string {
+		name, _, ok := strings.Cut(item, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			return "[REDACTED]"
+		}
+		return name + "=[REDACTED]"
+	}
+	switch values := value.(type) {
+	case []any:
+		out := make([]any, len(values))
+		for i, item := range values {
+			if text, ok := item.(string); ok {
+				out[i] = redact(text)
+			} else {
+				out[i] = "[REDACTED]"
+			}
+		}
+		return out
+	case []string:
+		out := make([]string, len(values))
+		for i, item := range values {
+			out[i] = redact(item)
+		}
+		return out
+	default:
+		return "[REDACTED]"
+	}
+}
+
+func redactedOptionValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		parsed, err := url.Parse(typed)
+		if err == nil && parsed.User != nil {
+			parsed.User = url.User("[REDACTED]")
+			return parsed.String()
+		}
+		return typed
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = redactedOptionValue(item)
+		}
+		return out
+	case []string:
+		out := make([]string, len(typed))
+		for i, item := range typed {
+			if redacted, ok := redactedOptionValue(item).(string); ok {
+				out[i] = redacted
+			}
+		}
+		return out
+	case map[string]any:
+		return redactedOptions(typed)
+	default:
+		return typed
+	}
 }
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +227,14 @@ func (s *Server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRunRequestBody)
 	var body createRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, errors.New("request body exceeds 1 MiB limit"))
+			return
+		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

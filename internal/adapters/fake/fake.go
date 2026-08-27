@@ -46,7 +46,6 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return domain.RunResult{}, state, ctx.Err()
 	case <-time.After(a.delay()):
 	}
-	state.LastRunID = run.RunID
 	state.Status = domain.AgentIdle
 	return domain.RunResult{
 		FinalMessage: fmt.Sprintf("%s received: %s", state.Name, run.Message),

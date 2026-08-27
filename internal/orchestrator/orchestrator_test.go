@@ -70,6 +70,83 @@ func TestSubmitRunCompletesAndWritesOutput(t *testing.T) {
 	}
 }
 
+func TestFailedFirstRunKeepsLastRunIDEmpty(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	o.runtimes["Reviewer"].adapter = failingAdapter{err: errors.New("backend failed")}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "first attempt", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	failed, err := o.Wait(ctx, run.RunID, time.Second)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if failed.Status != domain.RunFailed {
+		t.Fatalf("Status = %q, want %q", failed.Status, domain.RunFailed)
+	}
+	state, _ := o.Agent("Reviewer")
+	if state.LastRunID != "" {
+		t.Fatalf("LastRunID = %q, want empty after failed first run", state.LastRunID)
+	}
+}
+
+func TestFailedFollowUpPreservesLastSuccessfulRunID(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := o.SubmitRun(ctx, "Reviewer", "successful turn", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun(first) error = %v", err)
+	}
+	if completed, err := o.Wait(ctx, first.RunID, time.Second); err != nil || completed.Status != domain.RunCompleted {
+		t.Fatalf("Wait(first) = %#v, %v", completed, err)
+	}
+
+	o.runtimes["Reviewer"].adapter = failingAdapter{err: errors.New("follow-up failed")}
+	second, err := o.SubmitRun(ctx, "Reviewer", "failed follow-up", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun(second) error = %v", err)
+	}
+	if failed, err := o.Wait(ctx, second.RunID, time.Second); err != nil || failed.Status != domain.RunFailed {
+		t.Fatalf("Wait(second) = %#v, %v", failed, err)
+	}
+	state, _ := o.Agent("Reviewer")
+	if state.LastRunID != first.RunID {
+		t.Fatalf("LastRunID = %q, want previous successful run %q", state.LastRunID, first.RunID)
+	}
+}
+
+type failingAdapter struct {
+	err error
+}
+
+func (a failingAdapter) Init(_ context.Context, _ domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	return state, nil
+}
+
+func (a failingAdapter) Send(_ context.Context, state domain.AgentState, _ domain.RunRequest, _ domain.RunSink) (domain.RunResult, domain.AgentState, error) {
+	state.LastRunID = "adapter-owned-value"
+	return domain.RunResult{ErrorMessage: a.err.Error()}, state, a.err
+}
+
+func (a failingAdapter) Recover(_ context.Context, state domain.AgentState) (domain.AgentState, error) {
+	return state, nil
+}
+
+func (a failingAdapter) Reset(_ context.Context, _ domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	return state, nil
+}
+
 func TestRunWorkerWritesStreamingEvents(t *testing.T) {
 	ctx := context.Background()
 	cfg := testConfig(t, "Reviewer")

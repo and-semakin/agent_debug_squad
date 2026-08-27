@@ -9,13 +9,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andrey/agent-debug-squad/internal/domain"
 )
 
 type Store struct {
-	cfg domain.SessionConfig
+	cfg          domain.SessionConfig
+	transcriptMu sync.RWMutex
 }
 
 func New(cfg domain.SessionConfig) *Store {
@@ -163,6 +165,9 @@ func (s *Store) appendRunArtifactLine(run domain.RunRecord, suffix string, line 
 }
 
 func (s *Store) AppendTranscript(event domain.TranscriptEvent) error {
+	s.transcriptMu.Lock()
+	defer s.transcriptMu.Unlock()
+
 	sessionDir, err := s.sessionDir()
 	if err != nil {
 		return err
@@ -189,6 +194,9 @@ func (s *Store) AppendTranscript(event domain.TranscriptEvent) error {
 }
 
 func (s *Store) ReadTranscript() ([]domain.TranscriptEvent, error) {
+	s.transcriptMu.RLock()
+	defer s.transcriptMu.RUnlock()
+
 	sessionDir, err := s.sessionDir()
 	if err != nil {
 		return nil, err

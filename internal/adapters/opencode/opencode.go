@@ -157,7 +157,6 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 	state.Status = domain.AgentIdle
-	state.LastRunID = run.RunID
 	return domain.RunResult{FinalMessage: final}, state, nil
 }
 

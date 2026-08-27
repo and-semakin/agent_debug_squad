@@ -500,6 +500,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		run.Error = &message
 		newState.Status = domain.AgentIdle
 		newState.LastError = nil
+		newState.LastRunID = state.LastRunID
 	} else if sendErr != nil || result.ErrorMessage != "" {
 		run.Status = domain.RunFailed
 		message := result.ErrorMessage
@@ -509,12 +510,13 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		run.Error = &message
 		newState.Status = domain.AgentFailed
 		newState.LastError = &message
+		newState.LastRunID = state.LastRunID
 	} else {
 		run.Status = domain.RunCompleted
 		newState.Status = domain.AgentIdle
 		newState.LastError = nil
+		newState.LastRunID = run.RunID
 	}
-	newState.LastRunID = run.RunID
 	if newState.WorkspaceDir == "" {
 		newState.WorkspaceDir = o.cfg.WorkspaceDir
 	}

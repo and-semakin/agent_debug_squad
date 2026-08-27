@@ -154,7 +154,6 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 
 	stdout, stderr, err := runCommandStreaming(ctx, cmd, sink)
 	state.Status = domain.AgentIdle
-	state.LastRunID = run.RunID
 	result, resultErr := buildRunResult(stdout, stderr, err)
 	if state.BackendSessionID == "" && result.BackendSessionID != "" {
 		state.BackendSessionID = result.BackendSessionID
