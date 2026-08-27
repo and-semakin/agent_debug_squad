@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,44 @@ func TestStoreWritesAgentRunOutputAndTranscript(t *testing.T) {
 	}
 	if events[0].Type != "agent_result" {
 		t.Fatalf("events[0].Type = %q, want agent_result", events[0].Type)
+	}
+}
+
+func TestSaveConfigKeepsRecoveryValuesOwnerReadable(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{
+		SessionID:    "session_test",
+		WorkspaceDir: root,
+		StateDirName: ".agent-debug-squad",
+		Agents: []domain.AgentSpec{{
+			Name:    "Reviewer",
+			Backend: "opencode",
+			Options: map[string]any{"password": "recovery-secret"},
+		}},
+	}
+	s := New(cfg)
+	if err := s.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	path := filepath.Join(s.SessionDir(), "config.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(config.json) error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config.json mode = %#o, want 0600", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(config.json) error = %v", err)
+	}
+	var saved domain.SessionConfig
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("Unmarshal(config.json) error = %v", err)
+	}
+	if got := saved.Agents[0].Options["password"]; got != "recovery-secret" {
+		t.Fatalf("persisted password = %#v, want recovery value", got)
 	}
 }
 

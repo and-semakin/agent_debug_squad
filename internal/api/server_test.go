@@ -80,6 +80,42 @@ func TestHealthEndpointReturnsOK(t *testing.T) {
 	}
 }
 
+func TestSessionEndpointRedactsSecretsWithoutMutatingRuntimeConfig(t *testing.T) {
+	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
+		cfg.Agents[0].Options = map[string]any{
+			"model":     "composer-2.5",
+			"password":  "opencode-password",
+			"api_token": "cursor-token",
+			"base_url":  "https://proxy-user:proxy-password@proxy.example.test/api",
+			"env": []any{
+				"HTTP_PROXY=http://env-user:env-password@proxy.example.test:8080",
+				"CURSOR_API_KEY=cursor-api-key",
+			},
+			"inherit_env": []any{"PATH", "HOME"},
+		}
+	}, "Reviewer")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/session", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, secret := range []string{"opencode-password", "cursor-token", "proxy-user", "proxy-password", "env-user", "env-password", "cursor-api-key"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("response contains secret %q: %s", secret, body)
+		}
+	}
+	for _, visible := range []string{"composer-2.5", "HTTP_PROXY", "CURSOR_API_KEY", "PATH", "HOME", "[REDACTED]"} {
+		if !strings.Contains(body, visible) {
+			t.Fatalf("response does not contain safe value %q: %s", visible, body)
+		}
+	}
+	if got := srv.cfg.Agents[0].Options["password"]; got != "opencode-password" {
+		t.Fatalf("runtime password = %#v, want original value", got)
+	}
+}
+
 func TestAgentEndpointReturnsOneAgent(t *testing.T) {
 	srv := newTestServer(t, "Reviewer", "Implementer")
 
