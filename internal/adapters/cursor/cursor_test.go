@@ -52,6 +52,21 @@ func TestParseStreamJSONUsesAssistantDeltasAsFallback(t *testing.T) {
 	}
 }
 
+func TestParseStreamJSONPrefersAggregateAssistantFallbackOverPartialDeltas(t *testing.T) {
+	data := []byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"Hello "}]},"timestamp_ms":123}
+{"type":"assistant","message":{"content":[{"type":"text","text":"world"}]},"timestamp_ms":124}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"cursor_123"}`)
+
+	got, err := ParseStreamJSON(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FinalMessage != "Hello world" {
+		t.Fatalf("FinalMessage = %q, want Hello world", got.FinalMessage)
+	}
+}
+
 func TestParseStreamJSONDetectsTerminalError(t *testing.T) {
 	data := []byte(`{"type":"result","subtype":"error","is_error":true,"result":"model unavailable","session_id":"cursor_123"}`)
 

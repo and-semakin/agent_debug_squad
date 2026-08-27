@@ -60,6 +60,8 @@ func BuildEnv(spec domain.AgentSpec, environ []string) []string {
 func ParseStreamJSON(data []byte) (StreamResult, error) {
 	var result StreamResult
 	var assistantText strings.Builder
+	var aggregateAssistantText string
+	var partialAssistantSeen bool
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLEventSize)
 	for scanner.Scan() {
@@ -82,7 +84,15 @@ func ParseStreamJSON(data []byte) (StreamResult, error) {
 		switch eventType {
 		case "assistant":
 			if text := assistantMessageText(event); text != "" {
+				if _, partial := event["timestamp_ms"]; partial {
+					partialAssistantSeen = true
+				}
 				assistantText.WriteString(text)
+				if partialAssistantSeen {
+					if _, partial := event["timestamp_ms"]; !partial {
+						aggregateAssistantText = text
+					}
+				}
 			}
 		case "result":
 			subtype := stringValue(event["subtype"])
@@ -107,7 +117,7 @@ func ParseStreamJSON(data []byte) (StreamResult, error) {
 		return result, err
 	}
 	if result.Completed && result.FinalMessage == "" {
-		result.FinalMessage = assistantText.String()
+		result.FinalMessage = firstString(aggregateAssistantText, assistantText.String())
 	}
 	return result, nil
 }
