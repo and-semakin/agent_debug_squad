@@ -104,7 +104,6 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return result, state, resultErr
 	}
 
-	state.LastRunID = run.RunID
 	return result, state, nil
 }
 

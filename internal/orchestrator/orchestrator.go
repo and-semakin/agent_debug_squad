@@ -513,8 +513,8 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		run.Status = domain.RunCompleted
 		newState.Status = domain.AgentIdle
 		newState.LastError = nil
+		newState.LastRunID = run.RunID
 	}
-	newState.LastRunID = run.RunID
 	if newState.WorkspaceDir == "" {
 		newState.WorkspaceDir = o.cfg.WorkspaceDir
 	}

@@ -681,8 +681,8 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 	if result.FinalMessage != "Final OpenCode answer" {
 		t.Fatalf("FinalMessage = %q, want %q", result.FinalMessage, "Final OpenCode answer")
 	}
-	if nextState.LastRunID != "run_1" {
-		t.Fatalf("LastRunID = %q, want %q", nextState.LastRunID, "run_1")
+	if nextState.LastRunID != "run_previous" {
+		t.Fatalf("LastRunID = %q, want adapter to preserve %q", nextState.LastRunID, "run_previous")
 	}
 }
 
@@ -757,8 +757,8 @@ func TestSendUsesFallbackTextWhenHistoryHasNoAssistant(t *testing.T) {
 	default:
 		t.Fatal("message history was not fetched")
 	}
-	if nextState.LastRunID != "run_1" {
-		t.Fatalf("LastRunID = %q, want run_1", nextState.LastRunID)
+	if nextState.LastRunID != "run_previous" {
+		t.Fatalf("LastRunID = %q, want adapter to preserve run_previous", nextState.LastRunID)
 	}
 }
 
