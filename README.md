@@ -94,7 +94,7 @@ State is written below:
 
 With `examples/squad.yaml`, that starts under `./.agent-debug-squad/sessions/<session_id>/`.
 
-CLI-backed agents stream intermediate stdout into `.events.jsonl` and stderr into `.stderr.log` while the run is still active. OpenCode-backed agents stream raw OpenCode `/event` JSON into `.events.jsonl` while the run is active, then write the final assistant response to `<agent>.txt` after `session.idle`. The same lines are emitted to the server log with `run`, `agent`, and `stream` fields. YOLO mode defaults to `defaults.yolo: true`; Codex uses `--dangerously-bypass-approvals-and-sandbox`, while Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags and OpenCode HTTP mode does not expose an equivalent permission bypass. An agent can opt out with `options.yolo: false`.
+CLI-backed agents stream intermediate stdout into `.events.jsonl` and stderr into `.stderr.log` while the run is still active. OpenCode-backed agents stream raw OpenCode `/event` JSON into `.events.jsonl` while the run is active, then write the final assistant response to `<agent>.txt` after `session.idle`. The same lines are emitted to the server log with `run`, `agent`, and `stream` fields. YOLO mode defaults to `defaults.yolo: true`; Codex uses `--dangerously-bypass-approvals-and-sandbox`, Cursor uses `--force`, while Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags and OpenCode HTTP mode does not expose an equivalent permission bypass. An agent can opt out with `options.yolo: false`.
 
 ## Codex Environment Whitelist
 
@@ -116,3 +116,43 @@ agents:
 ```
 
 `model` maps to Codex `--model`. `reasoning` maps to Codex `model_reasoning_effort`; omit either key to use the default from Codex configuration.
+
+## Cursor Backend
+
+Install and authenticate Cursor Agent CLI before starting a Cursor-backed squad:
+
+```sh
+curl https://cursor.com/install -fsS | bash
+cursor-agent login
+cursor-agent status
+cursor-agent --list-models
+```
+
+Cursor agents support a specific model, stateful resume, enforced read-only modes, sandbox selection, and the same constrained child-process environment pattern as Codex:
+
+```yaml
+agents:
+  - name: CursorCritic
+    backend: cursor
+    startup_prompt: Review the code and report evidence. Do not edit files.
+    options:
+      command: /Users/andrey/.local/bin/cursor-agent
+      model: composer-2.5
+      mode: ask
+      sandbox: enabled
+      yolo: false
+      env:
+        - HTTP_PROXY=http://proxy.example:3128
+        - HTTPS_PROXY=http://proxy.example:3128
+      inherit_env:
+        - PATH
+        - HOME
+        - CURSOR_API_KEY
+        - NO_PROXY
+```
+
+`HOME` lets the child process use credentials saved by `cursor-agent login`. Alternatively, inherit `CURSOR_API_KEY` from the service environment. For proxy access, either put explicit `KEY=value` entries in `options.env` or name existing variables in `options.inherit_env`; do not export backend-specific proxy settings globally from a squad launcher.
+
+`model` maps to Cursor `--model`. `mode` maps to `--mode` (`ask` and `plan` are read-only Cursor modes), and `sandbox` maps to `--sandbox`. Agent Debug Squad passes `--force` when YOLO is enabled. Reviewer roles should therefore set both `mode: ask` and `yolo: false`.
+
+The first successful Cursor event supplies a `session_id`, which is persisted as `backend_session_id`. Later turns use `--resume <session_id>`. `POST /agents/{name}/reset` clears this continuity so the next turn starts a new Cursor conversation and receives the startup prompt again.

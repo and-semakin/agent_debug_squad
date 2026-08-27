@@ -20,7 +20,7 @@ The server listens on `127.0.0.1:8090` and writes artifacts under:
 .agent-review-artifacts/
 ```
 
-The launcher does not export Codex proxy variables for the whole squad process. The YAML config sets those variables through `options.env` on the Codex-backed agents only. `options.inherit_env` is reserved for process-local values such as `PATH`, `HOME`, and `CODEX_HOME`.
+The launcher does not export backend-specific proxy variables for the whole squad process. The YAML config sets those variables through `options.env` on the relevant CLI-backed agents only. `options.inherit_env` is reserved for explicitly selected process-local values such as `PATH`, `HOME`, `CODEX_HOME`, and `CURSOR_API_KEY`.
 
 Agent state includes the configured `model` when an agent has one, so `GET /agents` and `sessions/<session_id>/agents/<agent_name>/state.json` show which model backs OpenCode-style agents.
 
@@ -35,7 +35,31 @@ For OpenCode agents, `<agent>.events.jsonl` contains raw OpenCode `/event` paylo
 
 The same lines are also emitted to the `agent-debug-squad` server log with `run`, `agent`, and `stream` fields.
 
-YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags, and OpenCode HTTP mode does not expose an equivalent permission bypass. Set `options.yolo: false` on an agent to opt out.
+YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Cursor uses `--force`; Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags, and OpenCode HTTP mode does not expose an equivalent permission bypass. Set `options.yolo: false` on an agent to opt out.
+
+## Optional Cursor Role
+
+A Cursor agent can replace or complement one of the discussion roles without changing the facilitator protocol:
+
+```yaml
+  - name: CursorCritic
+    backend: cursor
+    startup_prompt: |
+      Review only. Do not change files or commit.
+    options:
+      command: /Users/andrey/.local/bin/cursor-agent
+      model: composer-2.5
+      mode: ask
+      yolo: false
+      inherit_env:
+        - PATH
+        - HOME
+        - HTTP_PROXY
+        - HTTPS_PROXY
+        - NO_PROXY
+```
+
+`mode: ask` provides Cursor's read-only execution boundary. `HOME` is needed for a browser-authenticated CLI; use `CURSOR_API_KEY` instead for service authentication. Cursor NDJSON events are written to the normal `.events.jsonl` artifact, and its session id is resumed between turns until the agent is reset.
 
 ## Agents
 

@@ -1,0 +1,27 @@
+session_name: local-cursor-review
+workspace_dir: .
+state_dir_name: .agent-debug-squad
+host: 127.0.0.1
+port: 8081
+defaults:
+  yolo: false
+agents:
+  - name: CursorCritic
+    backend: cursor
+    startup_prompt: |
+      Review the repository in read-only mode. Report concrete findings with evidence.
+      Do not edit files, run commands that write, or create commits.
+    options:
+      command: /Users/andrey/.local/bin/cursor-agent
+      model: composer-2.5
+      mode: ask
+      sandbox: enabled
+      inherit_env:
+        - PATH
+        - HOME
+        - CURSOR_API_KEY
+        - CURSOR_CONFIG_DIR
+        - HTTP_PROXY
+        - HTTPS_PROXY
+        - ALL_PROXY
+        - NO_PROXY
