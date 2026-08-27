@@ -2,9 +2,11 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +174,53 @@ func TestStoreAppendsRunEventsAndStderr(t *testing.T) {
 	}
 	if string(stderr) != "err one\n" {
 		t.Fatalf("stderr = %q", string(stderr))
+	}
+}
+
+func TestStoreSerializesConcurrentTranscriptAppends(t *testing.T) {
+	root := t.TempDir()
+	cfg := domain.SessionConfig{SessionID: "session_test", WorkspaceDir: root, StateDirName: ".agent-debug-squad"}
+	s := New(cfg)
+
+	const count = 200
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- s.AppendTranscript(domain.TranscriptEvent{
+				Type:  "facilitator_message",
+				RunID: fmt.Sprintf("run_%06d", i),
+				Text:  strings.Repeat(fmt.Sprintf("message-%d-", i), 128),
+				At:    time.Now().UTC(),
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendTranscript() error = %v", err)
+		}
+	}
+
+	events, err := s.ReadTranscript()
+	if err != nil {
+		t.Fatalf("ReadTranscript() error = %v", err)
+	}
+	if len(events) != count {
+		t.Fatalf("len(events) = %d, want %d", len(events), count)
+	}
+	seen := make(map[string]bool, count)
+	for _, event := range events {
+		seen[event.RunID] = true
+	}
+	for i := 0; i < count; i++ {
+		runID := fmt.Sprintf("run_%06d", i)
+		if !seen[runID] {
+			t.Fatalf("transcript is missing %s", runID)
+		}
 	}
 }
 
