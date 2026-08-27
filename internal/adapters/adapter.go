@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/andrey/agent-debug-squad/internal/adapters/codex"
+	"github.com/andrey/agent-debug-squad/internal/adapters/cursor"
 	"github.com/andrey/agent-debug-squad/internal/adapters/fake"
 	"github.com/andrey/agent-debug-squad/internal/adapters/kimi"
 	"github.com/andrey/agent-debug-squad/internal/adapters/opencode"
@@ -24,6 +25,8 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 		return fake.New(spec), nil
 	case "codex":
 		return codex.New(spec), nil
+	case "cursor":
+		return cursor.New(spec), nil
 	case "kimi":
 		return kimi.New(spec), nil
 	case "opencode":
