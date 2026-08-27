@@ -135,6 +135,7 @@ func (a failingAdapter) Init(_ context.Context, _ domain.AgentSpec, state domain
 }
 
 func (a failingAdapter) Send(_ context.Context, state domain.AgentState, _ domain.RunRequest, _ domain.RunSink) (domain.RunResult, domain.AgentState, error) {
+	state.LastRunID = "adapter-owned-value"
 	return domain.RunResult{ErrorMessage: a.err.Error()}, state, a.err
 }
 
