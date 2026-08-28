@@ -26,11 +26,16 @@ Requirements:
 - Go 1.22 or newer;
 - the CLI or service required by every backend in your chosen YAML config.
 
-Install the current release from GitHub:
+Install the current release from GitHub. For example, on an Apple Silicon Mac:
 
 ```sh
-go install github.com/and-semakin/agent_debug_squad/cmd/agent-debug-squad@latest
+mkdir -p "$HOME/.local/bin"
+curl -fsSL https://github.com/and-semakin/agent_debug_squad/releases/latest/download/agent-debug-squad_darwin_arm64.tar.gz \
+  | tar -xz -C "$HOME/.local/bin"
+"$HOME/.local/bin/agent-debug-squad" version
 ```
+
+Release archives are also available for macOS AMD64 and Linux AMD64/ARM64. Ensure `$HOME/.local/bin` is on `PATH`. A binary installed with `go install` is a development build and intentionally does not self-update because it has no release version embedded in it.
 
 Or run the checkout directly with the fake-backend example, which requires no external AI service:
 
@@ -49,6 +54,24 @@ curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/runs?wait=true&timeout_secon
   -H 'Content-Type: application/json' \
   -d '{"message":"Review this debugging hypothesis."}'
 ```
+
+## Updates
+
+Release builds check the latest stable GitHub Release before `serve` starts. If a newer semantic version exists for the current platform, the CLI downloads its archive, verifies it against the published SHA-256 checksums, atomically replaces the current executable, and restarts with the same arguments and environment. Network and update errors are logged but do not prevent the server from starting.
+
+Run the same check explicitly without starting a server:
+
+```sh
+agent-debug-squad update
+```
+
+Disable the startup check for one invocation with `--no-auto-update`, or for an environment with `AGENT_DEBUG_SQUAD_NO_AUTO_UPDATE=1`:
+
+```sh
+agent-debug-squad serve --config squad.yaml --no-auto-update
+```
+
+Automatic replacement is supported on macOS and Linux. Development builds report version `dev` and skip update checks.
 
 ## Configuration
 

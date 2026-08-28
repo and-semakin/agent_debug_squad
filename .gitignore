@@ -2,3 +2,4 @@
 .worktrees/
 .agent-debug-squad/
 .agent-review-artifacts/
+/dist/
