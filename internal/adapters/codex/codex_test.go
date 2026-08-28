@@ -250,7 +250,7 @@ func TestBuildArgsAddsReasoningWhenConfigured(t *testing.T) {
 
 	args := buildArgs(spec, domain.AgentState{}, "hello", false)
 
-	if !containsString(args, "-c") || !containsString(args, `model_reasoning_effort='"medium"'`) {
+	if !containsString(args, "-c") || !containsString(args, `model_reasoning_effort=medium`) {
 		t.Fatalf("args = %#v, want reasoning config override", args)
 	}
 }
@@ -274,7 +274,7 @@ func TestBuildArgsPlacesModelAndReasoningBeforeResumeAndPrompt(t *testing.T) {
 		"--model",
 		"gpt-5.3-codex",
 		"-c",
-		`model_reasoning_effort='"high"'`,
+		`model_reasoning_effort=high`,
 		"resume",
 		"thread_123",
 		"hello",
@@ -445,7 +445,7 @@ func TestSendIncludesModelAndReasoningArgs(t *testing.T) {
 		"--model",
 		"gpt-5.3-codex",
 		"-c",
-		`model_reasoning_effort='"medium"'`,
+		`model_reasoning_effort=medium`,
 	}
 	if args := readTextLines(t, argvPath); !slices.Equal(args, want) {
 		t.Fatalf("argv = %#v, want %#v", args, want)

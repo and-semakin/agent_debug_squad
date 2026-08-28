@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +27,8 @@ const (
 var logger = log.Default()
 
 type Adapter struct {
-	spec domain.AgentSpec
+	spec               domain.AgentSpec
+	messageIDGenerator func(string) string
 }
 
 type sessionResponse struct {
@@ -56,7 +58,7 @@ type part struct {
 }
 
 func New(spec domain.AgentSpec) *Adapter {
-	return &Adapter{spec: spec}
+	return &Adapter{spec: spec, messageIDGenerator: generatedMessageID}
 }
 
 func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
@@ -103,7 +105,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	sendCtx, cancelSend := context.WithTimeout(ctx, a.httpTimeout())
 	defer cancelSend()
 
-	messageID := generatedMessageID(run.RunID)
+	messageID := a.messageIDGenerator(run.RunID)
 	promptSubmitted := make(chan struct{})
 	promptAccepted := make(chan struct{})
 	streamCtx, cancel := context.WithCancel(sendCtx)
@@ -460,23 +462,19 @@ func modelPayload(model string) map[string]string {
 }
 
 func generatedMessageID(runID string) string {
-	var b strings.Builder
-	b.WriteString("msg_ads_")
-	for _, r := range runID {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '_' || r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	return b.String()
+	return generatedMessageIDAt(runID, time.Now())
+}
+
+func generatedMessageIDAt(runID string, now time.Time) string {
+	// OpenCode orders messages by IDs produced by Identifier.ascending(). Its
+	// first 12 hex digits encode (Unix milliseconds * 0x1000 + counter) in a
+	// 48-bit field. A custom ID without this prefix can make OpenCode consider
+	// a newly submitted prompt older than existing messages and finish without
+	// creating an assistant response.
+	const timestampMask = uint64(1<<48) - 1
+	encodedTimestamp := (uint64(now.UnixMilli()) * 0x1000) & timestampMask
+	digest := sha256.Sum256([]byte(runID))
+	return fmt.Sprintf("msg_%012x%x", encodedTimestamp, digest[:7])
 }
 
 func decodeSSEEvents(r io.Reader) ([]string, error) {

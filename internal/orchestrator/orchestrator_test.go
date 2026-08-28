@@ -177,16 +177,16 @@ func TestRunWorkerWritesStreamingEvents(t *testing.T) {
 func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 	ctx := context.Background()
 	const agentName = "Reviewer"
-	const messageID = "msg_ads_run_000001"
-	const currentRunMarkerEvent = `{"type":"message.updated","properties":{"sessionID":"session_123","info":{"id":"msg_ads_run_000001","role":"user"}}}`
-	const toolEvent = `{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_000001"},"tool":"read"}}`
-	const idleEvent = `{"type":"session.idle","properties":{"sessionID":"session_123","info":{"parentID":"msg_ads_run_000001"}}}`
 
 	eventOpened := make(chan struct{})
 	connectedSent := make(chan struct{})
 	promptSeen := make(chan struct{})
 	idleSent := make(chan struct{})
 	var gotPrompt map[string]any
+	var messageID string
+	var currentRunMarkerEvent string
+	var toolEvent string
+	var idleEvent string
 
 	writeEvent := func(w http.ResponseWriter, raw string) {
 		fmt.Fprintln(w, "data: "+raw)
@@ -218,6 +218,13 @@ func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("prompt_async did not arrive")
 			}
+			messageID, _ = gotPrompt["messageID"].(string)
+			if messageID == "" {
+				t.Fatalf("prompt messageID missing: %#v", gotPrompt)
+			}
+			currentRunMarkerEvent = fmt.Sprintf(`{"type":"message.updated","properties":{"sessionID":"session_123","info":{"id":%q,"role":"user"}}}`, messageID)
+			toolEvent = fmt.Sprintf(`{"type":"session.next.tool.called","properties":{"sessionID":"session_123","info":{"parentID":%q},"tool":"read"}}`, messageID)
+			idleEvent = fmt.Sprintf(`{"type":"session.idle","properties":{"sessionID":"session_123","info":{"parentID":%q}}}`, messageID)
 			writeEvent(w, currentRunMarkerEvent)
 			writeEvent(w, toolEvent)
 			writeEvent(w, idleEvent)
