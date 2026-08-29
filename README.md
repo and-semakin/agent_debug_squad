@@ -83,6 +83,7 @@ workspace_dir: .
 state_dir_name: .agent-debug-squad
 host: 127.0.0.1
 port: 8080
+log_level: info
 defaults:
   yolo: false
 agents:
@@ -104,6 +105,8 @@ agents:
         - HTTPS_PROXY
         - NO_PROXY
 ```
+
+`log_level` accepts `quiet`, `info`, `debug`, or `trace` and defaults to `info`. `info` logs run lifecycle transitions without mirroring backend event streams, `debug` additionally logs stderr and safe adapter diagnostics, and `trace` logs complete stdout/stderr streams. All levels continue to preserve the full streams in run artifacts.
 
 See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, [examples/cursor-squad.yaml](examples/cursor-squad.yaml) for a read-only Cursor reviewer, and [configs/code-review-squad.yaml](configs/code-review-squad.yaml) for a larger facilitator/implementer/critic setup.
 
@@ -174,7 +177,7 @@ Active run records include observable progress:
 }
 ```
 
-The same fields are returned by `GET /runs`, `GET /runs/{run_id}`, and timed-out long polls. Kimi runs enter `waiting_for_subagent` when the root stream calls the `Agent` tool and return to `running` when that tool result arrives. While the root stream is waiting, the Kimi adapter watches the matching local Kimi session's `state.json` and child `wire.jsonl` files so `child_last_activity_at` continues to advance. This visibility is a liveness signal for facilitators; the service does not automatically force-reset a quiet run.
+The same fields are returned by `GET /runs`, `GET /runs/{run_id}`, and timed-out long polls. Every backend stdout/stderr line advances the live `last_activity_at`; disk persistence is rate-limited while the in-memory API view remains current. Kimi runs enter `waiting_for_subagent` when the root stream calls the `Agent` tool and return to `running` when that tool result arrives. While the root stream is waiting, the Kimi adapter watches the matching local Kimi session's `state.json` and child `wire.jsonl` files so `child_last_activity_at` continues to advance. This visibility is a liveness signal for facilitators; the service does not automatically force-reset a quiet run.
 
 Reset an idle agent so its next turn starts a fresh backend session:
 
@@ -202,9 +205,10 @@ runs/<run_id>/run.json
 runs/<run_id>/<agent_name>.events.jsonl
 runs/<run_id>/<agent_name>.txt
 runs/<run_id>/<agent_name>.stderr.log
+runs/<run_id>/<agent_name>.diagnostics.jsonl
 ```
 
-The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.
+The diagnostic artifact records safe adapter invocation metadata. Cursor diagnostics include the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs. The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.
 
 ## Codex Skill
 

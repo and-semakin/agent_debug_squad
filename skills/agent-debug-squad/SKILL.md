@@ -29,6 +29,7 @@ workspace_dir: .
 state_dir_name: .agent-debug-squad
 host: 127.0.0.1
 port: 8080
+log_level: info
 defaults:
   yolo: false
 agents:
@@ -50,6 +51,8 @@ agents:
         - HTTPS_PROXY
         - NO_PROXY
 ```
+
+`log_level` defaults to `info`: lifecycle only. Use `debug` for stderr plus safe adapter invocation diagnostics, or `trace` only when full backend stdout/stderr mirroring is needed. Full streams remain in run artifacts at every level.
 
 Backends:
 
@@ -103,7 +106,7 @@ If the HTTP wait expires while the run is still active, wait on that run instead
 curl -sS 'http://127.0.0.1:8080/runs/run_000001?wait=true&timeout_seconds=600'
 ```
 
-The wait timeout does not cancel or reset the backend run. For immediate status, use `GET /runs` or `GET /runs/{run_id}`. Active run records include a `progress` object. For Kimi, inspect `progress.phase`, `progress.child_last_activity_at`, and `progress.subagents` before deciding that a quiet parent run is stuck. `waiting_for_subagent` with advancing child activity means the nested agent is still working.
+The wait timeout does not cancel or reset the backend run. For immediate status, use `GET /runs` or `GET /runs/{run_id}`. Active run records include a `progress` object, and every backend stdout/stderr line advances the live `progress.last_activity_at`. For Kimi, inspect `progress.phase`, `progress.child_last_activity_at`, and `progress.subagents` before deciding that a quiet parent run is stuck. `waiting_for_subagent` with advancing child activity means the nested agent is still working.
 
 Use artifact files as the cross-agent channel:
 
@@ -142,7 +145,10 @@ Read results from:
   runs/<run_id>/<agent>.events.jsonl
   runs/<run_id>/<agent>.txt
   runs/<run_id>/<agent>.stderr.log
+  runs/<run_id>/<agent>.diagnostics.jsonl
 ```
+
+Cursor diagnostics record the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs.
 
 Before finishing:
 

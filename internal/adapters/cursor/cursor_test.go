@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -169,6 +170,28 @@ func TestBuildArgsOmitsOptionalFlags(t *testing.T) {
 	}
 }
 
+func TestReportInvocationDiagnosticRedactsPromptAndResumeSession(t *testing.T) {
+	sink := &recordingSink{}
+	reportInvocationDiagnostic(sink, "/usr/local/bin/cursor-agent", []string{
+		"--print", "--force", "--resume", "cursor_secret_session", "secret prompt",
+	}, "/workspace")
+
+	if len(sink.diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one record", sink.diagnostics)
+	}
+	if strings.Contains(sink.diagnostics[0], "secret prompt") || strings.Contains(sink.diagnostics[0], "cursor_secret_session") {
+		t.Fatalf("diagnostic leaked prompt or session: %s", sink.diagnostics[0])
+	}
+	var diagnostic invocationDiagnostic
+	if err := json.Unmarshal([]byte(sink.diagnostics[0]), &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := []string{"--print", "--force", "--resume", "<redacted>"}
+	if !slices.Equal(diagnostic.Args, wantArgs) {
+		t.Fatalf("diagnostic args = %#v, want %#v", diagnostic.Args, wantArgs)
+	}
+}
+
 func TestBuildEnvOnlyIncludesExplicitAndInheritedValues(t *testing.T) {
 	spec := domain.AgentSpec{ListOptions: map[string][]string{
 		"inherit_env": {"PATH", "HOME", "CURSOR_API_KEY", "HTTP_PROXY", "MISSING"},
@@ -272,6 +295,19 @@ func TestSendStreamsOutputStoresSessionAndWrapsFirstPrompt(t *testing.T) {
 	if len(sink.stdout) != 3 {
 		t.Fatalf("stdout lines = %d, want 3", len(sink.stdout))
 	}
+	if len(sink.diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one invocation record", sink.diagnostics)
+	}
+	var diagnostic invocationDiagnostic
+	if err := json.Unmarshal([]byte(sink.diagnostics[0]), &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic.Type != "adapter_invocation" || diagnostic.Backend != "cursor" || !diagnostic.MessageRedacted {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+	if !slices.Contains(diagnostic.Args, "--force") || slices.Contains(diagnostic.Args, "Inspect the repository.") {
+		t.Fatalf("diagnostic args = %#v, want --force without prompt", diagnostic.Args)
+	}
 }
 
 func TestSendResumesAndDoesNotRepeatStartupPrompt(t *testing.T) {
@@ -371,13 +407,17 @@ exit %d
 }
 
 type recordingSink struct {
-	stdout []string
-	stderr []string
+	stdout      []string
+	stderr      []string
+	diagnostics []string
 }
 
 func (s *recordingSink) StdoutLine(line string) { s.stdout = append(s.stdout, line) }
 func (s *recordingSink) StderrLine(line string) { s.stderr = append(s.stderr, line) }
-func (s *recordingSink) Err() error             { return nil }
+func (s *recordingSink) DiagnosticLine(line string) {
+	s.diagnostics = append(s.diagnostics, line)
+}
+func (s *recordingSink) Err() error { return nil }
 
 func containsString(items []string, want string) bool {
 	return slices.Contains(items, want)

@@ -174,6 +174,48 @@ func TestRunWorkerWritesStreamingEvents(t *testing.T) {
 	}
 }
 
+func TestRunAndRunsExposeLiveStreamActivityBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig(t, "Reviewer")
+	cfg.Agents[0].StringOptions = map[string]string{"delay_ms": "250"}
+	o, err := New(ctx, cfg, store.New(cfg))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	run, err := o.SubmitRun(ctx, "Reviewer", "stream please", nil)
+	if err != nil {
+		t.Fatalf("SubmitRun() error = %v", err)
+	}
+	waitForAgentStatus(t, o, "Reviewer", domain.AgentRunning)
+
+	var live domain.RunRecord
+	deadline := time.Now().Add(time.Second)
+	for {
+		live, err = o.Run(ctx, run.RunID)
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if live.StartedAt != nil && live.Progress != nil && live.Progress.LastActivityAt.After(*live.StartedAt) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live run = %#v, want stream activity after start", live)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	runs, err := o.Runs(ctx)
+	if err != nil {
+		t.Fatalf("Runs() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Progress == nil || !runs[0].Progress.LastActivityAt.Equal(live.Progress.LastActivityAt) {
+		t.Fatalf("runs = %#v, want same live progress", runs)
+	}
+	if _, err := o.Wait(ctx, run.RunID, time.Second); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+}
+
 func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 	ctx := context.Background()
 	const agentName = "Reviewer"

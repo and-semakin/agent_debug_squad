@@ -20,6 +20,7 @@ type rawConfig struct {
 	StateDirName string      `yaml:"state_dir_name"`
 	Host         string      `yaml:"host"`
 	Port         int         `yaml:"port"`
+	LogLevel     string      `yaml:"log_level"`
 	Defaults     rawDefaults `yaml:"defaults"`
 	Agents       []rawAgent  `yaml:"agents"`
 }
@@ -57,6 +58,10 @@ func Load(path string) (domain.SessionConfig, error) {
 	}
 	if raw.Port == 0 {
 		raw.Port = 8080
+	}
+	logLevel, err := parseLogLevel(raw.LogLevel)
+	if err != nil {
+		return domain.SessionConfig{}, err
 	}
 	if raw.WorkspaceDir == "" {
 		return domain.SessionConfig{}, errors.New("workspace_dir is required")
@@ -142,9 +147,21 @@ func Load(path string) (domain.SessionConfig, error) {
 		StateDirName: raw.StateDirName,
 		Host:         raw.Host,
 		Port:         raw.Port,
+		LogLevel:     logLevel,
 		Defaults:     defaults,
 		Agents:       agents,
 	}, nil
+}
+
+func parseLogLevel(value string) (domain.LogLevel, error) {
+	switch level := domain.LogLevel(strings.TrimSpace(strings.ToLower(value))); level {
+	case "", domain.LogLevelInfo:
+		return domain.LogLevelInfo, nil
+	case domain.LogLevelQuiet, domain.LogLevelDebug, domain.LogLevelTrace:
+		return level, nil
+	default:
+		return "", fmt.Errorf("invalid log_level %q: expected quiet, info, debug, or trace", value)
+	}
 }
 
 func isAllowedHost(host string) bool {

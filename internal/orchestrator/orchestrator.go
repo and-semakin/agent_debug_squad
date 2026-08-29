@@ -31,11 +31,12 @@ type Orchestrator struct {
 	store   *store.Store
 	execCtx context.Context
 
-	mu       sync.Mutex
-	runtimes map[string]*agentRuntime
-	waiters  map[string]chan struct{}
-	nextRun  int
-	workerWG sync.WaitGroup
+	mu          sync.Mutex
+	runtimes    map[string]*agentRuntime
+	waiters     map[string]chan struct{}
+	activeSinks map[string]*runSink
+	nextRun     int
+	workerWG    sync.WaitGroup
 }
 
 type agentRuntime struct {
@@ -63,12 +64,13 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 	}
 
 	o := &Orchestrator{
-		cfg:      cfg,
-		store:    s,
-		execCtx:  ctx,
-		runtimes: map[string]*agentRuntime{},
-		waiters:  map[string]chan struct{}{},
-		nextRun:  1,
+		cfg:         cfg,
+		store:       s,
+		execCtx:     ctx,
+		runtimes:    map[string]*agentRuntime{},
+		waiters:     map[string]chan struct{}{},
+		activeSinks: map[string]*runSink{},
+		nextRun:     1,
 	}
 
 	runs, err := s.ListRuns()
@@ -206,6 +208,7 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 		o.notify(runID)
 		return domain.RunRecord{}, err
 	}
+	o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
 
 	o.workerWG.Add(1)
 	go o.runWorker(runCtx, agentName, run, waiter)
@@ -296,14 +299,40 @@ func (o *Orchestrator) Run(ctx context.Context, runID string) (domain.RunRecord,
 	if errors.Is(err, os.ErrNotExist) {
 		return domain.RunRecord{}, ErrRunNotFound
 	}
-	return run, err
+	if err != nil {
+		return run, err
+	}
+	o.mu.Lock()
+	sink := o.activeSinks[runID]
+	o.mu.Unlock()
+	if sink != nil {
+		progress := sink.ProgressSnapshot()
+		run.Progress = &progress
+	}
+	return run, nil
 }
 
 func (o *Orchestrator) Runs(ctx context.Context) ([]domain.RunRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return o.store.ListRuns()
+	runs, err := o.store.ListRuns()
+	if err != nil {
+		return nil, err
+	}
+	o.mu.Lock()
+	sinks := make(map[string]*runSink, len(o.activeSinks))
+	for runID, sink := range o.activeSinks {
+		sinks[runID] = sink
+	}
+	o.mu.Unlock()
+	for i := range runs {
+		if sink := sinks[runs[i].RunID]; sink != nil {
+			progress := sink.ProgressSnapshot()
+			runs[i].Progress = &progress
+		}
+	}
+	return runs, nil
 }
 
 func (o *Orchestrator) Transcript(ctx context.Context) ([]domain.TranscriptEvent, error) {
@@ -456,6 +485,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		LastActivityAt: started,
 	}
 	_ = o.store.SaveRun(run)
+	o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
 
 	o.mu.Lock()
 	rt := o.runtimes[agentName]
@@ -465,7 +495,10 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	o.mu.Unlock()
 	_ = o.store.SaveAgentState(state)
 
-	sink := newRunSink(o.store, run, log.Default())
+	sink := newRunSink(o.store, run, log.Default(), o.cfg.LogLevel)
+	o.mu.Lock()
+	o.activeSinks[run.RunID] = sink
+	o.mu.Unlock()
 	result, newState, sendErr := adapter.Send(ctx, state, domain.RunRequest{
 		RunID:    run.RunID,
 		Agent:    run.Agent,
@@ -544,16 +577,26 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	}); err != nil {
 		markPersistenceFailure(&run, &newState, fmt.Errorf("append transcript: %w", err))
 	}
+	o.mu.Lock()
+	delete(o.activeSinks, run.RunID)
+	o.mu.Unlock()
 	if err := o.store.SaveRun(run); err != nil {
 		markPersistenceFailure(&run, &newState, fmt.Errorf("save run: %w", err))
 		_ = o.store.SaveRun(run)
 	}
+	o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
 
 	o.mu.Lock()
 	if current := o.runtimes[agentName]; current != nil {
 		current.state = newState
 	}
 	o.mu.Unlock()
+}
+
+func (o *Orchestrator) logLifecycle(format string, args ...any) {
+	if logLevelEnabled(o.cfg.LogLevel, domain.LogLevelInfo) {
+		log.Printf(format, args...)
+	}
 }
 
 func markPersistenceFailure(run *domain.RunRecord, state *domain.AgentState, err error) {

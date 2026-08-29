@@ -3,6 +3,7 @@ workspace_dir: .
 state_dir_name: .agent-debug-squad
 host: 127.0.0.1
 port: 8080
+log_level: info
 agents:
   - name: Reviewer
     backend: fake

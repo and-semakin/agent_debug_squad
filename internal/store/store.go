@@ -170,6 +170,10 @@ func (s *Store) AppendRunStderr(run domain.RunRecord, line string) (string, erro
 	return s.appendRunArtifactLine(run, ".stderr.log", line)
 }
 
+func (s *Store) AppendRunDiagnostics(run domain.RunRecord, line string) (string, error) {
+	return s.appendRunArtifactLine(run, ".diagnostics.jsonl", line)
+}
+
 func (s *Store) appendRunArtifactLine(run domain.RunRecord, suffix string, line string) (string, error) {
 	path, err := s.runArtifactPath(run.RunID, run.Agent, suffix)
 	if err != nil {

@@ -44,6 +44,9 @@ agents:
 	if cfg.Port != 8080 {
 		t.Fatalf("Port = %d", cfg.Port)
 	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("LogLevel = %q, want info", cfg.LogLevel)
+	}
 	if cfg.SessionID == "" {
 		t.Fatal("SessionID is empty")
 	}
@@ -54,6 +57,51 @@ agents:
 	env := cfg.Agents[0].ListOptions["inherit_env"]
 	if len(env) != 2 || env[0] != "OPENAI_API_KEY" || env[1] != "CODEX_HOME" {
 		t.Fatalf("inherit_env = %#v", env)
+	}
+}
+
+func TestLoadParsesLogLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+log_level: trace
+agents:
+  - name: Reviewer
+    backend: fake
+    startup_prompt: Review.
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LogLevel != "trace" {
+		t.Fatalf("LogLevel = %q, want trace", cfg.LogLevel)
+	}
+}
+
+func TestLoadRejectsInvalidLogLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+log_level: verbose
+agents:
+  - name: Reviewer
+    backend: fake
+    startup_prompt: Review.
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "invalid log_level") {
+		t.Fatalf("Load() error = %v, want invalid log_level", err)
 	}
 }
 

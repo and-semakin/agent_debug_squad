@@ -34,6 +34,15 @@ type StreamResult struct {
 	BackendSessionID string
 }
 
+type invocationDiagnostic struct {
+	Type            string   `json:"type"`
+	Backend         string   `json:"backend"`
+	Command         string   `json:"command"`
+	Args            []string `json:"args"`
+	WorkspaceDir    string   `json:"workspace_dir"`
+	MessageRedacted bool     `json:"message_redacted"`
+}
+
 func New(spec domain.AgentSpec) *Adapter {
 	return &Adapter{spec: spec}
 }
@@ -158,7 +167,9 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		yolo = *a.spec.Yolo
 	}
 
-	cmd := exec.CommandContext(ctx, command, buildArgs(a.spec, state, message, yolo)...)
+	args := buildArgs(a.spec, state, message, yolo)
+	reportInvocationDiagnostic(sink, command, args, state.WorkspaceDir)
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
 	cmd.Env = BuildEnv(a.spec, os.Environ())
 
@@ -169,6 +180,30 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		state.BackendSessionID = result.BackendSessionID
 	}
 	return result, state, resultErr
+}
+
+func reportInvocationDiagnostic(sink domain.RunSink, command string, args []string, workspaceDir string) {
+	safeArgs := append([]string(nil), args...)
+	if len(safeArgs) > 0 {
+		safeArgs = safeArgs[:len(safeArgs)-1]
+	}
+	for i := 0; i+1 < len(safeArgs); i++ {
+		if safeArgs[i] == "--resume" {
+			safeArgs[i+1] = "<redacted>"
+			i++
+		}
+	}
+	record, err := json.Marshal(invocationDiagnostic{
+		Type:            "adapter_invocation",
+		Backend:         "cursor",
+		Command:         command,
+		Args:            safeArgs,
+		WorkspaceDir:    workspaceDir,
+		MessageRedacted: true,
+	})
+	if err == nil {
+		domain.ReportRunDiagnostic(sink, string(record))
+	}
 }
 
 func buildArgs(spec domain.AgentSpec, state domain.AgentState, message string, yolo bool) []string {

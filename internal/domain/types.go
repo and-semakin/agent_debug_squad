@@ -2,6 +2,15 @@ package domain
 
 import "time"
 
+type LogLevel string
+
+const (
+	LogLevelQuiet LogLevel = "quiet"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelDebug LogLevel = "debug"
+	LogLevelTrace LogLevel = "trace"
+)
+
 type AgentStatus string
 
 const (
@@ -65,6 +74,7 @@ type SessionConfig struct {
 	StateDirName string          `json:"state_dir_name"`
 	Host         string          `json:"host"`
 	Port         int             `json:"port"`
+	LogLevel     LogLevel        `json:"log_level"`
 	Defaults     SessionDefaults `json:"defaults"`
 	Agents       []AgentSpec     `json:"agents"`
 }
@@ -139,9 +149,19 @@ type RunProgressSink interface {
 	Progress(progress RunProgress)
 }
 
+type RunDiagnosticSink interface {
+	DiagnosticLine(line string)
+}
+
 func ReportRunProgress(sink RunSink, progress RunProgress) {
 	if progressSink, ok := sink.(RunProgressSink); ok {
 		progressSink.Progress(progress)
+	}
+}
+
+func ReportRunDiagnostic(sink RunSink, line string) {
+	if diagnosticSink, ok := sink.(RunDiagnosticSink); ok {
+		diagnosticSink.DiagnosticLine(line)
 	}
 }
 

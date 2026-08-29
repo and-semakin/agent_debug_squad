@@ -15,6 +15,7 @@ import (
 
 	"github.com/and-semakin/agent_debug_squad/internal/api"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
+	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 	"github.com/and-semakin/agent_debug_squad/internal/selfupdate"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
@@ -105,7 +106,9 @@ func serve(ctx context.Context, args []string) error {
 	handler := api.New(orch, cfg)
 
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
-	log.Printf("listening on http://%s", addr)
+	if cfg.LogLevel != domain.LogLevelQuiet {
+		log.Printf("listening on http://%s", addr)
+	}
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: handler,
