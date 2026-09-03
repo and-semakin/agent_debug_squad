@@ -313,6 +313,7 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 	var submitted bool
 	var prompted bool
 	var activitySeen bool
+	tracker := newProgressTracker(sessionID, messageID, sink)
 	err = scanSSEEvents(resp.Body, func(raw string) bool {
 		var event map[string]any
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
@@ -327,10 +328,8 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			return false
 		}
 
-		if !isRunEvent(event, sessionID, messageID) {
-			return false
-		}
-		messageSpecific := isMessageSpecificEvent(event, messageID)
+		rootRunEvent := isRunEvent(event, sessionID, messageID)
+		messageSpecific := rootRunEvent && isMessageSpecificEvent(event, messageID)
 		if !submitted {
 			select {
 			case <-promptSubmitted:
@@ -348,7 +347,11 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 		if !submitted && !messageSpecific {
 			return false
 		}
-		if eventType == "session.idle" && !activitySeen {
+		trackedEvent := tracker.handleEvent(event, rootRunEvent, time.Now().UTC())
+		if !rootRunEvent && !trackedEvent {
+			return false
+		}
+		if eventType == "session.idle" && rootRunEvent && !activitySeen {
 			return false
 		}
 
@@ -357,8 +360,12 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			handleErr = err
 			return true
 		}
-		if eventType != "session.idle" && eventType != "session.error" {
+		if trackedEvent && eventType != "session.idle" && eventType != "session.error" {
 			activitySeen = true
+		}
+
+		if !rootRunEvent {
+			return false
 		}
 
 		update := fallbackTextFromEvent(event, messageID)

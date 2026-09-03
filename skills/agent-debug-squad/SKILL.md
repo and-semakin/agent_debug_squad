@@ -106,7 +106,7 @@ If the HTTP wait expires while the run is still active, wait on that run instead
 curl -sS 'http://127.0.0.1:8080/runs/run_000001?wait=true&timeout_seconds=600'
 ```
 
-The wait timeout does not cancel or reset the backend run. For immediate status, use `GET /runs` or `GET /runs/{run_id}`. Active run records include a `progress` object, and every backend stdout/stderr line advances the live `progress.last_activity_at`. For Kimi, inspect `progress.phase`, `progress.child_last_activity_at`, and `progress.subagents` before deciding that a quiet parent run is stuck. `waiting_for_subagent` with advancing child activity means the nested agent is still working.
+The wait timeout does not cancel or reset the backend run. For immediate status, use `GET /runs` or `GET /runs/{run_id}`. Active run records include a `progress` object, and every backend stdout/stderr line advances the live `progress.last_activity_at`. For Kimi and OpenCode, inspect `progress.phase`, `progress.child_last_activity_at`, and `progress.subagents` before deciding that a quiet parent run is stuck. `waiting_for_subagent` with advancing child activity means the nested agent is still working. Kimi derives this signal from its local session tree; OpenCode derives it from parent-linked sessions and `task` tool metadata in the global event stream.
 
 Use artifact files as the cross-agent channel:
 

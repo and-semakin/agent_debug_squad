@@ -17,8 +17,9 @@ import (
 )
 
 type captureSink struct {
-	stdout []string
-	stderr []string
+	stdout   []string
+	stderr   []string
+	progress []domain.RunProgress
 }
 
 type signalingSink struct {
@@ -47,6 +48,20 @@ func (s *captureSink) StderrLine(line string) {
 
 func (s *captureSink) Err() error {
 	return nil
+}
+
+func (s *captureSink) Progress(progress domain.RunProgress) {
+	cloned := progress
+	cloned.Subagents = append([]domain.SubagentProgress(nil), progress.Subagents...)
+	s.progress = append(s.progress, cloned)
+}
+
+func (s *captureSink) lastProgress(t *testing.T) domain.RunProgress {
+	t.Helper()
+	if len(s.progress) == 0 {
+		t.Fatal("no progress was reported")
+	}
+	return s.progress[len(s.progress)-1]
 }
 
 func (s *signalingSink) StdoutLine(line string) {
@@ -282,6 +297,174 @@ func TestFallbackTextUpdateMessagePartIsReplacement(t *testing.T) {
 	}
 	if got := fallbackTextFromEvent(second, "msg_0123456789ab0123456789abcd"); got.Text != "hello world" || !got.Replace {
 		t.Fatalf("fallbackTextFromEvent(second) = %#v, want replacement hello world", got)
+	}
+}
+
+func TestProgressTrackerAggregatesSubagentActivity(t *testing.T) {
+	sink := &captureSink{}
+	tracker := newProgressTracker("session_root", testMessageID, sink)
+	started := time.Now().UTC()
+	assistantEvent := map[string]any{
+		"type": "message.updated",
+		"properties": map[string]any{
+			"sessionID": "session_root",
+			"info": map[string]any{
+				"id":       "message_assistant",
+				"role":     "assistant",
+				"parentID": testMessageID,
+			},
+		},
+	}
+	if !tracker.handleEvent(assistantEvent, true, started) {
+		t.Fatal("assistant event was not tracked")
+	}
+
+	taskRunning := map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"sessionID": "session_root",
+			"part": map[string]any{
+				"messageID": "message_assistant",
+				"type":      "tool",
+				"tool":      "task",
+				"callID":    "task_call_1",
+				"state": map[string]any{
+					"status": "running",
+					"metadata": map[string]any{
+						"sessionId": "session_child",
+					},
+				},
+			},
+		},
+	}
+	if !tracker.handleEvent(taskRunning, false, started.Add(time.Second)) {
+		t.Fatal("task event for current assistant message was not tracked")
+	}
+	progress := sink.lastProgress(t)
+	if progress.Phase != domain.RunPhaseWaitingForSubagent {
+		t.Fatalf("phase = %q, want %q", progress.Phase, domain.RunPhaseWaitingForSubagent)
+	}
+	if len(progress.Subagents) != 1 || progress.Subagents[0].ID != "session_child" {
+		t.Fatalf("subagents = %#v, want session_child", progress.Subagents)
+	}
+
+	childActivity := started.Add(2 * time.Second)
+	childEvent := map[string]any{
+		"type": "session.next.tool.called",
+		"properties": map[string]any{
+			"sessionID": "session_child",
+			"tool":      "read",
+		},
+	}
+	if !tracker.handleEvent(childEvent, false, childActivity) {
+		t.Fatal("child event was not tracked")
+	}
+	progress = sink.lastProgress(t)
+	if progress.ChildLastActivityAt == nil || !progress.ChildLastActivityAt.Equal(childActivity) {
+		t.Fatalf("child_last_activity_at = %v, want %v", progress.ChildLastActivityAt, childActivity)
+	}
+	if !progress.LastActivityAt.Equal(childActivity) {
+		t.Fatalf("last_activity_at = %v, want %v", progress.LastActivityAt, childActivity)
+	}
+
+	taskCompleted := taskRunning
+	state := taskCompleted["properties"].(map[string]any)["part"].(map[string]any)["state"].(map[string]any)
+	state["status"] = "completed"
+	completedAt := started.Add(3 * time.Second)
+	if !tracker.handleEvent(taskCompleted, false, completedAt) {
+		t.Fatal("completed task event was not tracked")
+	}
+	progress = sink.lastProgress(t)
+	if progress.Phase != domain.RunPhaseRunning {
+		t.Fatalf("phase = %q, want %q", progress.Phase, domain.RunPhaseRunning)
+	}
+	if progress.Subagents[0].Status != "completed" {
+		t.Fatalf("subagent status = %q, want completed", progress.Subagents[0].Status)
+	}
+	if progress.ChildLastActivityAt == nil || !progress.ChildLastActivityAt.Equal(childActivity) {
+		t.Fatalf("child_last_activity_at = %v, want child event time %v", progress.ChildLastActivityAt, childActivity)
+	}
+}
+
+func TestProgressTrackerWaitsWhenRootCallsTask(t *testing.T) {
+	sink := &captureSink{}
+	tracker := newProgressTracker("session_root", testMessageID, sink)
+	event := map[string]any{
+		"type": "session.next.tool.called",
+		"properties": map[string]any{
+			"sessionID": "session_root",
+			"callID":    "task_call_1",
+			"tool":      "task",
+		},
+	}
+	if !tracker.handleEvent(event, true, time.Now().UTC()) {
+		t.Fatal("root task call was not tracked")
+	}
+	if progress := sink.lastProgress(t); progress.Phase != domain.RunPhaseWaitingForSubagent {
+		t.Fatalf("phase = %q, want waiting_for_subagent", progress.Phase)
+	}
+}
+
+func TestProgressTrackerIgnoresTaskPartFromOtherMessage(t *testing.T) {
+	sink := &captureSink{}
+	tracker := newProgressTracker("session_root", testMessageID, sink)
+	event := map[string]any{
+		"type": "message.part.updated",
+		"properties": map[string]any{
+			"sessionID": "session_root",
+			"part": map[string]any{
+				"messageID": "message_other",
+				"type":      "tool",
+				"tool":      "task",
+				"callID":    "task_call_other",
+				"state":     map[string]any{"status": "running"},
+			},
+		},
+	}
+	if tracker.handleEvent(event, false, time.Now().UTC()) {
+		t.Fatal("task event from an unrelated message was tracked")
+	}
+	if len(sink.progress) != 0 {
+		t.Fatalf("progress updates = %d, want 0", len(sink.progress))
+	}
+}
+
+func TestProgressTrackerDiscoversNestedSubagentSession(t *testing.T) {
+	sink := &captureSink{}
+	tracker := newProgressTracker("session_root", testMessageID, sink)
+	createdAt := time.Now().UTC()
+	childCreated := map[string]any{
+		"type": "session.created",
+		"properties": map[string]any{
+			"sessionID": "session_child",
+			"info": map[string]any{
+				"id":       "session_child",
+				"parentID": "session_root",
+			},
+		},
+	}
+	if !tracker.handleEvent(childCreated, false, createdAt) {
+		t.Fatal("child session.created was not tracked")
+	}
+	grandchildCreated := map[string]any{
+		"type": "session.created",
+		"properties": map[string]any{
+			"sessionID": "session_grandchild",
+			"info": map[string]any{
+				"id":       "session_grandchild",
+				"parentID": "session_child",
+			},
+		},
+	}
+	if !tracker.handleEvent(grandchildCreated, false, createdAt.Add(time.Second)) {
+		t.Fatal("nested session.created was not tracked")
+	}
+	progress := sink.lastProgress(t)
+	if progress.Phase != domain.RunPhaseWaitingForSubagent {
+		t.Fatalf("phase = %q, want waiting_for_subagent", progress.Phase)
+	}
+	if len(progress.Subagents) != 2 || progress.Subagents[1].ParentID != "session_child" {
+		t.Fatalf("subagents = %#v, want nested relationship", progress.Subagents)
 	}
 }
 
@@ -701,6 +884,86 @@ func TestSendStreamsEventsUntilIdleAndFetchesFinalText(t *testing.T) {
 	}
 	if nextState.LastRunID != "run_previous" {
 		t.Fatalf("LastRunID = %q, want adapter to preserve %q", nextState.LastRunID, "run_previous")
+	}
+}
+
+func TestSendStreamsSubagentEventsIntoParentProgress(t *testing.T) {
+	promptSeen := make(chan struct{})
+	assistantEvent := `{"type":"message.updated","properties":{"sessionID":"session_123","info":{"id":"message_assistant","role":"assistant","parentID":"msg_0123456789ab0123456789abcd"}}}`
+	childCreated := `{"type":"session.created","properties":{"sessionID":"session_child","info":{"id":"session_child","parentID":"session_123"}}}`
+	taskRunning := `{"type":"message.part.updated","properties":{"sessionID":"session_123","part":{"messageID":"message_assistant","type":"tool","tool":"task","callID":"task_1","state":{"status":"running","input":{},"metadata":{"sessionId":"session_child"},"time":{"start":1}}}}}`
+	childActivity := `{"type":"session.next.tool.called","properties":{"sessionID":"session_child","tool":"read"}}`
+	childIdle := `{"type":"session.idle","properties":{"sessionID":"session_child"}}`
+	taskCompleted := `{"type":"message.part.updated","properties":{"sessionID":"session_123","part":{"messageID":"message_assistant","type":"tool","tool":"task","callID":"task_1","state":{"status":"completed","input":{},"output":"done","metadata":{"sessionId":"session_child"},"time":{"start":1,"end":2}}}}}`
+	rootIdle := `{"type":"session.idle","properties":{"sessionID":"session_123"}}`
+	events := []string{assistantEvent, childCreated, taskRunning, childActivity, childIdle, taskCompleted, rootIdle}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			fmt.Fprintln(w, `data: {"type":"server.connected"}`)
+			fmt.Fprintln(w)
+			flusher.Flush()
+			select {
+			case <-promptSeen:
+			case <-time.After(time.Second):
+				t.Fatal("prompt_async did not arrive")
+			}
+			for _, event := range events {
+				fmt.Fprintln(w, "data: "+event)
+				fmt.Fprintln(w)
+			}
+			flusher.Flush()
+		case "/session/session_123/prompt_async":
+			close(promptSeen)
+			w.WriteHeader(http.StatusNoContent)
+		case "/session/session_123/message":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"info":  map[string]any{"id": "message_assistant", "role": "assistant", "parentID": testMessageID},
+				"parts": []map[string]any{{"type": "text", "text": "done"}},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	spec := domain.AgentSpec{
+		Name:          "Skeptic",
+		Backend:       "opencode",
+		StartupPrompt: "Challenge assumptions.",
+		StringOptions: map[string]string{"base_url": server.URL},
+	}
+	state := domain.AgentState{Name: "Skeptic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
+	sink := &captureSink{}
+	result, _, err := newTestAdapter(spec).Send(context.Background(), state, domain.RunRequest{
+		RunID: "run_1", Agent: "Skeptic", Message: "delegate",
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "done" {
+		t.Fatalf("FinalMessage = %q, want done", result.FinalMessage)
+	}
+	if len(sink.stdout) != len(events) {
+		t.Fatalf("stdout = %#v, want all root and child events", sink.stdout)
+	}
+	for i, want := range events {
+		if sink.stdout[i] != want {
+			t.Fatalf("stdout[%d] = %q, want %q", i, sink.stdout[i], want)
+		}
+	}
+	progress := sink.lastProgress(t)
+	if progress.Phase != domain.RunPhaseRunning {
+		t.Fatalf("phase = %q, want running", progress.Phase)
+	}
+	if len(progress.Subagents) != 1 || progress.Subagents[0].ID != "session_child" || progress.Subagents[0].Status != "completed" {
+		t.Fatalf("subagents = %#v, want completed session_child", progress.Subagents)
+	}
+	if progress.ChildLastActivityAt == nil {
+		t.Fatal("child_last_activity_at is nil")
 	}
 }
 

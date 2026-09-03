@@ -31,11 +31,11 @@ During a run, intermediate CLI output is written as it arrives:
 .agent-review-artifacts/sessions/<session_id>/runs/<run_id>/<agent>.stderr.log
 ```
 
-For OpenCode agents, `<agent>.events.jsonl` contains raw OpenCode `/event` payloads for the active session, including `session.next.*`, `message.*`, `session.error`, and `session.idle` events. The final `<agent>.txt` output is assembled from OpenCode message history after the session returns to idle.
+For OpenCode agents, `<agent>.events.jsonl` contains raw OpenCode `/event` payloads for the active root session and any child sessions created or resumed by its `task` tool calls, including `session.next.*`, `message.*`, `session.error`, and `session.idle` events. The final `<agent>.txt` output is assembled from the root OpenCode message history after the root session returns to idle.
 
 The same lines are also emitted to the `agent-debug-squad` server log with `run`, `agent`, and `stream` fields.
 
-`GET /runs` and `GET /runs/<run_id>` also expose a `progress` object. For Kimi, a root `Agent` tool call sets `progress.phase` to `waiting_for_subagent`. The adapter observes Kimi's local session tree and updates `progress.subagents` plus `progress.child_last_activity_at` as child `wire.jsonl` files change. When the root receives the `Agent` tool result, the phase returns to `running` and the observed child entries become `completed`.
+`GET /runs` and `GET /runs/<run_id>` also expose a `progress` object. For Kimi, a root `Agent` tool call sets `progress.phase` to `waiting_for_subagent`. The adapter observes Kimi's local session tree and updates `progress.subagents` plus `progress.child_last_activity_at` as child `wire.jsonl` files change. OpenCode derives the same progress fields from `task` tool parts and parent-linked child sessions in `/event`; nested child activity is attributed to the root run. When the root receives the corresponding tool result, the phase returns to `running` and the observed child entry becomes `completed` or `failed`.
 
 YOLO mode is enabled by default through `defaults.yolo: true`. Codex uses `--dangerously-bypass-approvals-and-sandbox`; Cursor uses `--force`; Kimi prompt mode ignores YOLO because Kimi 0.10.1 rejects `--prompt` combined with permission flags, and OpenCode HTTP mode does not expose an equivalent permission bypass. Set `options.yolo: false` on an agent to opt out.
 
