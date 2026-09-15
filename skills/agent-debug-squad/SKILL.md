@@ -58,7 +58,7 @@ Backends:
 
 - `codex`: CLI adapter with `command`, optional `model`, `reasoning`, `yolo`, `env`, and `inherit_env`.
 - `cursor`: Cursor Agent CLI adapter with `command`, optional `model`, read-only `mode`, `sandbox`, `yolo`, `env`, and `inherit_env`.
-- `opencode`: HTTP adapter with `base_url`, optional `model`, and `timeout_seconds`.
+- `opencode`: HTTP adapter with `base_url`, optional `model`, `timeout_seconds`, and `yolo`.
 - `kimi`: CLI adapter with `command` and optional model settings.
 - `fake`: deterministic in-process adapter for smoke tests.
 
@@ -116,6 +116,24 @@ Respond to its concrete findings. Do not edit files.
 ```
 
 For a bounded review, ask a critic for findings, ask an advocate to filter overreach, synthesize one concrete implementation request, send it to the implementer, and verify the result. Stop the loop when further discussion produces no meaningful risk or useful change.
+
+
+### Resolve OpenCode Permission Waits
+
+Effective `yolo: true` (the default) automatically replies `once` to permission requests belonging to the active OpenCode run or its tracked descendants. Use `options.yolo: false` for manual decisions. Global backend policies and explicit denials remain in effect; questions are separate.
+
+Inspect `progress.pending_permissions` when `progress.phase` is `waiting_for_permission`. It contains request/session IDs, permission name, patterns, metadata, tool identifiers when available, and `asked_at`. `auto_approving: true` means an automatic reply is in flight; `auto_approve_error` means it failed and needs intervention. Both create-run and GET-run long polls return early for manual requests or failed automatic approval.
+
+Reply to a specific request within the user's authorized task:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8090/runs/run_000001/permissions/per_example/reply \
+  -H 'Content-Type: application/json' \
+  -d '{"reply":"once"}'
+```
+
+Use `once`, `always` (OpenCode's suggested patterns for the session), or `reject`, with optional `message`. A successful reply returns `200`; re-read the run to find any other pending requests. `404` means an unknown/resolved request or run, `409` an inactive run or unsupported backend, and `502` a backend reply failure. Check the latest state before retrying an uncertain reply. Do not reset an agent merely because it is waiting for a permission. Decisions are audited in run `.events.jsonl` as `squad.permission.reply` with source `yolo` or `coordinator`.
+
 
 ## Reset One Agent
 

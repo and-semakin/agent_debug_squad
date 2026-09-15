@@ -1,15 +1,14 @@
 package opencode
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 )
 
 type captureSink struct {
+	mu       sync.Mutex
 	stdout   []string
 	stderr   []string
 	progress []domain.RunProgress
@@ -39,10 +39,14 @@ func newTestAdapter(spec domain.AgentSpec) *Adapter {
 }
 
 func (s *captureSink) StdoutLine(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stdout = append(s.stdout, line)
 }
 
 func (s *captureSink) StderrLine(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stderr = append(s.stderr, line)
 }
 
@@ -51,12 +55,17 @@ func (s *captureSink) Err() error {
 }
 
 func (s *captureSink) Progress(progress domain.RunProgress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	cloned := progress
+	cloned.PendingPermissions = domain.ClonePermissions(progress.PendingPermissions)
 	cloned.Subagents = append([]domain.SubagentProgress(nil), progress.Subagents...)
 	s.progress = append(s.progress, cloned)
 }
 
 func (s *captureSink) lastProgress(t *testing.T) domain.RunProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	t.Helper()
 	if len(s.progress) == 0 {
 		t.Fatal("no progress was reported")
@@ -1880,52 +1889,6 @@ func TestInitCreatesSessionWhenMissing(t *testing.T) {
 	}
 	if state.BackendSessionID != "created_session" {
 		t.Fatalf("BackendSessionID = %q, want %q", state.BackendSessionID, "created_session")
-	}
-}
-
-func TestSendLogsUnsupportedYoloWarning(t *testing.T) {
-	var logs bytes.Buffer
-	previous := logger
-	logger = log.New(&logs, "", 0)
-	t.Cleanup(func() { logger = previous })
-
-	promptSeen := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/event":
-			writeConnectedAndIdleAfterPrompt(t, w, promptSeen)
-		case "/session/session_123/prompt_async":
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-			close(promptSeen)
-		case "/session/session_123/message":
-			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{
-					"info":  map[string]any{"id": "msg_assistant", "role": "assistant", "parentID": "msg_0123456789ab0123456789abcd"},
-					"parts": []map[string]any{{"type": "text", "text": "ok"}},
-				},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	enabled := true
-	spec := domain.AgentSpec{
-		Name:          "Critic",
-		Backend:       "opencode",
-		StartupPrompt: "Review.",
-		Yolo:          &enabled,
-		StringOptions: map[string]string{"base_url": server.URL},
-	}
-	state := domain.AgentState{Name: "Critic", BackendSessionID: "session_123", WorkspaceDir: t.TempDir(), LastRunID: "run_previous"}
-
-	_, _, err := newTestAdapter(spec).Send(context.Background(), state, domain.RunRequest{RunID: "run_1", Agent: "Critic", Message: "hello"}, domain.DiscardRunSink())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(logs.String(), "backend=opencode yolo=true unsupported") {
-		t.Fatalf("logs = %q, want unsupported yolo warning", logs.String())
 	}
 }
 

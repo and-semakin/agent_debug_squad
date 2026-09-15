@@ -273,21 +273,33 @@ func (o *Orchestrator) Wait(ctx context.Context, runID string, timeout time.Dura
 		timeoutC = timer.C
 	}
 
-	select {
-	case <-waiter:
-		return o.Run(ctx, runID)
-	case <-timeoutC:
-		latest, latestErr := o.Run(context.Background(), runID)
-		if latestErr != nil {
-			return latest, latestErr
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if run.Progress != nil && run.Progress.NeedsPermissionReply() {
+			return run, nil
 		}
-		return latest, ErrWaitTimeout
-	case <-ctx.Done():
-		latest, latestErr := o.Run(context.Background(), runID)
-		if latestErr != nil {
-			return latest, latestErr
+		select {
+		case <-ticker.C:
+			run, err = o.Run(ctx, runID)
+			if err != nil || isTerminal(run.Status) {
+				return run, err
+			}
+		case <-waiter:
+			return o.Run(ctx, runID)
+		case <-timeoutC:
+			latest, latestErr := o.Run(context.Background(), runID)
+			if latestErr != nil {
+				return latest, latestErr
+			}
+			return latest, ErrWaitTimeout
+		case <-ctx.Done():
+			latest, latestErr := o.Run(context.Background(), runID)
+			if latestErr != nil {
+				return latest, latestErr
+			}
+			return latest, ctx.Err()
 		}
-		return latest, ctx.Err()
 	}
 }
 

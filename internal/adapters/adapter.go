@@ -35,3 +35,8 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 		return nil, fmt.Errorf("unknown backend %q", spec.Backend)
 	}
 }
+
+// PermissionReplier is optional; CLI adapters need not implement it.
+type PermissionReplier interface {
+	ReplyPermission(ctx context.Context, runID, requestID string, reply domain.PermissionReply) error
+}

@@ -267,6 +267,10 @@ func (s *Store) MarkActiveRunsInterrupted() error {
 			continue
 		}
 		run.Status = domain.RunInterrupted
+		if run.Progress != nil {
+			run.Progress.Phase = domain.RunPhaseInterrupted
+			run.Progress.PendingPermissions = nil
+		}
 		run.CompletedAt = &now
 		run.Error = &message
 		if err := s.SaveRun(run); err != nil {

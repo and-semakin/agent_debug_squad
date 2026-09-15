@@ -116,11 +116,11 @@ See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, 
 | --- | --- | --- | --- |
 | `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
-| `opencode` | Local HTTP server | OpenCode session ID | `base_url`, `model`, `timeout_seconds` |
+| `opencode` | Local HTTP server | OpenCode session ID | `base_url`, `model`, `timeout_seconds`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `fake` | In process | Deterministic state | none |
 
-`defaults.yolo` is `true` when omitted. Codex maps YOLO to its approval/sandbox bypass flags, and Cursor maps it to `--force`. Reviewer roles should explicitly use `yolo: false`; Cursor reviewers should additionally use a read-only `mode` such as `ask` or `plan`.
+`defaults.yolo` is `true` when omitted. Codex maps YOLO to its approval/sandbox bypass flags, Cursor maps it to `--force`, and OpenCode automatically replies `once` to permission requests for the active run and its tracked descendant sessions. Reviewer roles should explicitly use `yolo: false`; Cursor reviewers should additionally use a read-only `mode` such as `ask` or `plan`.
 
 Cursor model IDs depend on the account and current catalog. Verify them before use:
 
@@ -151,6 +151,7 @@ GET  /runs
 GET  /runs/{run_id}
 POST /agents/{agent}/runs
 POST /agents/{agent}/reset
+POST /runs/{run_id}/permissions/{request_id}/reply
 GET  /transcript
 ```
 
@@ -192,6 +193,45 @@ curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/reset?force=true'
 ```
 
 The service deliberately accepts only loopback hosts because the v1 API has no authentication. Do not expose it directly to a network.
+
+
+### OpenCode permissions
+
+OpenCode uses its classic HTTP/SSE permission API. Effective `yolo: true` (the default) automatically replies `once` to owned permission requests. It does not change global OpenCode configuration or override explicit backend denials. Set `options.yolo: false` for coordinator-controlled replies. Questions are separate and are not automatically answered.
+
+While any permissions are pending, progress includes:
+
+```json
+{
+  "status": "running",
+  "progress": {
+    "phase": "waiting_for_permission",
+    "pending_permissions": [{
+      "id": "per_example",
+      "session_id": "ses_example",
+      "permission": "external_directory",
+      "patterns": ["/review/*"],
+      "metadata": {"filepath": "/review/candidates.md"},
+      "always": ["/review/*"],
+      "asked_at": "2026-09-15T10:00:00Z"
+    }]
+  }
+}
+```
+
+`tool` identifiers are included when supplied by OpenCode. `auto_approving: true` means the adapter is sending an automatic reply. If it fails, `auto_approve_error` contains the failure and the request remains available for a coordinator reply; automatic failures are not retried indefinitely. Requests for unrelated or undiscovered sessions are never approved.
+
+Both create-run and GET-run long polls return early when a manual request or automatic reply failure needs intervention. A pending request does not complete or cancel the run. Respond using its current run and request IDs:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8090/runs/run_000001/permissions/per_example/reply \
+  -H 'Content-Type: application/json' \
+  -d '{"reply":"once","message":"Read the review artifacts"}'
+```
+
+Replies are `once`, `always`, or `reject`; `message` is optional. `always` approves OpenCode's suggested patterns for that backend session. Success returns `200` with `{"ok":true}`; invalid input returns `400`, unknown runs/requests `404`, inactive runs or unsupported backends `409`, and backend failures `502`. Concurrent replies are serialized and resolved requests cannot be approved again. Backend calls time out after five seconds and are cancelled with the run. Reset/restart invalidates old actionable requests.
+
+Permission reply attempts are recorded as `squad.permission.reply` events in the run's `.events.jsonl`, with request/session IDs, reply, source (`yolo` or `coordinator`), timestamp, and any error. Waiting for permission takes precedence over waiting for subagents until all requests resolve.
 
 ## Artifacts
 

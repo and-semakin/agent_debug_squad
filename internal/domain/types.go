@@ -32,11 +32,12 @@ const (
 type RunPhase string
 
 const (
-	RunPhaseRunning            RunPhase = "running"
-	RunPhaseWaitingForSubagent RunPhase = "waiting_for_subagent"
-	RunPhaseCompleted          RunPhase = "completed"
-	RunPhaseFailed             RunPhase = "failed"
-	RunPhaseInterrupted        RunPhase = "interrupted"
+	RunPhaseWaitingForPermission RunPhase = "waiting_for_permission"
+	RunPhaseRunning              RunPhase = "running"
+	RunPhaseWaitingForSubagent   RunPhase = "waiting_for_subagent"
+	RunPhaseCompleted            RunPhase = "completed"
+	RunPhaseFailed               RunPhase = "failed"
+	RunPhaseInterrupted          RunPhase = "interrupted"
 )
 
 type SubagentProgress struct {
@@ -47,10 +48,11 @@ type SubagentProgress struct {
 }
 
 type RunProgress struct {
-	Phase               RunPhase           `json:"phase"`
-	LastActivityAt      time.Time          `json:"last_activity_at"`
-	ChildLastActivityAt *time.Time         `json:"child_last_activity_at,omitempty"`
-	Subagents           []SubagentProgress `json:"subagents,omitempty"`
+	PendingPermissions  []PermissionRequest `json:"pending_permissions,omitempty"`
+	Phase               RunPhase            `json:"phase"`
+	LastActivityAt      time.Time           `json:"last_activity_at"`
+	ChildLastActivityAt *time.Time          `json:"child_last_activity_at,omitempty"`
+	Subagents           []SubagentProgress  `json:"subagents,omitempty"`
 }
 
 type AgentSpec struct {

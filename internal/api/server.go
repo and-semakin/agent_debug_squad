@@ -41,6 +41,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("POST /runs/{run_id}/permissions/{request_id}/reply", s.handlePermissionReply)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /session", s.handleSession)
 	s.mux.HandleFunc("GET /agents", s.handleAgents)

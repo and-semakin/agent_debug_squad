@@ -9,10 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/promptfmt"
@@ -24,9 +24,9 @@ const (
 	defaultHTTPTimeout = 10 * time.Minute
 )
 
-var logger = log.Default()
-
 type Adapter struct {
+	mu                 sync.Mutex
+	permissions        *permissionRun
 	spec               domain.AgentSpec
 	messageIDGenerator func(string) string
 }
@@ -93,9 +93,6 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		err := errors.New("opencode backend_session_id is empty")
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
-	if a.spec.Yolo != nil && *a.spec.Yolo {
-		logger.Printf("agent=%s backend=opencode yolo=true unsupported by opencode HTTP adapter", state.Name)
-	}
 
 	message := run.Message
 	if state.LastRunID == "" {
@@ -114,10 +111,12 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	ready := make(chan error, 1)
 	streamDone := make(chan streamResult, 1)
 	go func() {
-		streamDone <- a.streamEvents(streamCtx, state.BackendSessionID, messageID, promptSubmitted, promptAccepted, sink, ready)
+		streamDone <- a.streamEvents(streamCtx, run.RunID, state.BackendSessionID, messageID, promptSubmitted, promptAccepted, sink, ready)
 	}()
 
 	if err := <-ready; err != nil {
+		cancel()
+		<-streamDone
 		return domain.RunResult{ErrorMessage: err.Error()}, state, err
 	}
 
@@ -277,7 +276,7 @@ func (a *Adapter) promptBody(message string, messageID string) map[string]any {
 	return body
 }
 
-func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID string, promptSubmitted <-chan struct{}, promptAccepted <-chan struct{}, sink domain.RunSink, ready chan<- error) streamResult {
+func (a *Adapter) streamEvents(ctx context.Context, runID string, sessionID string, messageID string, promptSubmitted <-chan struct{}, promptAccepted <-chan struct{}, sink domain.RunSink, ready chan<- error) streamResult {
 	req, err := a.newRequest(ctx, http.MethodGet, "/event", nil)
 	if err != nil {
 		ready <- err
@@ -314,6 +313,16 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 	var prompted bool
 	var activitySeen bool
 	tracker := newProgressTracker(sessionID, messageID, sink)
+	permissions := newPermissionRun(ctx, a, runID, tracker, sink)
+	a.mu.Lock()
+	a.permissions = permissions
+	a.mu.Unlock()
+	defer func() {
+		permissions.close()
+		a.mu.Lock()
+		a.permissions = nil
+		a.mu.Unlock()
+	}()
 	err = scanSSEEvents(resp.Body, func(raw string) bool {
 		var event map[string]any
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
@@ -348,6 +357,9 @@ func (a *Adapter) streamEvents(ctx context.Context, sessionID string, messageID 
 			return false
 		}
 		trackedEvent := tracker.handleEvent(event, rootRunEvent, time.Now().UTC())
+		if permissions.handleEvent(event) {
+			trackedEvent = true
+		}
 		if !rootRunEvent && !trackedEvent {
 			return false
 		}

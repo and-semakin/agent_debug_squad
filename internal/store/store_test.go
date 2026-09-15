@@ -237,6 +237,7 @@ func TestMarkInterruptedUpdatesActiveRuns(t *testing.T) {
 		RunID:     "run_1",
 		Agent:     "A",
 		Status:    domain.RunRunning,
+		Progress:  &domain.RunProgress{Phase: domain.RunPhaseWaitingForPermission, PendingPermissions: []domain.PermissionRequest{{ID: "per_old"}}},
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("SaveRun(run_1) error = %v", err)
@@ -262,6 +263,9 @@ func TestMarkInterruptedUpdatesActiveRuns(t *testing.T) {
 		t.Fatalf("len(runs) = %d, want 2", len(runs))
 	}
 	for _, run := range runs {
+		if run.Progress != nil && (run.Progress.Phase != domain.RunPhaseInterrupted || len(run.Progress.PendingPermissions) != 0) {
+			t.Fatalf("stale permissions on interrupted run: %+v", run.Progress)
+		}
 		if run.Status != domain.RunInterrupted {
 			t.Fatalf("run %s status = %q, want %q", run.RunID, run.Status, domain.RunInterrupted)
 		}

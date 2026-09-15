@@ -125,6 +125,7 @@ func (s *runSink) recordError(err error) {
 
 func cloneRunProgress(progress domain.RunProgress) domain.RunProgress {
 	cloned := progress
+	cloned.PendingPermissions = domain.ClonePermissions(progress.PendingPermissions)
 	cloned.Subagents = append([]domain.SubagentProgress(nil), progress.Subagents...)
 	if progress.ChildLastActivityAt != nil {
 		at := *progress.ChildLastActivityAt

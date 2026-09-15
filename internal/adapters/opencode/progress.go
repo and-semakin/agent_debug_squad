@@ -2,12 +2,14 @@ package opencode
 
 import (
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
 type progressTracker struct {
+	mu            sync.Mutex
 	rootSessionID string
 	sink          domain.RunSink
 	progress      domain.RunProgress
@@ -33,6 +35,8 @@ func newProgressTracker(rootSessionID, messageID string, sink domain.RunSink) *p
 }
 
 func (t *progressTracker) handleEvent(event map[string]any, rootRunEvent bool, at time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	properties, ok := event["properties"].(map[string]any)
 	if !ok {
 		return false
@@ -207,6 +211,9 @@ func (t *progressTracker) report(at time.Time) {
 	} else {
 		t.progress.Phase = domain.RunPhaseRunning
 	}
+	if len(t.progress.PendingPermissions) > 0 {
+		t.progress.Phase = domain.RunPhaseWaitingForPermission
+	}
 	t.progress.Subagents = t.progress.Subagents[:0]
 	for _, child := range t.subagents {
 		t.progress.Subagents = append(t.progress.Subagents, child)
@@ -224,10 +231,33 @@ func (t *progressTracker) report(at time.Time) {
 		t.progress.ChildLastActivityAt = &latest
 	}
 	progress := t.progress
+	progress.PendingPermissions = domain.ClonePermissions(t.progress.PendingPermissions)
 	progress.Subagents = append([]domain.SubagentProgress(nil), t.progress.Subagents...)
 	if t.progress.ChildLastActivityAt != nil {
 		latest := *t.progress.ChildLastActivityAt
 		progress.ChildLastActivityAt = &latest
 	}
 	domain.ReportRunProgress(t.sink, progress)
+}
+
+// setPermissions and event updates share a lock so either source retains the
+// latest subagent and permission state when publishing a snapshot.
+func (t *progressTracker) setPermissions(pending []domain.PermissionRequest) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.progress.PendingPermissions = domain.ClonePermissions(pending)
+	t.report(time.Now().UTC())
+}
+
+func (t *progressTracker) ownsPermission(sessionID, messageID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if sessionID == t.rootSessionID {
+		if messageID == "" {
+			return true
+		}
+		_, ok := t.rootMessages[messageID]
+		return ok
+	}
+	return t.isSubagent(sessionID)
 }
