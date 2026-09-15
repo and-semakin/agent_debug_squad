@@ -216,10 +216,55 @@ A portable Codex skill for operating Agent Debug Squad is included at [skills/ag
 
 ## Development
 
-Run the complete test suite:
+### OpenSpec
+
+New features, behavior changes, and substantial refactors use [OpenSpec](https://openspec.dev/).
+The repository uses the `spec-driven` schema and Codex skills in `.agents/skills/`.
+Project context and artifact rules live in [openspec/config.yaml](openspec/config.yaml);
+workflow expectations are in [AGENTS.md](AGENTS.md).
+
+Install the CLI (Node.js 20.19.0 or newer; setup tested with OpenSpec 1.13.0):
 
 ```sh
-go test ./...
+npm install -g @fission-ai/openspec@1.13.0
+openspec --version
+```
+
+Open a new Codex session after installing or updating project skills. In Codex:
+
+1. Use `$openspec-explore` to investigate an idea when needed.
+2. Use `$openspec-propose <description>` to create a proposal, design, spec deltas, and tasks.
+3. Review the artifacts, then use `$openspec-apply-change <name>` to implement the tasks.
+4. If the scope changes, use `$openspec-update-change <name>` to revise the artifacts.
+5. Run the checks below and `openspec validate <name> --strict`; check implementation against requirements and scenarios.
+6. Use `$openspec-archive-change <name>` to sync spec deltas and archive completed work.
+
+`openspec/changes/<name>/` holds active work, `openspec/specs/` holds the resulting
+capability specs, and `openspec/changes/archive/` preserves completed changes.
+Specs start empty and grow with changes; check existing behavior against the code
+when first specifying it. Commit artifacts alongside the implementation.
+Small fixes that restore specified behavior, typos, and formatting-only edits can
+be made directly.
+
+Useful terminal commands:
+
+```sh
+openspec list
+openspec list --specs
+openspec validate --all --strict
+```
+
+To regenerate the Codex integration, run `openspec init --tools codex --profile core`.
+For another coding tool, run `openspec init --help` and select its tool ID with
+`--tools`. After upgrading the CLI, run `openspec update` and review the generated diff.
+
+### Checks and build
+
+Format changed Go files with `gofmt`, then run static checks and the complete test suite:
+
+```sh
+go vet ./...
+go test -race -count=1 ./...
 ```
 
 Build the CLI:

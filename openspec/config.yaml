@@ -1,0 +1,39 @@
+schema: spec-driven
+
+context: |
+  Agent Debug Squad is a local, REST-controlled coordinator for long-lived
+  coding-agent sessions. One Go process owns one YAML-configured squad.
+  Stack: Go 1.22+, net/http, gopkg.in/yaml.v3; no database or frontend.
+  Layout: cmd/agent-debug-squad is the CLI; internal/config loads configuration;
+  internal/api serves HTTP; internal/orchestrator coordinates runs;
+  internal/domain defines shared types; internal/store persists readable files;
+  internal/adapters contains Codex, Cursor, OpenCode, Kimi, and fake backends;
+  internal/selfupdate handles release updates.
+  Preserve backend session continuity, independent agent lifecycle, streamed
+  artifacts, explicit facilitator-driven turns, and constrained child-process
+  environments. The unauthenticated HTTP API is loopback-only.
+  Runtime state lives under .agent-debug-squad/ by default and must not be committed.
+  Never commit credentials, private transcripts, or machine-specific paths.
+  Follow AGENTS.md. Run gofmt on changed Go files, then go vet ./... and
+  go test -race -count=1 ./... before handing off code changes.
+  Release versions come from annotated semantic-version tags and GoReleaser;
+  development builds use dev. Publishing releases requires an explicit request.
+  README.md describes current usage. docs/superpowers/ contains historical
+  designs and plans, not authoritative current specs; verify against code.
+  Write OpenSpec artifacts in English to match repository documentation.
+
+rules:
+  proposal:
+    - Describe the user-visible problem, intended behavior, affected capabilities, and scope boundaries.
+    - Identify compatibility impact on CLI flags, YAML configuration, HTTP responses, or persisted artifacts when relevant.
+  design:
+    - Ground decisions in the existing Go packages and backend adapter interfaces.
+    - Address concurrency, cancellation, session continuity, and failure handling when the change touches run lifecycle.
+    - Explain compatibility and migration needs for changes to configuration or persisted state.
+  specs:
+    - Write testable requirements using SHALL or MUST and concrete WHEN/THEN scenarios.
+    - Specify observable behavior; include failure and boundary cases relevant to the change.
+  tasks:
+    - Use small, verifiable implementation tasks and include relevant documentation or example updates.
+    - For code changes, include gofmt on changed Go files, go vet ./..., and go test -race -count=1 ./....
+    - Include strict OpenSpec validation and a check that implementation satisfies the requirements before archive.

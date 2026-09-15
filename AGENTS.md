@@ -1,5 +1,15 @@
 # Repository Instructions
 
+## OpenSpec Workflow
+
+- Use OpenSpec for new features, behavior changes, and substantial refactors. Read `openspec/config.yaml` and relevant specs before planning implementation.
+- Start with `openspec-propose` to create a change under `openspec/changes/<name>/` with a proposal, design, specs, and tasks. Use `openspec-explore` when investigation is needed first.
+- Implement with `openspec-apply-change`, keeping task checkboxes and artifacts consistent with the actual work. Use `openspec-update-change` if the scope changes.
+- Before archiving, run `openspec validate <name> --strict`, complete the required code checks below, and check implementation against requirements and scenarios. Use `openspec-archive-change` to sync spec deltas into `openspec/specs/` and archive completed work.
+- Small fixes that restore specified behavior, typos, and formatting-only edits may be made directly; update affected specs if behavior changes.
+- Keep OpenSpec artifacts in English, matching repository documentation. Communicate with the user in their preferred language.
+- Treat `docs/superpowers/` as historical design context. Check its claims against current code; do not assume it is the current specification or migrate it wholesale.
+
 ## Development
 
 - Run `gofmt` on changed Go files.
