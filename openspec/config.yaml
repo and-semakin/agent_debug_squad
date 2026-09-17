@@ -7,7 +7,7 @@ context: |
   Layout: cmd/agent-debug-squad is the CLI; internal/config loads configuration;
   internal/api serves HTTP; internal/orchestrator coordinates runs;
   internal/domain defines shared types; internal/store persists readable files;
-  internal/adapters contains Codex, Cursor, OpenCode, Kimi, and fake backends;
+  internal/adapters contains Codex, Cursor, OpenCode, Kimi, ZCode, and fake backends;
   internal/selfupdate handles release updates.
   Preserve backend session continuity, independent agent lifecycle, streamed
   artifacts, explicit facilitator-driven turns, and constrained child-process

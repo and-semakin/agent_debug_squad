@@ -9,6 +9,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/fake"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/kimi"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/zcode"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
@@ -21,6 +22,8 @@ type AgentAdapter interface {
 
 func New(spec domain.AgentSpec) (AgentAdapter, error) {
 	switch spec.Backend {
+	case "zcode":
+		return zcode.New(spec), nil
 	case "fake":
 		return fake.New(spec), nil
 	case "codex":

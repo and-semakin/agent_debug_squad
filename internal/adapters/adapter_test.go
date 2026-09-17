@@ -15,3 +15,13 @@ func TestNewSupportsCursorBackend(t *testing.T) {
 		t.Fatal("New(cursor) adapter = nil")
 	}
 }
+
+func TestNewSupportsZCodeBackend(t *testing.T) {
+	adapter, err := New(domain.AgentSpec{Name: "ZCodeFlash", Backend: "zcode"})
+	if err != nil || adapter == nil {
+		t.Fatalf("New(zcode): %v", err)
+	}
+	if _, ok := adapter.(PermissionReplier); !ok {
+		t.Fatal("zcode permission API unavailable")
+	}
+}

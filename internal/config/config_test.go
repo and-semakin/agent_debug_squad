@@ -335,3 +335,14 @@ func containsPrefix(items []string, prefix string) bool {
 	}
 	return false
 }
+
+func TestZCodeExample(t *testing.T) {
+	cfg, err := Load("../../examples/zcode-squad.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := cfg.Agents[0]
+	if agent.Backend != "zcode" || agent.StringOptions["model"] != "GLM-5.3-Flash" || cfg.AgentYolo(agent) {
+		t.Fatalf("unexpected ZCode example: %+v", agent)
+	}
+}

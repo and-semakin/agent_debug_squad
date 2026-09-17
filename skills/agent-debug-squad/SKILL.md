@@ -59,12 +59,15 @@ Backends:
 - `codex`: CLI adapter with `command`, optional `model`, `reasoning`, `yolo`, `env`, and `inherit_env`.
 - `cursor`: Cursor Agent CLI adapter with `command`, optional `model`, read-only `mode`, `sandbox`, `yolo`, `env`, and `inherit_env`.
 - `opencode`: HTTP adapter with `base_url`, optional `model`, `timeout_seconds`, and `yolo`.
+- `zcode`: private App Server adapter with `command` (Node), `runtime_path`, `provider`, `model`, `reasoning`, `yolo`, `env`, and `inherit_env`. Defaults to GLM-5.3-Flash/low; requires a compatible installed ZCode bundle and existing Z.AI Coding Plan login. See the repository README and `examples/zcode-squad.yaml` for compatibility.
 - `kimi`: CLI adapter with `command` and optional model settings.
 - `fake`: deterministic in-process adapter for smoke tests.
 
 Keep credentials out of YAML and skill files. Use `options.inherit_env` for explicitly selected variables already present in the server environment. Use `options.env` only for non-secret values or values supplied through a private, ignored config. Never commit proxy URLs containing user information.
 
 For Cursor browser login, inherit `HOME`; for API-key authentication, inherit `CURSOR_API_KEY`. When inheriting `HTTP_PROXY` or `HTTPS_PROXY`, set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if a TLS-inspecting proxy requires it. Verify account-specific model IDs with `cursor-agent --list-models` rather than guessing from display names.
+
+ZCode: inherit HOME/PATH and, if needed, ZCODE_HTTP_PROXY, ZCODE_NO_PROXY, and ZCODE_AGENT_CA_CERT. Its `zcode.models` diagnostic record contains the current model catalog. `yolo: false` selects build mode and exposes pending tool permissions through the existing run permission endpoint; it is not a read-only sandbox. Monitor `progress.subagents` for child status. Background work ends with the owning turn. Open the workspace in ZCode for desktop session discovery, and avoid concurrent control of the same conversation. Unsupported login challenges/questions/browser interactions fail explicitly.
 
 ## Start And Verify
 

@@ -17,7 +17,7 @@ Coding-agent CLIs expose different flags, session formats, and streaming protoco
 - interrupt and reset one stuck agent without restarting the squad;
 - let an external facilitator coordinate review, critique, and implementation rounds through HTTP.
 
-Supported backends are Codex CLI, Cursor Agent CLI, OpenCode, Kimi CLI, and a deterministic fake backend for local smoke tests.
+Supported backends are Codex CLI, Cursor Agent CLI, OpenCode, Kimi CLI, ZCode App Server, and a deterministic fake backend for local smoke tests.
 
 ## Quick Start
 
@@ -117,6 +117,7 @@ See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, 
 | `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
 | `opencode` | Local HTTP server | OpenCode session ID | `base_url`, `model`, `timeout_seconds`, `yolo` |
+| `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `model`, `reasoning`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `fake` | In process | Deterministic state | none |
 
@@ -127,6 +128,38 @@ Cursor model IDs depend on the account and current catalog. Verify them before u
 ```sh
 cursor-agent --list-models
 ```
+
+### ZCode App Server
+
+See [examples/zcode-squad.yaml](examples/zcode-squad.yaml). Start it with:
+
+```sh
+agent-debug-squad serve --config examples/zcode-squad.yaml
+```
+
+This experimental adapter supports the tested **ZCode desktop 3.12.3 / runtime 0.16.5** bundle (SHA-256 `da61b0663336a65f7cce3dec223678794ccaa58158e304fc0d97b695434a8f01`) and a signed-in **Z.AI individual Coding Plan** account. Install Node (tested with Node 26) and sign in through ZCode first. Runtime versions are not sufficient compatibility identifiers: unknown bundle fingerprints fail before a prompt is sent. Updating ZCode may require an adapter update. The host bridge loads the installed runtime's native credential reader in memory; it never edits the bundle or exports credentials into Squad state.
+
+Options:
+
+- `command`: Node executable, default `node`.
+- `runtime_path`: bundle location, default `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Other locations must contain the same supported bundle and its companion resources.
+- `provider`: currently only `account:zai-individual-coding-plan`.
+- `model`: default `GLM-5.3-Flash`; `reasoning`: `low` (default), `high`, or `max`. The full selection is sent on every turn.
+- `yolo`: inherits squad defaults. True selects native `yolo`; false explicitly selects `build`. This also updates ZCode's workspace permission preference. False is permission-controlled, **not a read-only sandbox**.
+- `env` / `inherit_env`: the same explicit environment rules as other CLI adapters. Inherit `HOME` and `PATH` for the existing login and tools.
+
+**Model discovery:** the current account catalog is captured from `session/create` or `session/resume` as a `zcode.models` record in `<agent>.diagnostics.jsonl` before each prompt. For example:
+
+```sh
+jq 'select(.type == "zcode.models") | .model.available[] | {ref, reasoning}' \
+  .agent-debug-squad/sessions/<session_id>/runs/<run_id>/ZCodeFlash.diagnostics.jsonl
+```
+
+The adapter owns one App Server process per turn and resumes the persisted ZCode session on the next turn. Reset starts a new conversation without deleting the previous history. A run completes only after its matching turn completes, not when the server accepts the input. Stream events are written to the normal run artifacts; direct and nested subagents appear in `progress.subagents`. Historical children from earlier turns are excluded. Child timestamps reflect observed status changes, rather than token-level activity. Background children are stopped with their owning Squad turn; they are not detached jobs.
+
+With YOLO off, tool requests appear in `pending_permissions` and use the same `/runs/{run_id}/permissions/{request_id}/reply` endpoint described below. `always` uses only the backend's offered project rule; it can affect later ZCode work in that project. Duplicate/stale replies are rejected. Native YOLO does not override an explicit denial or answer questions. Browser integration, interactive questionnaires, official-MCP authentication, CAPTCHA and login refresh are not implemented; unsupported interactions fail explicitly. Resolve account challenges in ZCode before retrying.
+
+The standard ZCode session database is shared with the desktop. Open/import the same workspace in ZCode to make its conversations discoverable there; Squad does not write the sidebar index directly. Do not operate the same active conversation concurrently from both hosts. This adapter does not request special off-peak dispatch or promise free tokens, subscription bonuses, or different billing from ordinary account usage.
 
 ## Environment And Secrets
 
@@ -139,6 +172,8 @@ CLI-backed agents receive a constrained environment rather than the server's com
 Keep credentials out of committed YAML. Prefer environment variables, an OS credential store, or a private ignored launcher/config. The checked-in proxy URLs use the reserved `.example` domain and are non-functional placeholders.
 
 Cursor browser authentication normally requires inheriting `HOME`; API-key authentication requires `CURSOR_API_KEY`. When Cursor uses `HTTP_PROXY` or `HTTPS_PROXY`, also set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if the proxy performs TLS inspection.
+
+ZCode model traffic uses `ZCODE_HTTP_PROXY`, with exclusions in `ZCODE_NO_PROXY` and a custom CA file in `ZCODE_AGENT_CA_CERT`. Explicitly inherit these variables (as in the example), or set non-secret values through `env`. Ordinary `HTTP_PROXY` / `HTTPS_PROXY` variables alone are not a substitute for `ZCODE_HTTP_PROXY`: the runtime treats model, web-fetch, and tool traffic differently. The bridge also honors `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` and `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` when explicitly passed; normally it derives these paths from the installation and HOME. Custom `ZCODE_STORAGE_DIR` / `ZCODE_SESSION_DB_PATH` isolate conversations from the desktop's default history.
 
 ## HTTP API
 

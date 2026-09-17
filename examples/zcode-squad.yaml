@@ -1,0 +1,29 @@
+session_name: local-zcode
+workspace_dir: .
+state_dir_name: .agent-debug-squad
+host: 127.0.0.1
+port: 8082
+log_level: info
+defaults:
+  yolo: false
+agents:
+  - name: ZCodeFlash
+    backend: zcode
+    startup_prompt: |
+      Help investigate the coordinator's task. Keep responses concise.
+      Ask for tool permission when needed and report concrete evidence.
+    options:
+      command: node
+      # Optional: defaults to the standard macOS ZCode installation.
+      # runtime_path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+      provider: account:zai-individual-coding-plan
+      model: GLM-5.3-Flash
+      reasoning: low
+      inherit_env:
+        - HOME
+        - PATH
+        - TMPDIR
+        - SHELL
+        - ZCODE_HTTP_PROXY
+        - ZCODE_NO_PROXY
+        - ZCODE_AGENT_CA_CERT
