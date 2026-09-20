@@ -137,12 +137,12 @@ See [examples/zcode-squad.yaml](examples/zcode-squad.yaml). Start it with:
 agent-debug-squad serve --config examples/zcode-squad.yaml
 ```
 
-This experimental adapter supports the tested **ZCode desktop 3.12.3 / runtime 0.16.5** bundle (SHA-256 `da61b0663336a65f7cce3dec223678794ccaa58158e304fc0d97b695434a8f01`) and a signed-in **Z.AI individual Coding Plan** account. Install Node (tested with Node 26) and sign in through ZCode first. Runtime versions are not sufficient compatibility identifiers: unknown bundle fingerprints fail before a prompt is sent. Updating ZCode may require an adapter update. The host bridge loads the installed runtime's native credential reader in memory; it never edits the bundle or exports credentials into Squad state.
+This experimental adapter supports **ZCode desktop 3.x** installs and a signed-in **Z.AI individual Coding Plan** account. Install Node (tested with Node 26) and sign in through ZCode first. There is no pinned version list: before loading the runtime, the host bridge probes the bundle structurally for the anchors it needs (CLI autorun statement, native credential store, provider registry). Bundles that keep those anchors work without a Squad update; bundles where an anchor is missing or ambiguous fail closed before a prompt is sent, with an actionable error that includes the bundle SHA-256 for reporting. The host bridge loads the installed runtime's native credential reader in memory; it never edits the bundle or exports credentials into Squad state.
 
 Options:
 
 - `command`: Node executable, default `node`.
-- `runtime_path`: bundle location, default `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Other locations must contain the same supported bundle and its companion resources.
+- `runtime_path`: bundle location, default `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Other locations must contain a compatible bundle and its companion resources.
 - `provider`: currently only `account:zai-individual-coding-plan`.
 - `model`: default `GLM-5.3-Flash`; `reasoning`: `low` (default), `high`, or `max`. The full selection is sent on every turn.
 - `yolo`: inherits squad defaults. True selects native `yolo`; false explicitly selects `build`. This also updates ZCode's workspace permission preference. False is permission-controlled, **not a read-only sandbox**.
