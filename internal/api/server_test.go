@@ -675,7 +675,7 @@ func newTestServerWithConfig(t *testing.T, mutate func(*domain.SessionConfig), a
 			}
 		}
 	})
-	return New(o, cfg)
+	return New(o, nil, cfg)
 }
 
 func waitForAgentStatus(t *testing.T, srv *Server, agentName string, want domain.AgentStatus) {

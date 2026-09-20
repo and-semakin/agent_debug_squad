@@ -59,6 +59,15 @@ func (s *Store) LoadAgentState(name string) (domain.AgentState, error) {
 	return state, err
 }
 
+// SaveAgentStateAt persists an agent state file at an explicit path, used by
+// workflow-owned runtimes that live under their execution directory.
+func (s *Store) SaveAgentStateAt(path string, state domain.AgentState) error {
+	if path == "" {
+		return fmt.Errorf("agent state path is required")
+	}
+	return writeJSONAtomic(path, state)
+}
+
 func (s *Store) SaveRun(run domain.RunRecord) error {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
@@ -266,6 +275,11 @@ func (s *Store) MarkActiveRunsInterrupted() error {
 		if run.Status != domain.RunQueued && run.Status != domain.RunRunning {
 			continue
 		}
+		// Workflow-owned runs are recovered by the workflow manager from the
+		// authoritative snapshot; projections must not overwrite it.
+		if strings.HasPrefix(run.RunID, "wrun_") {
+			continue
+		}
 		run.Status = domain.RunInterrupted
 		if run.Progress != nil {
 			run.Progress.Phase = domain.RunPhaseInterrupted
@@ -366,12 +380,21 @@ func writeJSONAtomic(path string, value any) error {
 	return writeFileAtomic(path, append(data, '\n'))
 }
 
+// atomicWriteHook is a test-only fault injection point consulted before each
+// stage of writeFileAtomic with one of "write", "sync", "rename", "dirsync".
+var atomicWriteHook func(stage string) error
+
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 
+	if atomicWriteHook != nil {
+		if err := atomicWriteHook("write"); err != nil {
+			return err
+		}
+	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*.json")
 	if err != nil {
 		return err
@@ -383,6 +406,12 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = tmp.Close()
 		return err
 	}
+	if atomicWriteHook != nil {
+		if err := atomicWriteHook("sync"); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
@@ -390,8 +419,18 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if atomicWriteHook != nil {
+		if err := atomicWriteHook("rename"); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
+	}
+	if atomicWriteHook != nil {
+		if err := atomicWriteHook("dirsync"); err != nil {
+			return err
+		}
 	}
 	return syncDir(dir)
 }

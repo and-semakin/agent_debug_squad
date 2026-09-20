@@ -1,0 +1,37 @@
+# Declarative workflow example: parallel review fan-out with a verifier
+# fan-in. Reviewers are optional (allowed_to_fail) and the verifier needs at
+# least one successful review (min_successful_dependencies: 1). The fake
+# backend makes this example portable and free to run.
+session_name: workflow-review
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - name: reviewer_a
+    backend: fake
+    startup_prompt: "Review code independently. Do not edit files."
+  - name: reviewer_b
+    backend: fake
+    startup_prompt: "Review code independently. Do not edit files."
+  - name: verifier
+    backend: fake
+    startup_prompt: "Verify findings against the code. Do not edit files."
+workflow:
+  version: 1
+  name: review-and-verify
+  max_parallel: 2
+  task_timeout_seconds: 1800
+  tasks:
+    review_a:
+      agent: reviewer_a
+      prompt: "Review the requested diff; report evidence and severity."
+      allowed_to_fail: true
+    review_b:
+      agent: reviewer_b
+      prompt: "Review the requested diff; report evidence and severity."
+      allowed_to_fail: true
+    verify:
+      agent: verifier
+      needs: [review_a, review_b]
+      min_successful_dependencies: 1
+      prompt: "Validate findings against the code, remove duplicates, align severity, produce the final report, and list missing reviews."

@@ -22,9 +22,33 @@ var (
 	ErrRunNotFound   = errors.New("run not found")
 	ErrWaitTimeout   = errors.New("wait timeout")
 	ErrResetTimeout  = errors.New("reset timeout")
+	ErrRunIDReserved = errors.New("run id is already reserved")
+	ErrWorkflowOwned = errors.New("runtime is owned by a workflow; use workflow controls")
+	ErrRunIDInvalid  = errors.New("run id is invalid")
 )
 
 const forceResetTimeout = 5 * time.Second
+
+// Workflow-owned run IDs live in their own namespace so manual run numbering
+// and the run_ prefix stay untouched.
+const workflowRunIDPrefix = "wrun_"
+
+func IsWorkflowRunID(runID string) bool {
+	return strings.HasPrefix(runID, workflowRunIDPrefix)
+}
+
+func ownedRuntimeKey(runID string) string {
+	return "owned:" + runID
+}
+
+// runtimeKeyForRun maps a run ID to its runtime registry key: manual runs are
+// addressed by agent name, workflow-owned runs by their reserved run ID.
+func runtimeKeyForRun(run domain.RunRecord) string {
+	if IsWorkflowRunID(run.RunID) {
+		return ownedRuntimeKey(run.RunID)
+	}
+	return run.Agent
+}
 
 type Orchestrator struct {
 	cfg     domain.SessionConfig
@@ -50,6 +74,10 @@ type agentRuntime struct {
 	activeRunDone     chan struct{}
 	runInterruptible  bool
 	interruptingRunID string
+	// owned marks a workflow-owned runtime; its state persists at statePath
+	// instead of the manual agent state file, and manual APIs reject it.
+	owned     bool
+	statePath string
 }
 
 func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orchestrator, error) {
@@ -160,6 +188,10 @@ func (o *Orchestrator) Agent(name string) (domain.AgentState, bool) {
 
 func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string, metadata map[string]string) (domain.RunRecord, error) {
 	o.mu.Lock()
+	if _, owned := o.runtimes[ownedRuntimeKey(agentName)]; owned {
+		o.mu.Unlock()
+		return domain.RunRecord{}, ErrWorkflowOwned
+	}
 	rt, ok := o.runtimes[agentName]
 	if !ok {
 		o.mu.Unlock()
@@ -211,7 +243,7 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 	o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
 
 	o.workerWG.Add(1)
-	go o.runWorker(runCtx, agentName, run, waiter)
+	go o.runWorker(runCtx, agentName, run, waiter, nil)
 	return run, nil
 }
 
@@ -370,6 +402,10 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 	var activeRunDone <-chan struct{}
 
 	o.mu.Lock()
+	if _, owned := o.runtimes[ownedRuntimeKey(agentName)]; owned {
+		o.mu.Unlock()
+		return domain.AgentResetResult{}, ErrWorkflowOwned
+	}
 	rt, ok := o.runtimes[agentName]
 	if !ok {
 		o.mu.Unlock()
@@ -479,14 +515,19 @@ func waitForWorkerDone(ctx context.Context, done <-chan struct{}, timeout time.D
 	}
 }
 
-func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run domain.RunRecord, waiter chan struct{}) {
+func (o *Orchestrator) runWorker(ctx context.Context, runtimeKey string, run domain.RunRecord, waiter chan struct{}, onDone func(domain.OwnedRunOutcome)) {
+	var outcome domain.OwnedRunOutcome
 	defer func() {
 		defer o.workerWG.Done()
 		close(waiter)
 		o.mu.Lock()
 		delete(o.waiters, run.RunID)
 		o.mu.Unlock()
-		o.releaseAgent(agentName)
+		o.releaseAgent(runtimeKey)
+		if onDone != nil {
+			outcome.RunID = run.RunID
+			onDone(outcome)
+		}
 	}()
 
 	started := time.Now().UTC()
@@ -500,12 +541,12 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
 
 	o.mu.Lock()
-	rt := o.runtimes[agentName]
+	rt := o.runtimes[runtimeKey]
 	rt.state.Status = domain.AgentRunning
 	state := rt.state
 	adapter := rt.adapter
 	o.mu.Unlock()
-	_ = o.store.SaveAgentState(state)
+	o.saveRuntimeState(rt, state)
 
 	sink := newRunSink(o.store, run, log.Default(), o.cfg.LogLevel)
 	o.mu.Lock()
@@ -545,7 +586,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		}
 	}
 
-	interruptedByReset := o.finishRunInterruptible(agentName, run.RunID)
+	interruptedByReset := o.finishRunInterruptible(runtimeKey, run.RunID)
 	if interruptedByReset {
 		run.Status = domain.RunInterrupted
 		run.Progress.Phase = domain.RunPhaseInterrupted
@@ -576,7 +617,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 		newState.WorkspaceDir = o.cfg.WorkspaceDir
 	}
 
-	if err := o.store.SaveAgentState(newState); err != nil {
+	if err := o.saveRuntimeState(rt, newState); err != nil {
 		markPersistenceFailure(&run, &newState, fmt.Errorf("save agent state: %w", err))
 	}
 	if err := o.store.AppendTranscript(domain.TranscriptEvent{
@@ -598,11 +639,33 @@ func (o *Orchestrator) runWorker(ctx context.Context, agentName string, run doma
 	}
 	o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
 
+	outcome = domain.OwnedRunOutcome{
+		RunID:        run.RunID,
+		Status:       run.Status,
+		FinalMessage: result.FinalMessage,
+		Error:        deref(run.Error),
+	}
+
 	o.mu.Lock()
-	if current := o.runtimes[agentName]; current != nil {
+	if current := o.runtimes[runtimeKey]; current != nil {
 		current.state = newState
+		if current.owned {
+			if current.activeRunDone != nil {
+				close(current.activeRunDone)
+			}
+			delete(o.runtimes, runtimeKey)
+		}
 	}
 	o.mu.Unlock()
+}
+
+// saveRuntimeState persists runtime state at the workflow-attempt path for
+// owned runtimes or the manual agent path otherwise.
+func (o *Orchestrator) saveRuntimeState(rt *agentRuntime, state domain.AgentState) error {
+	if rt != nil && rt.statePath != "" {
+		return o.store.SaveAgentStateAt(rt.statePath, state)
+	}
+	return o.store.SaveAgentState(state)
 }
 
 func (o *Orchestrator) logLifecycle(format string, args ...any) {

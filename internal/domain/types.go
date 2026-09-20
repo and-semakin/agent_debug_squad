@@ -70,15 +70,16 @@ type SessionDefaults struct {
 }
 
 type SessionConfig struct {
-	SessionName  string          `json:"session_name"`
-	SessionID    string          `json:"session_id"`
-	WorkspaceDir string          `json:"workspace_dir"`
-	StateDirName string          `json:"state_dir_name"`
-	Host         string          `json:"host"`
-	Port         int             `json:"port"`
-	LogLevel     LogLevel        `json:"log_level"`
-	Defaults     SessionDefaults `json:"defaults"`
-	Agents       []AgentSpec     `json:"agents"`
+	SessionName  string              `json:"session_name"`
+	SessionID    string              `json:"session_id"`
+	WorkspaceDir string              `json:"workspace_dir"`
+	StateDirName string              `json:"state_dir_name"`
+	Host         string              `json:"host"`
+	Port         int                 `json:"port"`
+	LogLevel     LogLevel            `json:"log_level"`
+	Defaults     SessionDefaults     `json:"defaults"`
+	Agents       []AgentSpec         `json:"agents"`
+	Workflow     *WorkflowDefinition `json:"workflow,omitempty"`
 }
 
 func (cfg SessionConfig) AgentYolo(spec AgentSpec) bool {

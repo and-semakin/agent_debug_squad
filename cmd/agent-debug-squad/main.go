@@ -19,6 +19,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 	"github.com/and-semakin/agent_debug_squad/internal/selfupdate"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
+	"github.com/and-semakin/agent_debug_squad/internal/workflow"
 )
 
 const (
@@ -99,11 +100,25 @@ func serve(ctx context.Context, args []string) error {
 	}
 
 	st := store.New(cfg)
+	ownership, err := store.AcquireSessionOwnership(st.SessionDir())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := ownership.Release(); err != nil {
+			log.Printf("release session ownership: %v", err)
+		}
+	}()
+
 	orch, err := orchestrator.New(ctx, cfg, st)
 	if err != nil {
 		return err
 	}
-	handler := api.New(orch, cfg)
+	workflows := workflow.NewManager(cfg, st, orch)
+	if err := workflows.Start(ctx); err != nil {
+		return fmt.Errorf("recover workflows: %w", err)
+	}
+	handler := api.New(orch, workflows, cfg)
 
 	addr := net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port))
 	if cfg.LogLevel != domain.LogLevelQuiet {
@@ -134,6 +149,14 @@ func serve(ctx context.Context, args []string) error {
 		err := <-errC
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
+		}
+		// Stop workflow scheduling first: it cancels owned workers and joins
+		// them within the bound; anything unjoined stays uncertain in the
+		// snapshot for the next start to recover.
+		workflowCtx, workflowCancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer workflowCancel()
+		if err := workflows.Stop(workflowCtx); err != nil {
+			log.Printf("workflow shutdown: %v", err)
 		}
 		workerCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 		defer cancel()

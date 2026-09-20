@@ -16,7 +16,7 @@ func (o *Orchestrator) ReplyPermission(ctx context.Context, runID, requestID str
 		return err
 	}
 	o.mu.Lock()
-	rt := o.runtimes[run.Agent]
+	rt := o.runtimes[runtimeKeyForRun(run)]
 	if isTerminal(run.Status) || rt == nil || !rt.busy || rt.resetting || rt.activeRunID != runID {
 		o.mu.Unlock()
 		return domain.ErrPermissionInactive

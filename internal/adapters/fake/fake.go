@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
@@ -13,6 +14,8 @@ import (
 type Adapter struct {
 	spec domain.AgentSpec
 }
+
+var sessionCounter atomic.Int64
 
 func New(spec domain.AgentSpec) *Adapter {
 	return &Adapter{spec: spec}
@@ -27,7 +30,7 @@ func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.
 			Name:             spec.Name,
 			Backend:          spec.Backend,
 			StartupPrompt:    spec.StartupPrompt,
-			BackendSessionID: "fake_" + spec.Name,
+			BackendSessionID: fmt.Sprintf("fake_%s_%d", spec.Name, sessionCounter.Add(1)),
 			Status:           domain.AgentIdle,
 			CreatedAt:        time.Now().UTC(),
 		}

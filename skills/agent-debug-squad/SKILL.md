@@ -92,6 +92,25 @@ curl -sS http://127.0.0.1:8080/agents
 
 Treat the service as local-only. It restricts its listener to loopback hosts because the API has no authentication.
 
+## Translate A Review Request Into A Workflow
+
+When the user asks for something like "run reviewers X and Y on this diff and rank the findings", translate the request into an ordinary reviewer-quorum workflow instead of manually dispatching every turn:
+
+1. Configure one distinct agent per reviewer (they may share the same backend and model under different names) plus one verifier. Preserve the user's requested backends, models, tool constraints, and review scope; check model IDs in the user's environment before starting.
+2. Mark reviewers `allowed_to_fail: true` when a partial quorum is acceptable, and give the verifier `needs: [all reviewers]` with `min_successful_dependencies: 1` so a verifier report is never produced from zero successful reviews. Tasks that only read code should still state "Do not edit files" — Squad does not sandbox or serialize workspace edits.
+3. Write the `workflow` section into a project-local YAML (see `examples/workflow-review.yaml`), start the server if it is not running, and submit exactly once with a unique request ID so a lost response can be replayed safely:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/workflows \
+  -H 'Content-Type: application/json' -d '{"request_id":"review-<date-or-slug>"}'
+```
+
+4. Poll or long-poll `GET /workflows/{execution_id}?wait=true&timeout_seconds=60`. The wait returns early when a task needs intervention (pending permission, failed auto-approval, recovery uncertainty). Answer pending permissions through the existing run permission endpoint using the `wrun_…` run IDs shown in the view. Expiry never cancels work, and a disconnected client does not stop the execution.
+5. Read the verifier's committed result path from the view (`tasks.verify.result.path`) and deliver that report. The manifest references each reviewer's full saved response, so you can quote or audit individual findings without re-running anyone.
+6. If all reviewers fail, the verifier stays blocked (`insufficient_successful_dependencies`) and the execution is `failed`; report that honestly instead of presenting a verifier answer as a completed review. Pause/resume/cancel and explicit retries (with `expected_attempt`, plus `confirm_previous_stopped: true` for interrupted attempts) are available through the workflow control endpoints.
+
+Workflow attempts use fresh conversations owned by the execution and never touch the manual sessions; keep using manual agent runs for follow-up questions outside the graph.
+
 ## Drive Runs
 
 Send a turn and wait for up to ten minutes:
@@ -167,6 +186,8 @@ Read results from:
   runs/<run_id>/<agent>.txt
   runs/<run_id>/<agent>.stderr.log
   runs/<run_id>/<agent>.diagnostics.jsonl
+  workflows/<execution_id>/workflow.json
+  workflows/<execution_id>/tasks/<task>/attempts/<n>/{prompt.txt,input-manifest.json,response.txt}
 ```
 
 Cursor diagnostics record the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs.

@@ -188,6 +188,13 @@ POST /agents/{agent}/runs
 POST /agents/{agent}/reset
 POST /runs/{run_id}/permissions/{request_id}/reply
 GET  /transcript
+POST /workflows
+GET  /workflows
+GET  /workflows/{execution_id}
+POST /workflows/{execution_id}/pause
+POST /workflows/{execution_id}/resume
+POST /workflows/{execution_id}/cancel
+POST /workflows/{execution_id}/tasks/{task_id}/retry
 ```
 
 Append `?wait=true&timeout_seconds=N` when creating a run or reading one by ID to long-poll for progress. A wait timeout does not cancel the run; it returns the latest `RunRecord`. Starting a second run for an already-busy agent returns `409 Conflict`.
@@ -268,6 +275,101 @@ Replies are `once`, `always`, or `reject`; `message` is optional. `always` appro
 
 Permission reply attempts are recorded as `squad.permission.reply` events in the run's `.events.jsonl`, with request/session IDs, reply, source (`yolo` or `coordinator`), timestamp, and any error. Waiting for permission takes precedence over waiting for subagents until all requests resolve.
 
+## Declarative Workflows
+
+Besides explicit manual turns, Squad can execute a declarative task graph. The optional `workflow` section of the config defines the graph; serving the config never starts it. `POST /workflows` creates an execution of the configured definition, and the scheduler dispatches tasks automatically — parallel fan-out, all-dependency fan-in, and dependency-failure policies are all ordinary graph behavior:
+
+```yaml
+session_name: review
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - name: reviewer_a
+    backend: codex
+    startup_prompt: "Review code independently. Do not edit files."
+  - name: reviewer_b
+    backend: codex
+    startup_prompt: "Review code independently. Do not edit files."
+  - name: verifier
+    backend: opencode
+    startup_prompt: "Verify findings against the code. Do not edit files."
+workflow:
+  version: 1
+  name: review-and-verify
+  max_parallel: 2
+  task_timeout_seconds: 1800
+  tasks:
+    review_a:
+      agent: reviewer_a
+      prompt: "Review the requested diff; report evidence and severity."
+      allowed_to_fail: true
+    review_b:
+      agent: reviewer_b
+      prompt: "Review the requested diff; report evidence and severity."
+      allowed_to_fail: true
+    verify:
+      agent: verifier
+      needs: [review_a, review_b]
+      min_successful_dependencies: 1
+      prompt: "Validate findings, remove duplicates, align severity, and report missing reviews."
+```
+
+Fields and defaults:
+
+- `version` (must be `1`), nonempty `name`, positive `max_parallel`, and a nonempty `tasks` map are required.
+- Each task requires nonempty `agent` and `prompt`. `needs` defaults to `[]`, `allowed_to_fail` to `false`, and `min_successful_dependencies` to `0`.
+- `task_timeout_seconds` defaults to `1800`; a task may override it with a positive `timeout_seconds`. The timeout counts wall time from dispatch, including permission and subagent waits, and `0` does not disable it.
+- Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
+
+Start, observe, and control an execution:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/workflows   -H 'Content-Type: application/json' -d '{"request_id":"review-2026-09-20"}'
+
+curl -sS 'http://127.0.0.1:8080/workflows/wf_000001?wait=true&timeout_seconds=60'
+curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/pause
+curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/resume
+curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/cancel
+curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/tasks/review_a/retry   -H 'Content-Type: application/json' -d '{"request_id":"retry-1","expected_attempt":1}'
+```
+
+Repeating `POST /workflows` with the same `request_id` returns the original execution (`200`) without new work, including after restart; reusing the ID with a changed definition returns `409`. Only one nonterminal execution per server session is admitted in v1. `wait=true` long-polls until a terminal state or an intervention (pending permission, failed auto-approval, recovery uncertainty), within one second of local publication; `timeout_seconds` is an integer from 1 to 600 (default 30) and expiry returns the current state without cancelling anything.
+
+Task states: `pending`, `ready`, `dispatching`, `running`, `succeeded`, `failed`, `interrupted`, `blocked`, `cancelled`. Execution states: `running`, `paused`, `needs_attention`, `cancelling`, `cancelled`, `succeeded`, `completed_with_errors`, `failed`. When all work settles: any blocked task or non-tolerated failure makes the execution `failed`; otherwise tolerated failures produce `completed_with_errors`; otherwise `succeeded`.
+
+Failure truth table for a task T with direct dependencies:
+
+| Direct dependency outcome | T's dependency acceptable? | Counts toward threshold? |
+| --- | --- | --- |
+| `succeeded` | yes | yes |
+| `failed`, dependency `allowed_to_fail: true` | yes (stays visible as failed) | no |
+| `failed`, dependency mandatory | no | no |
+| `blocked` / `cancelled` / `interrupted` | no | no |
+
+A threshold never overrides an unacceptable dependency; a task whose dependencies settle with fewer than `min_successful_dependencies` successes is `blocked` with an explicit reason, and blocking propagates to its descendants. Independent branches continue. Tolerated failures remain failed and are never counted as successes. Interruption and cancellation are never waived by `allowed_to_fail`.
+
+Every task attempt gets a fresh backend conversation owned by the execution (`wrun_…` run IDs); tasks never inherit manual chat history or another task's context. Dependency results are transferred explicitly: before dispatch the scheduler saves the exact prompt and an input manifest (sorted by dependency task ID, with task/agent/attempt/run identities, outcomes, errors, and result path/size/SHA-256 for successes) and instructs the agent to read the referenced response files. Successful responses are verified (existence, size, hash) before a consumer is dispatched; a missing or changed committed result holds the execution in `needs_attention` until repaired byte-for-byte or cancelled. Partial output from failed attempts is never presented as successful input. Responses live under the execution directory:
+
+```text
+workflows/<execution_id>/workflow.json          # authoritative snapshot
+workflows/<execution_id>/events.jsonl           # control/audit log
+workflows/<execution_id>/tasks/<task>/attempts/<n>/prompt.txt
+workflows/<execution_id>/tasks/<task>/attempts/<n>/input-manifest.json
+workflows/<execution_id>/tasks/<task>/attempts/<n>/response.txt
+```
+
+Shared workspace: tasks run concurrently in the same workspace. Squad does not detect file-write intent, serialize workspace access, or create worktrees — coordinating edits is the workflow author's responsibility, and "read only" instructions are agent instructions, not sandbox guarantees.
+
+Retry and recovery limits:
+
+- No retries are automatic. `retry` reserves a fresh attempt (fresh conversation, same instructions and manifest semantics) for a failed/interrupted task only while no transitive descendant has attempt reservations, and only with a new unique `request_id` plus the `expected_attempt` number. Identical retries replay; stale or conflicting ones return `409`. Once a tolerated failure has been consumed downstream, retry is rejected — start a new execution for a different consistent result set.
+- Retrying an interrupted attempt, or finishing a cancellation after a crash, requires `confirm_previous_stopped: true` — the caller's assertion that prior backend work stopped, recorded for audit. Squad cannot verify external cleanup after a process crash, and a worker known to be active in the current process is never overridden.
+- Restart recovers committed outcomes and artifacts, keeps paused executions paused, continues `cancelling` until resolved, and marks reserved/running attempts without committed outcomes as `interrupted`, stopping new dispatch until intervention. Unknown snapshot schema versions or damaged authoritative state fail closed. Old binaries cannot resume workflow executions; stop the new server before rolling back and keep the artifacts.
+- A workflow-owned runtime rejects manual run/reset mutation with `409`; manual agents, follow-up continuity, run APIs, and permission replies keep their existing behavior, and workflow attempts are visible through the same run endpoints.
+
+See [examples/workflow-chain.yaml](examples/workflow-chain.yaml) and [examples/workflow-review.yaml](examples/workflow-review.yaml) for runnable fake-backend graphs.
+
 ## Artifacts
 
 Each session is stored below `<workspace_dir>/<state_dir_name>/sessions/<session_id>/`:
@@ -281,6 +383,7 @@ runs/<run_id>/<agent_name>.events.jsonl
 runs/<run_id>/<agent_name>.txt
 runs/<run_id>/<agent_name>.stderr.log
 runs/<run_id>/<agent_name>.diagnostics.jsonl
+workflows/<execution_id>/workflow.json
 ```
 
 The diagnostic artifact records safe adapter invocation metadata. Cursor diagnostics include the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs. The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.

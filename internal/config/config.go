@@ -83,61 +83,36 @@ func Load(path string) (domain.SessionConfig, error) {
 	seen := map[string]bool{}
 	agents := make([]domain.AgentSpec, 0, len(raw.Agents))
 	for _, a := range raw.Agents {
-		name := strings.TrimSpace(a.Name)
-		if name == "" {
-			return domain.SessionConfig{}, errors.New("agent name is required")
-		}
-		if seen[name] {
-			return domain.SessionConfig{}, fmt.Errorf("duplicate agent name %q", name)
-		}
-		seen[name] = true
-
-		backend := strings.TrimSpace(a.Backend)
-		if backend == "" {
-			return domain.SessionConfig{}, fmt.Errorf("agent %q backend is required", name)
-		}
-		if strings.TrimSpace(a.StartupPrompt) == "" {
-			return domain.SessionConfig{}, fmt.Errorf("agent %q startup_prompt is required", name)
-		}
-
 		spec := domain.AgentSpec{
-			Name:          name,
-			Backend:       backend,
+			Name:          strings.TrimSpace(a.Name),
+			Backend:       strings.TrimSpace(a.Backend),
 			StartupPrompt: a.StartupPrompt,
 			Options:       a.Options,
-			StringOptions: map[string]string{},
-			ListOptions:   map[string][]string{},
 		}
-		for key, value := range a.Options {
-			switch typed := value.(type) {
-			case string:
-				spec.StringOptions[key] = typed
-			case bool:
-				if key != "yolo" {
-					return domain.SessionConfig{}, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string, bool yolo, or list of strings", name, key, value)
-				}
-				spec.Yolo = &typed
-				spec.StringOptions[key] = strconv.FormatBool(typed)
-			case []any:
-				items := make([]string, 0, len(typed))
-				for _, item := range typed {
-					s, ok := item.(string)
-					if !ok {
-						return domain.SessionConfig{}, fmt.Errorf("agent %q option %q must contain only strings", name, key)
-					}
-					items = append(items, s)
-				}
-				spec.ListOptions[key] = items
-			default:
-				return domain.SessionConfig{}, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string, bool yolo, or list of strings", name, key, value)
-			}
+		spec, err := normalizeAgentSpec(spec)
+		if err != nil {
+			return domain.SessionConfig{}, err
 		}
+		if seen[spec.Name] {
+			return domain.SessionConfig{}, fmt.Errorf("duplicate agent name %q", spec.Name)
+		}
+		seen[spec.Name] = true
 		agents = append(agents, spec)
 	}
 
 	sessionName := raw.SessionName
 	if sessionName == "" {
 		sessionName = "default"
+	}
+
+	workflow, err := parseWorkflow(data)
+	if err != nil {
+		return domain.SessionConfig{}, err
+	}
+	if workflow != nil {
+		if err := ValidateWorkflowDefinition(*workflow, agents); err != nil {
+			return domain.SessionConfig{}, err
+		}
 	}
 
 	return domain.SessionConfig{
@@ -150,7 +125,64 @@ func Load(path string) (domain.SessionConfig, error) {
 		LogLevel:     logLevel,
 		Defaults:     defaults,
 		Agents:       agents,
+		Workflow:     workflow,
 	}, nil
+}
+
+// NormalizeAgentOptions revalidates a saved agent specification and rebuilds
+// its derived option maps. Workflow snapshots persist only the raw option
+// values, so recovered executions must resolve them again before dispatch.
+func NormalizeAgentOptions(spec domain.AgentSpec) (domain.AgentSpec, error) {
+	return normalizeAgentSpec(spec)
+}
+
+func normalizeAgentSpec(spec domain.AgentSpec) (domain.AgentSpec, error) {
+	name := strings.TrimSpace(spec.Name)
+	if name == "" {
+		return spec, errors.New("agent name is required")
+	}
+	backend := strings.TrimSpace(spec.Backend)
+	if backend == "" {
+		return spec, fmt.Errorf("agent %q backend is required", name)
+	}
+	if strings.TrimSpace(spec.StartupPrompt) == "" {
+		return spec, fmt.Errorf("agent %q startup_prompt is required", name)
+	}
+	spec.Name = name
+	spec.Backend = backend
+
+	stringOptions := map[string]string{}
+	listOptions := map[string][]string{}
+	for key, value := range spec.Options {
+		switch typed := value.(type) {
+		case string:
+			stringOptions[key] = typed
+		case bool:
+			if key != "yolo" {
+				return spec, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string, bool yolo, or list of strings", name, key, value)
+			}
+			resolved := typed
+			spec.Yolo = &resolved
+			stringOptions[key] = strconv.FormatBool(typed)
+		case []any:
+			items := make([]string, 0, len(typed))
+			for _, item := range typed {
+				s, ok := item.(string)
+				if !ok {
+					return spec, fmt.Errorf("agent %q option %q must contain only strings", name, key)
+				}
+				items = append(items, s)
+			}
+			listOptions[key] = items
+		case []string:
+			listOptions[key] = append([]string(nil), typed...)
+		default:
+			return spec, fmt.Errorf("agent %q option %q has unsupported value type %T; expected string, bool yolo, or list of strings", name, key, value)
+		}
+	}
+	spec.StringOptions = stringOptions
+	spec.ListOptions = listOptions
+	return spec, nil
 }
 
 func parseLogLevel(value string) (domain.LogLevel, error) {

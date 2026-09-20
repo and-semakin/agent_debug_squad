@@ -22,13 +22,17 @@ const (
 
 type Server struct {
 	orchestrator *orchestrator.Orchestrator
+	workflows    WorkflowManager
 	cfg          domain.SessionConfig
 	mux          *http.ServeMux
 }
 
-func New(o *orchestrator.Orchestrator, cfg domain.SessionConfig) *Server {
+// New builds the HTTP server. workflows may be nil when no workflow layer is
+// wired (tests without a scheduler); workflow routes then answer 400.
+func New(o *orchestrator.Orchestrator, workflows WorkflowManager, cfg domain.SessionConfig) *Server {
 	s := &Server{
 		orchestrator: o,
+		workflows:    workflows,
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
 	}
@@ -51,6 +55,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /transcript", s.handleTranscript)
 	s.mux.HandleFunc("POST /agents/{name}/runs", s.handleCreateRun)
 	s.mux.HandleFunc("POST /agents/{name}/reset", s.handleResetAgent)
+	s.mux.HandleFunc("POST /workflows", s.handleWorkflowCreate)
+	s.mux.HandleFunc("GET /workflows", s.handleWorkflowList)
+	s.mux.HandleFunc("GET /workflows/{execution_id}", s.handleWorkflowGet)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/pause", s.handleWorkflowPause)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/resume", s.handleWorkflowResume)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/cancel", s.handleWorkflowCancel)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/tasks/{task_id}/retry", s.handleWorkflowRetry)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -6,9 +6,17 @@ context: |
   Stack: Go 1.22+, net/http, gopkg.in/yaml.v3; no database or frontend.
   Layout: cmd/agent-debug-squad is the CLI; internal/config loads configuration;
   internal/api serves HTTP; internal/orchestrator coordinates runs;
+  internal/workflow schedules declarative workflow graphs above the orchestrator;
   internal/domain defines shared types; internal/store persists readable files;
   internal/adapters contains Codex, Cursor, OpenCode, Kimi, ZCode, and fake backends;
   internal/selfupdate handles release updates.
+  Agents are driven two ways: explicit facilitator turns with preserved backend
+  session continuity, and declarative workflows — an explicitly submitted,
+  versioned task graph the scheduler executes with per-task fresh conversations,
+  dependency manifests, persisted attempts, and conservative recovery. Workflow
+  tasks share the workspace with everything else; the scheduler does not isolate
+  filesystem access or guarantee exactly-once external effects, and workspace
+  edit coordination remains the workflow author's responsibility.
   Preserve backend session continuity, independent agent lifecycle, streamed
   artifacts, explicit facilitator-driven turns, and constrained child-process
   environments. The unauthenticated HTTP API is loopback-only.

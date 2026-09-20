@@ -1,0 +1,34 @@
+# Declarative workflow example: a linear chain executed without facilitator
+# turns. The fake backend makes this example portable and free to run; swap
+# backends/models for real agents.
+session_name: workflow-chain
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - name: planner
+    backend: fake
+    startup_prompt: "You plan work."
+  - name: implementer
+    backend: fake
+    startup_prompt: "You implement work."
+  - name: reporter
+    backend: fake
+    startup_prompt: "You summarize work."
+workflow:
+  version: 1
+  name: plan-implement-report
+  max_parallel: 1
+  task_timeout_seconds: 1800
+  tasks:
+    plan:
+      agent: planner
+      prompt: "Draft a short plan for the requested change."
+    implement:
+      agent: implementer
+      needs: [plan]
+      prompt: "Follow the plan file referenced in your inputs and describe the change."
+    report:
+      agent: reporter
+      needs: [implement]
+      prompt: "Summarize what was implemented based on the referenced response."
