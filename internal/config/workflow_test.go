@@ -195,6 +195,41 @@ func TestLoadAcceptsIdenticalModelsUnderDistinctAgents(t *testing.T) {
 	}
 }
 
+// The ephemeral flag declares lifecycle intent only; in this version it must
+// not relax the one-reference-per-task graph rule.
+func TestLoadStillRejectsRepeatedEphemeralAgentReference(t *testing.T) {
+	agents := strings.Replace(workflowAgentsYAML, `- name: reviewer_a
+    backend: fake
+    startup_prompt: "Review independently."`, `- name: reviewer_a
+    backend: fake
+    startup_prompt: "Review independently."
+    ephemeral: true`, 1)
+	body := agents + `workflow:
+  version: 1
+  name: twice-ephemeral
+  max_parallel: 1
+  tasks:
+    first:
+      agent: reviewer_a
+      prompt: p
+    second:
+      agent: reviewer_a
+      prompt: q
+      needs: [first]
+`
+	path := filepath.Join(t.TempDir(), "squad.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("a repeated ephemeral agent reference must still be rejected")
+	}
+	if !strings.Contains(err.Error(), "distinct agent names") {
+		t.Fatalf("error %q does not contain the reused-agent explanation", err.Error())
+	}
+}
+
 func TestValidateWorkflowDefinitionAcceptsChainsAndDiamonds(t *testing.T) {
 	agents := []domain.AgentSpec{
 		{Name: "a1", Backend: "fake"},

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
 func TestLoadConfigAppliesDefaultsAndParsesOptions(t *testing.T) {
@@ -235,6 +237,68 @@ agents:
 	}
 	if !strings.Contains(err.Error(), "non-loopback host") {
 		t.Fatalf("error = %q, want non-loopback host", err.Error())
+	}
+}
+
+func TestLoadConfigParsesEphemeralAgentFlag(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+agents:
+  - name: Ephemeral
+    backend: fake
+    startup_prompt: One shot.
+    ephemeral: true
+  - name: Persistent
+    backend: fake
+    startup_prompt: Long lived.
+  - name: Explicit
+    backend: fake
+    startup_prompt: Long lived too.
+    ephemeral: false
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]domain.AgentSpec{}
+	for _, spec := range cfg.Agents {
+		byName[spec.Name] = spec
+	}
+	if !byName["Ephemeral"].Ephemeral {
+		t.Fatal("ephemeral: true must parse to true")
+	}
+	if byName["Persistent"].Ephemeral || byName["Explicit"].Ephemeral {
+		t.Fatal("omitted or false ephemeral must parse to false")
+	}
+}
+
+func TestLoadConfigRejectsNonBooleanEphemeral(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "squad.yaml")
+	yaml := `
+workspace_dir: ` + dir + `
+agents:
+  - name: Reviewer
+    backend: fake
+    startup_prompt: Review carefully.
+    ephemeral: sometimes
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected non-boolean ephemeral error")
+	}
+	if !strings.Contains(err.Error(), "cannot unmarshal") {
+		t.Fatalf("error = %q, want a type decoding failure pointing at the agent field", err.Error())
 	}
 }
 

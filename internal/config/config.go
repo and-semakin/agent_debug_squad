@@ -33,6 +33,7 @@ type rawAgent struct {
 	Name          string         `yaml:"name"`
 	Backend       string         `yaml:"backend"`
 	StartupPrompt string         `yaml:"startup_prompt"`
+	Ephemeral     bool           `yaml:"ephemeral"`
 	Options       map[string]any `yaml:"options"`
 }
 
@@ -87,6 +88,7 @@ func Load(path string) (domain.SessionConfig, error) {
 			Name:          strings.TrimSpace(a.Name),
 			Backend:       strings.TrimSpace(a.Backend),
 			StartupPrompt: a.StartupPrompt,
+			Ephemeral:     a.Ephemeral,
 			Options:       a.Options,
 		}
 		spec, err := normalizeAgentSpec(spec)

@@ -56,11 +56,17 @@ type RunProgress struct {
 }
 
 type AgentSpec struct {
-	Name          string              `json:"name"`
-	Backend       string              `json:"backend"`
-	StartupPrompt string              `json:"startup_prompt"`
-	Options       map[string]any      `json:"options,omitempty"`
-	Yolo          *bool               `json:"yolo,omitempty"`
+	Name          string         `json:"name"`
+	Backend       string         `json:"backend"`
+	StartupPrompt string         `json:"startup_prompt"`
+	Options       map[string]any `json:"options,omitempty"`
+	Yolo          *bool          `json:"yolo,omitempty"`
+	// Ephemeral declares a one-shot workflow lifecycle: every workflow
+	// invocation of the agent runs on a newly created runtime whose backend
+	// session starts empty. Facilitator turns ignore it. Unset must marshal
+	// identically to agents without the field, so persisted snapshots and
+	// definition hashes stay stable.
+	Ephemeral     bool                `json:"ephemeral,omitempty" yaml:"-"`
 	StringOptions map[string]string   `json:"-"`
 	ListOptions   map[string][]string `json:"-"`
 }

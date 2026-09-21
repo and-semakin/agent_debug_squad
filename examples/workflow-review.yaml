@@ -9,6 +9,9 @@ defaults:
 agents:
   - name: reviewer_a
     backend: fake
+    # One-shot lifecycle: every workflow attempt of this agent starts from a
+    # clean context with no carried-over conversation or session state.
+    ephemeral: true
     startup_prompt: "Review code independently. Do not edit files."
   - name: reviewer_b
     backend: fake

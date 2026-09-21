@@ -108,6 +108,8 @@ agents:
 
 `log_level` accepts `quiet`, `info`, `debug`, or `trace` and defaults to `info`. `info` logs run lifecycle transitions without mirroring backend event streams, `debug` additionally logs stderr and safe adapter diagnostics, and `trace` logs complete stdout/stderr streams. All levels continue to preserve the full streams in run artifacts.
 
+Agent definitions accept an optional `ephemeral: true` flag declaring a one-shot lifecycle for [declarative workflows](#declarative-workflows): every workflow invocation of the agent — each task attempt, retry, and any future repeated visit — runs on a newly created runtime whose backend session starts empty, with no conversation or session state carried over from earlier invocations. The flag is captured with the execution at submission, is preserved across restarts, and participates in the definition identity: resubmitting the same `request_id` after changing `ephemeral` is a changed definition (`409`), not a replay. In this version the flag does not relax graph validation — one agent is still referenced by at most one task — and manual facilitator turns ignore it entirely, keeping normal session continuity.
+
 See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, [examples/cursor-squad.yaml](examples/cursor-squad.yaml) for a read-only Cursor reviewer, and [configs/code-review-squad.yaml](configs/code-review-squad.yaml) for a larger facilitator/implementer/critic setup.
 
 ### Backend Notes
@@ -321,6 +323,7 @@ Fields and defaults:
 - Each task requires nonempty `agent` and `prompt`. `needs` defaults to `[]`, `allowed_to_fail` to `false`, and `min_successful_dependencies` to `0`.
 - `task_timeout_seconds` defaults to `1800`; a task may override it with a positive `timeout_seconds`. The timeout counts wall time from dispatch, including permission and subagent waits, and `0` does not disable it.
 - Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
+- An agent definition may set `ephemeral: true` to declare a one-shot lifecycle: every invocation starts from a clean context. See [Configuration](#configuration); note the flag does not allow referencing one agent from multiple tasks in this version.
 
 Start, observe, and control an execution:
 
