@@ -471,7 +471,7 @@ func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, 
 		}
 	}
 	snapshot := &domain.WorkflowSnapshot{
-		SchemaVersion:  domain.WorkflowSchemaVersion,
+		SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
 		ExecutionID:    executionID,
 		Revision:       1,
 		Definition:     def,
@@ -481,6 +481,7 @@ func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, 
 		State:          domain.WorkflowRunning,
 		Mode:           domain.WorkflowModeRunning,
 		Tasks:          tasks,
+		Loops:          newLoopExecutions(def),
 		RetryRequests:  map[string]domain.WorkflowRetryRecord{},
 		CreatedAt:      now,
 		UpdatedAt:      now,

@@ -166,7 +166,19 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 		if _, live := m.liveForTaskLocked(taskID); live {
 			continue
 		}
-		if last := task.LastAttempt(); last != nil {
+		// For a loop body task "the last attempt" means the last attempt of
+		// the loop's current iteration; with none yet, the task re-evaluates
+		// from dependencies below. Loopless tasks keep whole-history scope.
+		taskDef := def.Tasks[taskID]
+		var last *domain.WorkflowAttempt
+		if taskDef.Loop != "" {
+			if loop := snapshot.Loops[taskDef.Loop]; loop != nil {
+				last = lastAttemptInIteration(task, loop.Iteration)
+			}
+		} else {
+			last = task.LastAttempt()
+		}
+		if last != nil {
 			switch last.State {
 			case domain.WorkflowAttemptRunning, domain.WorkflowAttemptDispatching, domain.WorkflowAttemptCancelling, domain.WorkflowAttemptJudging:
 				task.State = map[domain.WorkflowAttemptState]domain.WorkflowTaskState{
@@ -208,16 +220,30 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 			}
 		}
 
-		// No live or committed attempt: evaluate dependencies.
-		depDef := def.Tasks[taskID]
+		// No live or committed attempt in scope: evaluate dependencies.
+		depDef := taskDef
 		allSettled := true
 		acceptable := true
 		blockedBy := ""
+		waitingLoop := ""
 		successes := 0
 		for _, depID := range depDef.Needs {
 			dep := snapshot.Tasks[depID]
 			if dep == nil {
 				continue
+			}
+			depTaskDef := def.Tasks[depID]
+			if depTaskDef.Loop != "" && depTaskDef.Loop != taskDef.Loop {
+				// The consumer sits outside the dependency's loop (v1
+				// rejects cross-loop combinations): it stays pending with an
+				// explicit loop-wait reason until the loop completes.
+				if loop := snapshot.Loops[depTaskDef.Loop]; loop != nil && loop.State != domain.WorkflowLoopDone {
+					allSettled = false
+					if waitingLoop == "" {
+						waitingLoop = fmt.Sprintf("waiting_loop:%s", depTaskDef.Loop)
+					}
+					continue
+				}
 			}
 			if dep.State == domain.WorkflowTaskInterrupted {
 				// Uncertain dependency: the consumer stays pending until
@@ -229,7 +255,6 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 				allSettled = false
 				continue
 			}
-			depTaskDef := def.Tasks[depID]
 			if !dependencyAcceptable(dep, depTaskDef) {
 				acceptable = false
 				if blockedBy == "" {
@@ -245,6 +270,7 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 		switch {
 		case !allSettled:
 			next = domain.WorkflowTaskPending
+			reason = waitingLoop
 		case !acceptable:
 			next = domain.WorkflowTaskBlocked
 			reason = blockedBy
@@ -311,34 +337,34 @@ func (m *Manager) dispatchTaskLocked(snapshot *domain.WorkflowSnapshot, taskID s
 	task := snapshot.Tasks[taskID]
 	def := snapshot.Definition.Tasks[taskID]
 
-	// Verify every committed dependency result before dispatch.
-	for _, depID := range def.Needs {
-		dep := snapshot.Tasks[depID]
-		if dep == nil {
+	// Verify every committed dependency and carry-over result before
+	// dispatch. The manifest is the authoritative input list, so artifact
+	// verification covers exactly what the attempt will read.
+	manifest := buildManifest(snapshot, taskID)
+	for _, entry := range append(append([]domain.WorkflowDependencyInput{}, manifest.Dependencies...), manifest.PreviousIteration...) {
+		if entry.Status != string(domain.WorkflowAttemptSucceeded) || entry.ResultPath == "" {
 			continue
 		}
-		attempt := lastCommittedAttempt(dep)
-		if attempt == nil || attempt.State != domain.WorkflowAttemptSucceeded || attempt.ResultPath == "" {
-			continue
-		}
-		if err := m.store.VerifyWorkflowArtifact(snapshot.ExecutionID, attempt.ResultPath, attempt.ResultSize, attempt.ResultSHA256); err != nil {
-			snapshot.AttentionReasons = appendUniqueReason(snapshot.AttentionReasons, fmt.Sprintf("artifact:%s:%d", depID, attempt.Attempt))
-			m.setStorageErrorLocked(fmt.Errorf("verify dependency %s: %w", depID, err))
+		if err := m.store.VerifyWorkflowArtifact(snapshot.ExecutionID, entry.ResultPath, entry.ResultSize, entry.ResultSHA256); err != nil {
+			snapshot.AttentionReasons = appendUniqueReason(snapshot.AttentionReasons, fmt.Sprintf("artifact:%s:%d", entry.TaskID, entry.Attempt))
+			m.setStorageErrorLocked(fmt.Errorf("verify dependency %s: %w", entry.TaskID, err))
 			return false
 		}
 	}
 
 	// A retry reserves its attempt record as queued before dispatch; a fresh
-	// dispatch appends a new one.
+	// dispatch appends a new one, stamped with the loop's current iteration.
 	var attemptSlot *domain.WorkflowAttempt
 	if last := task.LastAttempt(); last != nil && last.State == domain.WorkflowAttemptQueued {
 		attemptSlot = last
 	} else {
-		task.Attempts = append(task.Attempts, domain.WorkflowAttempt{Attempt: len(task.Attempts) + 1})
+		task.Attempts = append(task.Attempts, domain.WorkflowAttempt{
+			Attempt:   len(task.Attempts) + 1,
+			Iteration: currentIteration(snapshot, def),
+		})
 		attemptSlot = &task.Attempts[len(task.Attempts)-1]
 	}
 	attemptNumber := attemptSlot.Attempt
-	manifest := buildManifest(snapshot, taskID)
 	manifest.Attempt = attemptNumber
 	runID := fmt.Sprintf("wrun_%s_%06d", executionNumber(snapshot.ExecutionID), snapshot.NextRunSeq+1)
 	prompt := m.buildPromptLocked(snapshot, taskID, manifest)
@@ -564,10 +590,20 @@ func (m *Manager) refreshExecutionStateLocked(snapshot *domain.WorkflowSnapshot)
 	snapshot.AttentionReasons = reasons
 
 	allSettled := len(m.active.live) == 0
-	for _, task := range snapshot.Tasks {
-		if !task.State.Settled() {
+	// A loop that has not reached its final iteration keeps the execution
+	// non-terminal even when every task state currently looks settled.
+	for _, loop := range snapshot.Loops {
+		if loop.State != domain.WorkflowLoopDone {
 			allSettled = false
 			break
+		}
+	}
+	if allSettled {
+		for _, task := range snapshot.Tasks {
+			if !task.State.Settled() {
+				allSettled = false
+				break
+			}
 		}
 	}
 
@@ -606,6 +642,9 @@ func collectAttentionReasons(snapshot *domain.WorkflowSnapshot) []string {
 			}
 		}
 	}
+	// Durable loop failure/blocking holds take precedence over final-state
+	// derivation and keep the execution interventionable.
+	reasons = append(reasons, loopHoldReasons(snapshot)...)
 	return reasons
 }
 
@@ -702,11 +741,16 @@ func topologicalOrder(def domain.WorkflowDefinition) []string {
 }
 
 // buildManifest renders the ordered dependency manifest of one attempt.
+// Same-loop dependencies resolve to the loop's current iteration; other
+// dependencies keep single-attempt resolution. A body task dispatching after
+// the first iteration additionally carries the prior iteration's settled
+// body-task outcomes.
 func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.WorkflowInputManifest {
 	def := snapshot.Definition.Tasks[taskID]
 	manifest := domain.WorkflowInputManifest{
 		ExecutionID:  snapshot.ExecutionID,
 		TaskID:       taskID,
+		Iteration:    currentIteration(snapshot, def),
 		Dependencies: []domain.WorkflowDependencyInput{},
 	}
 	for _, depID := range sortedDependencyIDs(def.Needs) {
@@ -714,17 +758,19 @@ func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.Work
 		if dep == nil {
 			continue
 		}
-		attempt := lastCommittedAttempt(dep)
+		attempt := dependencyAttempt(snapshot, taskID, depID)
 		if attempt == nil {
 			continue
 		}
 		entry := domain.WorkflowDependencyInput{
-			TaskID:  depID,
-			Agent:   dep.Agent,
-			Attempt: attempt.Attempt,
-			RunID:   attempt.RunID,
-			Status:  string(attempt.State),
-			Error:   attempt.Error,
+			TaskID:    depID,
+			Agent:     dep.Agent,
+			Attempt:   attempt.Attempt,
+			Iteration: attempt.Iteration,
+			RunID:     attempt.RunID,
+			Status:    string(attempt.State),
+			Error:     attempt.Error,
+			Verdict:   attempt.Verdict,
 		}
 		if attempt.State == domain.WorkflowAttemptSucceeded {
 			entry.ResultPath = attempt.ResultPath
@@ -732,6 +778,11 @@ func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.Work
 			entry.ResultSHA256 = attempt.ResultSHA256
 		}
 		manifest.Dependencies = append(manifest.Dependencies, entry)
+	}
+	if def.Loop != "" {
+		if loop := snapshot.Loops[def.Loop]; loop != nil && loop.Iteration > 1 {
+			manifest.PreviousIteration = previousIterationInputs(snapshot, def.Loop, loop.Iteration-1)
+		}
 	}
 	return manifest
 }
@@ -750,24 +801,51 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 	prompt := strings.TrimSpace(snapshot.Definition.Tasks[taskID].Prompt)
 	var builder strings.Builder
 	builder.WriteString(prompt)
-	if len(manifest.Dependencies) == 0 {
+	if len(manifest.Dependencies) == 0 && len(manifest.PreviousIteration) == 0 {
 		return builder.String()
 	}
-	builder.WriteString("\n\n--- Workflow dependency inputs ---\n")
-	fmt.Fprintf(&builder, "Execution %s, task %s.\n", snapshot.ExecutionID, taskID)
-	builder.WriteString("All direct dependencies below have settled. Read each referenced local response file for the complete result; do not rely on this summary alone.\n")
-	for _, dep := range manifest.Dependencies {
-		switch dep.Status {
-		case string(domain.WorkflowAttemptSucceeded):
-			fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, run %s). Full response: %s\n",
-				dep.TaskID, dep.Agent, dep.Attempt, dep.RunID, joinWorkflowPath(execDir, dep.ResultPath))
-		default:
-			errorText := dep.Error
-			if errorText == "" {
-				errorText = "no error detail recorded"
+	if len(manifest.Dependencies) > 0 {
+		builder.WriteString("\n\n--- Workflow dependency inputs ---\n")
+		fmt.Fprintf(&builder, "Execution %s, task %s.\n", snapshot.ExecutionID, taskID)
+		builder.WriteString("All direct dependencies below have settled. Read each referenced local response file for the complete result; do not rely on this summary alone.\n")
+		for _, dep := range manifest.Dependencies {
+			switch dep.Status {
+			case string(domain.WorkflowAttemptSucceeded):
+				fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, run %s). Full response: %s\n",
+					dep.TaskID, dep.Agent, dep.Attempt, dep.RunID, joinWorkflowPath(execDir, dep.ResultPath))
+			default:
+				errorText := dep.Error
+				if errorText == "" {
+					errorText = "no error detail recorded"
+				}
+				fmt.Fprintf(&builder, "- %s: %s (agent %s, attempt %d, run %s). Error: %s\n",
+					dep.TaskID, dep.Status, dep.Agent, dep.Attempt, dep.RunID, errorText)
 			}
-			fmt.Fprintf(&builder, "- %s: %s (agent %s, attempt %d, run %s). Error: %s\n",
-				dep.TaskID, dep.Status, dep.Agent, dep.Attempt, dep.RunID, errorText)
+		}
+	}
+	if len(manifest.PreviousIteration) > 0 {
+		builder.WriteString("\n--- Previous iteration outcomes ---\n")
+		fmt.Fprintf(&builder, "Loop iteration %d; the loop body settled in iteration %d as follows. Read each referenced local response file for the complete result; do not rely on this summary alone.\n",
+			manifest.Iteration, manifest.Iteration-1)
+		for _, entry := range manifest.PreviousIteration {
+			switch entry.Status {
+			case string(domain.WorkflowAttemptSucceeded):
+				ref := joinWorkflowPath(execDir, entry.ResultPath)
+				if entry.Verdict != nil {
+					fmt.Fprintf(&builder, "- %s: succeeded, verdict %s (agent %s, attempt %d, iteration %d, run %s). Full response: %s\n",
+						entry.TaskID, entry.Verdict.Value, entry.Agent, entry.Attempt, entry.Iteration, entry.RunID, ref)
+				} else {
+					fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, iteration %d, run %s). Full response: %s\n",
+						entry.TaskID, entry.Agent, entry.Attempt, entry.Iteration, entry.RunID, ref)
+				}
+			default:
+				errorText := entry.Error
+				if errorText == "" {
+					errorText = "no error detail recorded"
+				}
+				fmt.Fprintf(&builder, "- %s: %s (agent %s, attempt %d, iteration %d, run %s). Error: %s\n",
+					entry.TaskID, entry.Status, entry.Agent, entry.Attempt, entry.Iteration, entry.RunID, errorText)
+			}
 		}
 	}
 	manifestPath := manifestRelativePath(taskID, manifest.Attempt)

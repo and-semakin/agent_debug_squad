@@ -70,6 +70,38 @@ func (m *Manager) Resume(executionID string) (domain.WorkflowExecutionView, erro
 		m.Notify()
 		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: %v", ErrUncertaintyUnresolved, err)
 	}
+	if len(snapshot.Loops) > 0 {
+		// For a loop execution, resume is an accepted recovery request: it
+		// returns 200 with the current view even while loop failure/blocking
+		// reasons remain. It requests running mode, performs the safe
+		// artifact and judge recovery, keeps only reasons proven unresolved,
+		// and never waives failures, thresholds, or uncertainty.
+		if len(reasons) == 0 && m.storageErr != nil {
+			m.storageErr = nil
+		}
+		snapshot.Mode = domain.WorkflowModeRunning
+		derived := collectAttentionReasons(snapshot)
+		derived = appendUniqueReason(derived, reasons...)
+		if m.storageErr != nil {
+			derived = appendUniqueReason(derived, "storage_error")
+		}
+		snapshot.AttentionReasons = derived
+		if len(derived) == 0 {
+			snapshot.State = domain.WorkflowRunning
+		} else {
+			snapshot.State = domain.WorkflowNeedsAttention
+		}
+		_ = m.store.AppendWorkflowEvent(executionID, domain.WorkflowControlEvent{Type: "resume", At: m.now()})
+		if err := m.persistLocked(snapshot); err != nil {
+			return domain.WorkflowExecutionView{}, err
+		}
+		// Held classifications whose own response artifacts verified get a
+		// fresh judge round; each keeps its attention hold until its
+		// committed outcome resolves it.
+		m.resumeJudgingLocked(snapshot)
+		m.Notify()
+		return m.buildViewLocked(snapshot), nil
+	}
 	if len(reasons) > 0 {
 		snapshot.AttentionReasons = appendUniqueReason(snapshot.AttentionReasons, reasons...)
 		snapshot.State = domain.WorkflowNeedsAttention
@@ -351,8 +383,22 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 	if req.ExpectedAttempt != len(task.Attempts) {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: expected_attempt %d but last attempt is %d", ErrRetryConflict, req.ExpectedAttempt, len(task.Attempts))
 	}
-	if snapshot.State == domain.WorkflowNeedsAttention && !onlyInterruptionsRemain(snapshot) {
+	if snapshot.State == domain.WorkflowNeedsAttention && !onlyRetryRepairableReasons(snapshot) {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: other uncertainty remains", ErrRetryConflict)
+	}
+
+	// A body task's retry targets its latest failed/interrupted attempt in
+	// the loop's current iteration and retains that iteration. Earlier
+	// iterations are immutable history: after an advance the task state no
+	// longer reports a current-iteration failure, so the guard above
+	// rejects the request.
+	taskDef := snapshot.Definition.Tasks[taskID]
+	retryIteration := currentIteration(snapshot, taskDef)
+	if taskDef.Loop != "" {
+		target := lastAttemptInIteration(task, retryIteration)
+		if target == nil || (target.State != domain.WorkflowAttemptFailed && target.State != domain.WorkflowAttemptInterrupted) {
+			return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: task %q has no failed or interrupted attempt in loop %s iteration %d", ErrRetryConflict, taskID, taskDef.Loop, retryIteration)
+		}
 	}
 
 	if err := assertNoDescendantAttempts(snapshot, taskID); err != nil {
@@ -377,12 +423,20 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 	attemptNumber := len(task.Attempts) + 1
 	task.Attempts = append(task.Attempts, domain.WorkflowAttempt{
 		Attempt:    attemptNumber,
+		Iteration:  retryIteration,
 		State:      domain.WorkflowAttemptQueued,
 		Reason:     "retry_reserved",
 		ReservedAt: &now,
 	})
 	task.State = domain.WorkflowTaskPending
 	task.BlockedReason = ""
+	// An eligible retry reopens a done loop as running at the same
+	// iteration; outside consumers wait for it to settle again.
+	if taskDef.Loop != "" {
+		if loop := snapshot.Loops[taskDef.Loop]; loop != nil && loop.State == domain.WorkflowLoopDone {
+			loop.State = domain.WorkflowLoopRunning
+		}
+	}
 	snapshot.RetryRequests[req.RequestID] = domain.WorkflowRetryRecord{
 		RequestID:              req.RequestID,
 		TaskID:                 taskID,
@@ -395,6 +449,14 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 	if snapshot.State.Terminal() {
 		snapshot.Mode = domain.WorkflowModeRunning
 	}
+	// A retried terminal execution becomes schedulable again.
+	if m.active == nil {
+		m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
+	}
+	// Recompute dependent readiness with the queued attempt treated as
+	// pending, so retried failures unblock their descendants and the
+	// attention re-derivation below removes only resolved loop holds.
+	m.recomputeTaskStatesLocked(snapshot)
 	snapshot.AttentionReasons = collectAttentionReasons(snapshot)
 	if len(snapshot.AttentionReasons) == 0 {
 		snapshot.State = stateForMode(snapshot)
@@ -408,10 +470,6 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 	})
 	if err := m.persistLocked(snapshot); err != nil {
 		return domain.WorkflowExecutionView{}, false, err
-	}
-	// A retried terminal execution becomes schedulable again.
-	if m.active == nil {
-		m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
 	}
 	if snapshot.State != domain.WorkflowPaused {
 		m.Notify()
@@ -430,24 +488,40 @@ func stateForMode(snapshot *domain.WorkflowSnapshot) domain.WorkflowState {
 	}
 }
 
-// onlyInterruptionsRemain reports whether every unresolved attention reason
-// is interruption uncertainty: conditions a caller can retire attempt by
-// attempt with confirmed retries. It deliberately allows retrying one
-// interrupted task while independent siblings are still interrupted—each
-// retry queues its attempt, and dispatch stays held until the last
-// uncertainty is resolved. Artifact or storage damage is different: it must
+// onlyRetryRepairableReasons reports whether every unresolved attention
+// reason is a condition a caller can retire attempt by attempt with
+// confirmed retries: recoverable interruptions plus durable loop
+// failure/blocking holds. It deliberately allows retrying one failed task
+// while independent siblings still hold—each retry queues its attempt, and
+// dispatch stays held until the last uncertainty is resolved. Artifact or
+// storage damage and held verdict classifications are different: they must
 // be repaired and revalidated through resume before new work.
-func onlyInterruptionsRemain(snapshot *domain.WorkflowSnapshot) bool {
+func onlyRetryRepairableReasons(snapshot *domain.WorkflowSnapshot) bool {
 	for _, reason := range snapshot.AttentionReasons {
-		if !strings.HasPrefix(reason, "interrupted_attempt:") &&
-			!strings.HasPrefix(reason, "interrupted_attempts_require") {
-			return false
+		if strings.HasPrefix(reason, "interrupted_attempt:") ||
+			strings.HasPrefix(reason, "interrupted_attempts_require") ||
+			strings.HasPrefix(reason, "loop_failure:") ||
+			strings.HasPrefix(reason, "loop_blocked:") {
+			continue
 		}
+		return false
 	}
 	return true
 }
 
+// assertNoDescendantAttempts enforces input consistency for a retry. For a
+// task outside all loops every transitive descendant must still have no
+// attempt reservations, as ever. For a loop body task, same-loop descendants
+// block only when they already have an attempt in the retried iteration;
+// earlier iterations are immutable history and never block. Descendants
+// outside the loop block on any reservation because they consume the loop's
+// final result.
 func assertNoDescendantAttempts(snapshot *domain.WorkflowSnapshot, taskID string) error {
+	taskLoop := snapshot.Definition.Tasks[taskID].Loop
+	currentIter := 0
+	if taskLoop != "" {
+		currentIter = currentIteration(snapshot, snapshot.Definition.Tasks[taskID])
+	}
 	descendants := map[string]bool{}
 	var mark func(string)
 	mark = func(current string) {
@@ -466,8 +540,17 @@ func assertNoDescendantAttempts(snapshot *domain.WorkflowSnapshot, taskID string
 	}
 	mark(taskID)
 	for descendant := range descendants {
-		if task := snapshot.Tasks[descendant]; task != nil && len(task.Attempts) > 0 {
+		task := snapshot.Tasks[descendant]
+		if task == nil || len(task.Attempts) == 0 {
+			continue
+		}
+		if taskLoop == "" || snapshot.Definition.Tasks[descendant].Loop != taskLoop {
 			return fmt.Errorf("descendant %s already has attempts", descendant)
+		}
+		for i := range task.Attempts {
+			if task.Attempts[i].Iteration == currentIter {
+				return fmt.Errorf("descendant %s already has an attempt in loop %s iteration %d", descendant, taskLoop, currentIter)
+			}
 		}
 	}
 	return nil
@@ -489,7 +572,19 @@ func (m *Manager) reconcileLocked() {
 	// conditions established above block new work in the same pass.
 	changed = m.refreshExecutionStateLocked(snapshot) || changed
 	if m.storageErr == nil && snapshot.Mode == domain.WorkflowModeRunning && snapshot.State == domain.WorkflowRunning {
-		changed = m.dispatchReadyTasksLocked(snapshot) || changed
+		// An attention-free running execution may re-arm settled loops. The
+		// advance is committed before any next-iteration dispatch; a failed
+		// advance save stops scheduling instead of releasing unsaved work.
+		if m.advanceLoopsLocked(snapshot) {
+			if err := m.persistLocked(snapshot); err != nil {
+				changed = true
+			} else {
+				changed = m.recomputeTaskStatesLocked(snapshot) || changed
+			}
+		}
+		if m.storageErr == nil {
+			changed = m.dispatchReadyTasksLocked(snapshot) || changed
+		}
 	}
 	if changed {
 		m.persistLocked(snapshot)
@@ -628,6 +723,7 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 			attempt := &task.Attempts[i]
 			attemptView := domain.WorkflowAttemptView{
 				Attempt:      attempt.Attempt,
+				Iteration:    attempt.Iteration,
 				RunID:        attempt.RunID,
 				State:        attempt.State,
 				Reason:       attempt.Reason,
@@ -650,6 +746,21 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 			}
 		}
 		view.Tasks = append(view.Tasks, taskView)
+	}
+
+	// Per-loop observation in sorted name order: task counts still count
+	// tasks, iterations are exposed here.
+	for _, name := range sortedLoopNames(snapshot.Definition.Loops) {
+		loop := snapshot.Loops[name]
+		if loop == nil {
+			continue
+		}
+		view.Loops = append(view.Loops, domain.WorkflowLoopView{
+			Name:          name,
+			Iteration:     loop.Iteration,
+			MaxIterations: snapshot.Definition.Loops[name].MaxIterations,
+			State:         loop.State,
+		})
 	}
 
 	if m.active != nil && m.active.snapshot == snapshot {

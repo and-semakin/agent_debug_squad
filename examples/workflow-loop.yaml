@@ -1,0 +1,50 @@
+# Bounded loop example: implement -> review refined over exactly three
+# iterations, then a single outside report consumes the final iteration.
+# Each iteration the reviewer's feedback is carried over to the implementer
+# through the previous-iteration manifest section, so iteration 2 and 3 start
+# from what the previous round produced instead of from scratch. The fake
+# backend makes this example portable and free to run.
+session_name: workflow-loop
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - name: implementer
+    backend: fake
+    # One-shot lifecycle: every workflow attempt starts from a clean context;
+    # iteration carry-over arrives as readable result files, not memory.
+    ephemeral: true
+    startup_prompt: "Implement the requested change. Edit only within the task scope."
+  - name: reviewer
+    backend: fake
+    ephemeral: true
+    startup_prompt: "Review the implementation strictly; list concrete defects with evidence."
+  - name: reporter
+    backend: fake
+    startup_prompt: "Summarize the final outcome for the user."
+workflow:
+  version: 1
+  name: refine-loop
+  max_parallel: 1
+  task_timeout_seconds: 1800
+  # Declared loops are bounded: max_iterations is required and positive. The
+  # body runs exactly three times; there is no condition-based exit yet.
+  loops:
+    refine:
+      max_iterations: 3
+  tasks:
+    implement:
+      agent: implementer
+      loop: refine
+      prompt: "Implement the change. In later iterations, address the previous iteration's review feedback."
+    review:
+      agent: reviewer
+      loop: refine
+      needs: [implement]
+      prompt: "Review this iteration's implementation; report remaining defects or state it is acceptable."
+    # Outside the loop: stays pending with a waiting_loop reason until the
+    # loop completes, then consumes only the final iteration's review.
+    report:
+      agent: reporter
+      needs: [review]
+      prompt: "Summarize the final implementation and the last review for the user."

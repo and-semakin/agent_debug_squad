@@ -3,7 +3,17 @@ package domain
 import "time"
 
 const (
-	WorkflowSchemaVersion         = 1
+	// WorkflowDefinitionVersion is the version of a resolved workflow YAML
+	// definition. Loops are additive, so the definition version stays 1.
+	WorkflowDefinitionVersion = 1
+	// WorkflowSnapshotSchemaVersion is the current persisted snapshot layout.
+	// Version 2 adds loop execution state and per-attempt iteration numbers.
+	WorkflowSnapshotSchemaVersion = 2
+	// WorkflowSnapshotMinSchemaVersion is the oldest snapshot layout this
+	// binary can load. Schema 1 predates loops and recovers as a loopless
+	// execution; compatibility is upgrade-only, never downgrade.
+	WorkflowSnapshotMinSchemaVersion = 1
+
 	DefaultWorkflowTaskTimeoutSec = 1800
 	// DefaultConfidenceThreshold gates judge verdicts: the chosen verdict
 	// applies only when judge confidence meets it.
@@ -50,6 +60,15 @@ const (
 	WorkflowModeRunning    WorkflowMode = "running"
 	WorkflowModePaused     WorkflowMode = "paused"
 	WorkflowModeCancelling WorkflowMode = "cancelling"
+)
+
+// WorkflowLoopState is the observed lifecycle of one bounded loop's execution.
+type WorkflowLoopState string
+
+const (
+	WorkflowLoopRunning        WorkflowLoopState = "running"
+	WorkflowLoopNeedsAttention WorkflowLoopState = "needs_attention"
+	WorkflowLoopDone           WorkflowLoopState = "done"
 )
 
 type WorkflowTaskState string
@@ -110,6 +129,9 @@ type WorkflowDefinition struct {
 	MaxParallel        int                               `json:"max_parallel" yaml:"max_parallel"`
 	TaskTimeoutSeconds int                               `json:"task_timeout_seconds" yaml:"task_timeout_seconds"`
 	Tasks              map[string]WorkflowTaskDefinition `json:"tasks" yaml:"tasks"`
+	// Loops declares bounded static loops keyed by loop name. Unset must
+	// marshal identically to definitions parsed before loops existed.
+	Loops map[string]WorkflowLoopDefinition `json:"loops,omitempty" yaml:"loops,omitempty"`
 	// ConfidenceThreshold gates judge verdicts: 0 means unset, which hashes
 	// identically to definitions parsed before verdicts existed and resolves
 	// to DefaultConfidenceThreshold at use.
@@ -134,17 +156,27 @@ func (d WorkflowDefinition) EffectiveOnUncertain() string {
 }
 
 type WorkflowTaskDefinition struct {
-	Agent                     string   `json:"agent" yaml:"agent"`
-	Prompt                    string   `json:"prompt" yaml:"prompt"`
-	Needs                     []string `json:"needs,omitempty" yaml:"needs,omitempty"`
-	AllowedToFail             bool     `json:"allowed_to_fail,omitempty" yaml:"allowed_to_fail,omitempty"`
-	MinSuccessfulDependencies int      `json:"min_successful_dependencies,omitempty" yaml:"min_successful_dependencies,omitempty"`
-	TimeoutSeconds            int      `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	Agent  string   `json:"agent" yaml:"agent"`
+	Prompt string   `json:"prompt" yaml:"prompt"`
+	Needs  []string `json:"needs,omitempty" yaml:"needs,omitempty"`
+	// Loop names the innermost loop this task belongs to. Empty means the
+	// task runs outside every loop. Unset must marshal identically to tasks
+	// parsed before loops existed.
+	Loop                      string `json:"loop,omitempty" yaml:"loop,omitempty"`
+	AllowedToFail             bool   `json:"allowed_to_fail,omitempty" yaml:"allowed_to_fail,omitempty"`
+	MinSuccessfulDependencies int    `json:"min_successful_dependencies,omitempty" yaml:"min_successful_dependencies,omitempty"`
+	TimeoutSeconds            int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
 	// Verdicts declares the classification contract of this task's
 	// responses: verdict name to optional human description. A non-empty
 	// map routes completed attempts through the judging phase. Unset must
 	// marshal identically to tasks parsed before verdicts existed.
 	Verdicts map[string]string `json:"verdicts,omitempty" yaml:"-"`
+}
+
+// WorkflowLoopDefinition is a bounded static loop. Exactly MaxIterations is
+// required and must be positive; the loop runs its body that many times.
+type WorkflowLoopDefinition struct {
+	MaxIterations int `json:"max_iterations" yaml:"max_iterations"`
 }
 
 func (d WorkflowTaskDefinition) EffectiveTimeoutSeconds(fallback int) int {
@@ -170,11 +202,14 @@ type WorkflowSnapshot struct {
 	AttentionReasons []string                          `json:"attention_reasons,omitempty"`
 	LastError        *string                           `json:"last_error,omitempty"`
 	Tasks            map[string]*WorkflowTaskExecution `json:"tasks"`
-	NextRunSeq       int                               `json:"next_run_seq"`
-	RetryRequests    map[string]WorkflowRetryRecord    `json:"retry_requests,omitempty"`
-	Controls         []WorkflowControlEvent            `json:"controls,omitempty"`
-	CreatedAt        time.Time                         `json:"created_at"`
-	UpdatedAt        time.Time                         `json:"updated_at"`
+	// Loops is the runtime state of each declared loop, keyed by loop name.
+	// Absent for loopless executions, including those loaded from schema 1.
+	Loops         map[string]*WorkflowLoopExecution `json:"loops,omitempty"`
+	NextRunSeq    int                               `json:"next_run_seq"`
+	RetryRequests map[string]WorkflowRetryRecord    `json:"retry_requests,omitempty"`
+	Controls      []WorkflowControlEvent            `json:"controls,omitempty"`
+	CreatedAt     time.Time                         `json:"created_at"`
+	UpdatedAt     time.Time                         `json:"updated_at"`
 }
 
 type WorkflowTaskExecution struct {
@@ -190,6 +225,13 @@ func (t *WorkflowTaskExecution) LastAttempt() *WorkflowAttempt {
 		return nil
 	}
 	return &t.Attempts[len(t.Attempts)-1]
+}
+
+// WorkflowLoopExecution is the durable runtime state of one loop: its current
+// 1-based iteration and observed lifecycle state.
+type WorkflowLoopExecution struct {
+	Iteration int               `json:"iteration"`
+	State     WorkflowLoopState `json:"state"`
 }
 
 // AttemptVerdict records the resolved classification of one attempt, plus
@@ -208,7 +250,10 @@ type AttemptVerdict struct {
 }
 
 type WorkflowAttempt struct {
-	Attempt            int                  `json:"attempt"`
+	Attempt int `json:"attempt"`
+	// Iteration is the 1-based loop iteration this attempt belongs to. Zero
+	// means the task runs outside every loop.
+	Iteration          int                  `json:"iteration,omitempty"`
 	RunID              string               `json:"run_id"`
 	State              WorkflowAttemptState `json:"state"`
 	Reason             string               `json:"reason,omitempty"`
@@ -248,22 +293,32 @@ type WorkflowControlEvent struct {
 // sorted task ID order. Successful entries reference the verified response
 // file; failed entries carry the error instead.
 type WorkflowInputManifest struct {
-	ExecutionID  string                    `json:"execution_id"`
-	TaskID       string                    `json:"task_id"`
-	Attempt      int                       `json:"attempt"`
-	Dependencies []WorkflowDependencyInput `json:"dependencies"`
+	ExecutionID string `json:"execution_id"`
+	TaskID      string `json:"task_id"`
+	Attempt     int    `json:"attempt"`
+	// Iteration is the 1-based loop iteration of a body task's attempt; zero
+	// for tasks outside every loop.
+	Iteration int `json:"iteration,omitempty"`
+	// PreviousIteration carries the prior iteration's settled body-task
+	// outcomes for a loop body task dispatching in iteration k > 1: the
+	// file-based carry-over channel. Omitted for the first iteration and for
+	// tasks outside loops.
+	Dependencies      []WorkflowDependencyInput `json:"dependencies"`
+	PreviousIteration []WorkflowDependencyInput `json:"previous_iteration,omitempty"`
 }
 
 type WorkflowDependencyInput struct {
-	TaskID       string `json:"task_id"`
-	Agent        string `json:"agent"`
-	Attempt      int    `json:"attempt"`
-	RunID        string `json:"run_id"`
-	Status       string `json:"status"`
-	Error        string `json:"error,omitempty"`
-	ResultPath   string `json:"result_path,omitempty"`
-	ResultSize   int64  `json:"result_size,omitempty"`
-	ResultSHA256 string `json:"result_sha256,omitempty"`
+	TaskID       string          `json:"task_id"`
+	Agent        string          `json:"agent"`
+	Attempt      int             `json:"attempt"`
+	Iteration    int             `json:"iteration,omitempty"`
+	RunID        string          `json:"run_id"`
+	Status       string          `json:"status"`
+	Error        string          `json:"error,omitempty"`
+	Verdict      *AttemptVerdict `json:"verdict,omitempty"`
+	ResultPath   string          `json:"result_path,omitempty"`
+	ResultSize   int64           `json:"result_size,omitempty"`
+	ResultSHA256 string          `json:"result_sha256,omitempty"`
 }
 
 // OwnedRunOptions asks the orchestrator to execute one workflow attempt on a
@@ -299,6 +354,7 @@ type WorkflowResultRef struct {
 
 type WorkflowAttemptView struct {
 	Attempt      int                  `json:"attempt"`
+	Iteration    int                  `json:"iteration,omitempty"`
 	RunID        string               `json:"run_id"`
 	State        WorkflowAttemptState `json:"state"`
 	Reason       string               `json:"reason,omitempty"`
@@ -337,6 +393,14 @@ type WorkflowPendingPermission struct {
 	Request PermissionRequest `json:"request"`
 }
 
+// WorkflowLoopView exposes the observable state of one bounded loop.
+type WorkflowLoopView struct {
+	Name          string            `json:"name"`
+	Iteration     int               `json:"iteration"`
+	MaxIterations int               `json:"max_iterations"`
+	State         WorkflowLoopState `json:"state"`
+}
+
 type WorkflowExecutionView struct {
 	ExecutionID        string                      `json:"execution_id"`
 	Definition         WorkflowDefinition          `json:"definition"`
@@ -349,6 +413,7 @@ type WorkflowExecutionView struct {
 	LastError          *string                     `json:"last_error,omitempty"`
 	TaskCounts         WorkflowTaskCounts          `json:"task_counts"`
 	Tasks              []WorkflowTaskView          `json:"tasks"`
+	Loops              []WorkflowLoopView          `json:"loops,omitempty"`
 	PendingPermissions []WorkflowPendingPermission `json:"pending_permissions,omitempty"`
 	CreatedAt          time.Time                   `json:"created_at"`
 	UpdatedAt          time.Time                   `json:"updated_at"`

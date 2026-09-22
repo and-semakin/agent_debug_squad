@@ -10,7 +10,7 @@ import (
 
 func TestWorkflowDefinitionJSONRoundTrip(t *testing.T) {
 	def := WorkflowDefinition{
-		Version:            WorkflowSchemaVersion,
+		Version:            WorkflowDefinitionVersion,
 		Name:               "review-and-verify",
 		MaxParallel:        2,
 		TaskTimeoutSeconds: DefaultWorkflowTaskTimeoutSec,
@@ -81,10 +81,10 @@ func TestEffectiveTimeoutSecondsPrefersTaskOverride(t *testing.T) {
 func TestWorkflowSnapshotJSONRoundTrip(t *testing.T) {
 	now := parseTestTime(t, "2026-01-02T03:04:05Z")
 	snap := WorkflowSnapshot{
-		SchemaVersion:    WorkflowSchemaVersion,
+		SchemaVersion:    WorkflowSnapshotSchemaVersion,
 		ExecutionID:      "wf_000001",
 		Revision:         7,
-		Definition:       WorkflowDefinition{Version: 1, Name: "review", MaxParallel: 1, Tasks: map[string]WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p"}}},
+		Definition:       WorkflowDefinition{Version: 1, Name: "review", MaxParallel: 1, Tasks: map[string]WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p", Loop: "refine"}}, Loops: map[string]WorkflowLoopDefinition{"refine": {MaxIterations: 3}}},
 		DefinitionHash:   "abc",
 		Agents:           map[string]AgentSpec{"x": {Name: "x", Backend: "fake"}},
 		RequestID:        "req-1",
@@ -98,6 +98,7 @@ func TestWorkflowSnapshotJSONRoundTrip(t *testing.T) {
 				State:  WorkflowTaskInterrupted,
 				Attempts: []WorkflowAttempt{{
 					Attempt:      1,
+					Iteration:    2,
 					RunID:        "wrun_000001_000001",
 					State:        WorkflowAttemptInterrupted,
 					ResultPath:   "tasks/a/attempts/1/response.txt",
@@ -107,6 +108,7 @@ func TestWorkflowSnapshotJSONRoundTrip(t *testing.T) {
 				}},
 			},
 		},
+		Loops:      map[string]*WorkflowLoopExecution{"refine": {Iteration: 2, State: WorkflowLoopNeedsAttention}},
 		NextRunSeq: 1,
 		RetryRequests: map[string]WorkflowRetryRecord{
 			"retry-1": {RequestID: "retry-1", TaskID: "a", Attempt: 2, CreatedAt: now},
@@ -134,6 +136,16 @@ func TestWorkflowSnapshotJSONRoundTrip(t *testing.T) {
 	attempt := task.LastAttempt()
 	if attempt == nil || attempt.RunID != "wrun_000001_000001" || attempt.ReservedAt == nil || !attempt.ReservedAt.Equal(now) {
 		t.Fatalf("attempt round trip mismatch: %+v", attempt)
+	}
+	if attempt.Iteration != 2 {
+		t.Fatalf("attempt iteration lost: %+v", attempt)
+	}
+	loop := decoded.Loops["refine"]
+	if loop == nil || loop.Iteration != 2 || loop.State != WorkflowLoopNeedsAttention {
+		t.Fatalf("loop state lost: %+v", decoded.Loops)
+	}
+	if decoded.Definition.Loops["refine"].MaxIterations != 3 || decoded.Definition.Tasks["a"].Loop != "refine" {
+		t.Fatalf("loop definition lost: %+v", decoded.Definition)
 	}
 	if decoded.RetryRequests["retry-1"].TaskID != "a" {
 		t.Fatalf("retry records lost: %+v", decoded.RetryRequests)

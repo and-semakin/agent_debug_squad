@@ -359,6 +359,7 @@ Fields and defaults:
 - Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
 - An agent definition may set `ephemeral: true` to declare a one-shot lifecycle: every invocation starts from a clean context. See [Configuration](#configuration); note the flag does not allow referencing one agent from multiple tasks in this version.
 - A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.8`) and `on_uncertain` (`hold` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
+- The workflow may declare a `loops` map of bounded loops and label tasks with `loop:`; see [Bounded Loops](#bounded-loops).
 
 Start, observe, and control an execution:
 
@@ -402,12 +403,52 @@ Shared workspace: tasks run concurrently in the same workspace. Squad does not d
 
 Retry and recovery limits:
 
-- No retries are automatic. `retry` reserves a fresh attempt (fresh conversation, same instructions and manifest semantics) for a failed/interrupted task only while no transitive descendant has attempt reservations, and only with a new unique `request_id` plus the `expected_attempt` number. Identical retries replay; stale or conflicting ones return `409`. Once a tolerated failure has been consumed downstream, retry is rejected — start a new execution for a different consistent result set.
+- No retries are automatic. `retry` reserves a fresh attempt (fresh conversation, same instructions and manifest semantics) for a failed/interrupted task only while no transitive descendant has attempt reservations, and only with a new unique `request_id` plus the `expected_attempt` number. Identical retries replay; stale or conflicting ones return `409`. Once a tolerated failure has been consumed downstream, retry is rejected — start a new execution for a different consistent result set. Inside a loop, eligibility is iteration-scoped; see [Bounded Loops](#bounded-loops).
 - Retrying an interrupted attempt, or finishing a cancellation after a crash, requires `confirm_previous_stopped: true` — the caller's assertion that prior backend work stopped, recorded for audit. Squad cannot verify external cleanup after a process crash, and a worker known to be active in the current process is never overridden.
-- Restart recovers committed outcomes and artifacts, keeps paused executions paused, continues `cancelling` until resolved, and marks reserved/running attempts without committed outcomes as `interrupted`, stopping new dispatch until intervention. Unknown snapshot schema versions or damaged authoritative state fail closed. Old binaries cannot resume workflow executions; stop the new server before rolling back and keep the artifacts.
+- Restart recovers committed outcomes and artifacts, keeps paused executions paused, continues `cancelling` until resolved, and marks reserved/running attempts without committed outcomes as `interrupted`, stopping new dispatch until intervention. Unknown snapshot schema versions or damaged authoritative state fail closed. Workflow snapshot schema is versioned upgrade-only: older binaries cannot resume schema-2 (loop) executions — stop the new server before rolling back and keep the artifacts; downgrade conversion is out of scope.
 - A workflow-owned runtime rejects manual run/reset mutation with `409`; manual agents, follow-up continuity, run APIs, and permission replies keep their existing behavior, and workflow attempts are visible through the same run endpoints.
 
-See [examples/workflow-chain.yaml](examples/workflow-chain.yaml) and [examples/workflow-review.yaml](examples/workflow-review.yaml) for runnable fake-backend graphs.
+### Bounded Loops
+
+A workflow may declare one or more bounded loops. `loops` maps loop names to their mandatory positive `max_iterations`; tasks join a loop body with `loop:`:
+
+```yaml
+workflow:
+  version: 1
+  name: refine-loop
+  loops:
+    refine:
+      max_iterations: 3
+  tasks:
+    implement:
+      agent: implementer
+      loop: refine
+      prompt: "Implement the change. In later iterations, address the previous iteration's review feedback."
+    review:
+      agent: reviewer
+      loop: refine
+      needs: [implement]
+      prompt: "Review this iteration's implementation; report remaining defects or state it is acceptable."
+    report:
+      agent: reporter
+      needs: [review]
+      prompt: "Summarize the final implementation and the last review for the user."
+```
+
+Semantics and limits of this stage:
+
+- The body runs exactly `max_iterations` times — there is no condition-based exit and no nesting yet, and loops cannot share tasks or depend across loop boundaries (validation rejects all of these; sibling loops and outside consumers are supported).
+- Automatic work is bounded by construction: one dispatch per body task per iteration (body tasks × `max_iterations` initial attempts). Failures never trigger automatic retries. Explicit user/coordinator retries are excluded from that bound — there is no retry-count or elapsed-time guarantee, only the descendant guards below.
+- An iteration advances when every body task has a settled current-iteration attempt that is acceptable under the ordinary dependency rules: `allowed_to_fail` and `min_successful_dependencies` compose per iteration exactly as in a flat graph, so tolerated failures don't block advance but re-run in the next iteration.
+- Handoff is iteration-scoped: `needs` inside the loop resolve to the dependency's current-iteration committed attempt; dependencies from outside the loop resolve once the loop is done and consume only the final iteration. Prior iterations are immutable inputs — completed iterations are never re-executed.
+- Carry-over: a body task dispatching in iteration k > 1 gets a previous-iteration outcomes section in its manifest and prompt — all body tasks' iteration-(k−1) committed attempts (states, verdicts, errors, result files), verified like every committed artifact before dispatch.
+- The execution view exposes per-loop state (`name`, `iteration`, `max_iterations`, `state`), and every attempt view carries its `iteration` number.
+- A non-tolerated body failure or a blocked body task puts the execution in a durable `needs_attention` hold with an actionable `loop_failure`/`loop_blocked` reason naming loop, task, and iteration. The hold survives restart, stops new dispatch and all loop advance, lets live work finish, and keeps outside consumers pending with a `waiting_loop` reason. Recovery is intervention: retry the eligible attempt or cancel.
+- Retry inside a loop targets the latest failed/interrupted attempt of the current iteration and stays in that iteration; an eligible retry can reopen a finished loop at its final iteration. Same-loop descendants block a retry only when they already have an attempt in that iteration; outside descendants and loopless tasks keep the all-history guard. Reserving a retry recomputes dependent readiness, clearing exactly the loop holds it resolves.
+- Resume is independent of retry/cancel and never dispatches loop work by itself: it revalidates restored artifacts and re-attempts held judge classifications (a completed resume can still return `200` with `needs_attention` while unresolved causes remain). Iteration counters survive restart; the advance is committed before any next-iteration backend work, so recovery never repeats, skips, or double-dispatches an iteration.
+- Loop executions raise the snapshot schema to version 2; compatibility is upgrade-only (schema 1 loads as loopless, unknown versions fail closed) and downgrade support is out of scope.
+
+See [examples/workflow-chain.yaml](examples/workflow-chain.yaml), [examples/workflow-review.yaml](examples/workflow-review.yaml), and [examples/workflow-loop.yaml](examples/workflow-loop.yaml) for runnable fake-backend graphs.
 
 ## Artifacts
 

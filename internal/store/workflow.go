@@ -27,8 +27,10 @@ func (s *Store) SaveWorkflowSnapshot(snapshot *domain.WorkflowSnapshot) error {
 	return writeJSONAtomic(filepath.Join(dir, workflowSnapshotFile), snapshot)
 }
 
-// LoadWorkflowSnapshot reads one authoritative snapshot. Unknown schema
-// versions fail closed so a newer state directory is never misread.
+// LoadWorkflowSnapshot reads one authoritative snapshot. Schema versions 1 and
+// 2 are accepted; a version-1 snapshot predates loops and loads as a loopless
+// execution. Unknown versions fail closed so a newer or damaged state directory
+// is never misread. Compatibility is upgrade-only.
 func (s *Store) LoadWorkflowSnapshot(executionID string) (domain.WorkflowSnapshot, error) {
 	var snapshot domain.WorkflowSnapshot
 	dir, err := s.WorkflowDir(executionID)
@@ -38,10 +40,10 @@ func (s *Store) LoadWorkflowSnapshot(executionID string) (domain.WorkflowSnapsho
 	if err := readJSON(filepath.Join(dir, workflowSnapshotFile), &snapshot); err != nil {
 		return snapshot, err
 	}
-	if snapshot.SchemaVersion != domain.WorkflowSchemaVersion {
+	if snapshot.SchemaVersion < domain.WorkflowSnapshotMinSchemaVersion || snapshot.SchemaVersion > domain.WorkflowSnapshotSchemaVersion {
 		return domain.WorkflowSnapshot{}, fmt.Errorf(
-			"workflow %s has unsupported schema version %d (supported: %d); refusing to recover",
-			executionID, snapshot.SchemaVersion, domain.WorkflowSchemaVersion,
+			"workflow %s has unsupported schema version %d (supported: %d through %d); refusing to recover",
+			executionID, snapshot.SchemaVersion, domain.WorkflowSnapshotMinSchemaVersion, domain.WorkflowSnapshotSchemaVersion,
 		)
 	}
 	if snapshot.ExecutionID == "" {

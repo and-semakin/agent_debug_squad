@@ -121,7 +121,7 @@ func TestWorkflowSnapshotRoundTrip(t *testing.T) {
 	st := testStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	snapshot := domain.WorkflowSnapshot{
-		SchemaVersion:  domain.WorkflowSchemaVersion,
+		SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
 		ExecutionID:    "wf_000001",
 		Revision:       3,
 		Definition:     domain.WorkflowDefinition{Version: 1, Name: "chain", MaxParallel: 1, TaskTimeoutSeconds: 60, Tasks: map[string]domain.WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p"}}},
@@ -189,6 +189,65 @@ func TestLoadWorkflowSnapshotRejectsUnsupportedVersion(t *testing.T) {
 	}
 }
 
+func TestLoadWorkflowSnapshotAcceptsSchema1(t *testing.T) {
+	st := testStore(t)
+	dir, err := st.WorkflowDir("wf_000008")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A pre-loops schema-1 snapshot: loopless, must load unchanged.
+	legacy := `{"schema_version": 1, "execution_id": "wf_000008", "revision": 2,` +
+		` "definition": {"version": 1, "name": "chain", "max_parallel": 1, "task_timeout_seconds": 60,` +
+		`  "tasks": {"a": {"agent": "x", "prompt": "p"}}},` +
+		` "definition_hash": "hash", "request_id": "req-1", "state": "running", "mode": "running",` +
+		` "tasks": {"a": {"task_id": "a", "agent": "x", "state": "pending", "attempts": []}},` +
+		` "next_run_seq": 1}`
+	if err := os.WriteFile(filepath.Join(dir, workflowSnapshotFile), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	loaded, err := st.LoadWorkflowSnapshot("wf_000008")
+	if err != nil {
+		t.Fatalf("schema 1 must load upgrade-only, got %v", err)
+	}
+	if loaded.SchemaVersion != 1 || loaded.Loops != nil || loaded.Definition.Loops != nil {
+		t.Fatalf("schema-1 load mismatch: %+v", loaded)
+	}
+	if loaded.Definition.Tasks["a"].Loop != "" {
+		t.Fatalf("legacy task must load loopless: %+v", loaded.Definition.Tasks["a"])
+	}
+
+	// Freshly written snapshots carry the current schema and keep loop state.
+	snapshot := domain.WorkflowSnapshot{
+		SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
+		ExecutionID:    "wf_000007",
+		Definition:     domain.WorkflowDefinition{Version: 1, Name: "loop", MaxParallel: 1, TaskTimeoutSeconds: 60, Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 3}}, Tasks: map[string]domain.WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p", Loop: "refine"}}},
+		State:          domain.WorkflowRunning,
+		Mode:           domain.WorkflowModeRunning,
+		Tasks:          map[string]*domain.WorkflowTaskExecution{"a": {TaskID: "a", Agent: "x", State: domain.WorkflowTaskSucceeded, Attempts: []domain.WorkflowAttempt{{Attempt: 1, Iteration: 2, State: domain.WorkflowAttemptSucceeded}}}},
+		Loops:          map[string]*domain.WorkflowLoopExecution{"refine": {Iteration: 2, State: domain.WorkflowLoopRunning}},
+		DefinitionHash: "hash",
+	}
+	if err := st.SaveWorkflowSnapshot(&snapshot); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	reloaded, err := st.LoadWorkflowSnapshot("wf_000007")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.SchemaVersion != domain.WorkflowSnapshotSchemaVersion {
+		t.Fatalf("new snapshots must persist the current schema, got %d", reloaded.SchemaVersion)
+	}
+	if reloaded.Loops["refine"] == nil || reloaded.Loops["refine"].Iteration != 2 || reloaded.Loops["refine"].State != domain.WorkflowLoopRunning {
+		t.Fatalf("loop execution must round-trip: %+v", reloaded.Loops)
+	}
+	if reloaded.Tasks["a"].Attempts[0].Iteration != 2 {
+		t.Fatalf("attempt iteration must round-trip: %+v", reloaded.Tasks["a"].Attempts[0])
+	}
+}
+
 func TestLoadWorkflowSnapshotRejectsCorruption(t *testing.T) {
 	st := testStore(t)
 	dir, err := st.WorkflowDir("wf_000010")
@@ -209,7 +268,7 @@ func TestLoadWorkflowSnapshotRejectsCorruption(t *testing.T) {
 func TestSaveWorkflowSnapshotInjectedFailures(t *testing.T) {
 	st := testStore(t)
 	snapshot := domain.WorkflowSnapshot{
-		SchemaVersion: domain.WorkflowSchemaVersion,
+		SchemaVersion: domain.WorkflowSnapshotSchemaVersion,
 		ExecutionID:   "wf_000011",
 		Definition:    domain.WorkflowDefinition{Version: 1, Name: "n", MaxParallel: 1, TaskTimeoutSeconds: 1, Tasks: map[string]domain.WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p"}}},
 		State:         domain.WorkflowRunning,

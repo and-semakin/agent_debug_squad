@@ -230,6 +230,80 @@ func TestWorkflowGetWithoutWaitReturnsView(t *testing.T) {
 	}
 }
 
+// TestWorkflowViewExposesLoopState checks the serialized observation contract
+// for loops: per-loop iteration/max_iterations/state on the execution view,
+// iteration numbers on body attempts, and actionable loop hold reasons — while
+// loopless views stay byte-compatible (no loops or iteration keys).
+func TestWorkflowViewExposesLoopState(t *testing.T) {
+	midLoop := domain.WorkflowExecutionView{
+		ExecutionID:      "wf_000001",
+		State:            domain.WorkflowRunning,
+		AttentionReasons: []string{"loop_failure:refine:2:implement:retry_or_cancel"},
+		Loops: []domain.WorkflowLoopView{
+			{Name: "refine", Iteration: 2, MaxIterations: 3, State: domain.WorkflowLoopNeedsAttention},
+		},
+		Tasks: []domain.WorkflowTaskView{
+			{TaskID: "implement", State: domain.WorkflowTaskRunning, Attempts: []domain.WorkflowAttemptView{
+				{Attempt: 1, Iteration: 1, State: domain.WorkflowAttemptSucceeded},
+				{Attempt: 2, Iteration: 2, State: domain.WorkflowAttemptRunning},
+			}},
+		},
+	}
+	wf := &scriptedWorkflows{view: map[string]domain.WorkflowExecutionView{
+		"wf_000001": midLoop,
+		"wf_000002": {ExecutionID: "wf_000002", State: domain.WorkflowRunning,
+			Tasks: []domain.WorkflowTaskView{{TaskID: "solo", Attempts: []domain.WorkflowAttemptView{
+				{Attempt: 1, State: domain.WorkflowAttemptRunning},
+			}}}},
+	}}
+	srv := newWorkflowTestServer(t, wf)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/workflows/wf_000001", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	var decoded struct {
+		Loops []struct {
+			Name          string `json:"name"`
+			Iteration     int    `json:"iteration"`
+			MaxIterations int    `json:"max_iterations"`
+			State         string `json:"state"`
+		} `json:"loops"`
+		Tasks []struct {
+			TaskID   string `json:"task_id"`
+			Attempts []struct {
+				Attempt   int `json:"attempt"`
+				Iteration int `json:"iteration"`
+			} `json:"attempts"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(decoded.Loops) != 1 || decoded.Loops[0].Name != "refine" ||
+		decoded.Loops[0].Iteration != 2 || decoded.Loops[0].MaxIterations != 3 ||
+		decoded.Loops[0].State != string(domain.WorkflowLoopNeedsAttention) {
+		t.Fatalf("loop state: %+v", decoded.Loops)
+	}
+	if len(decoded.Tasks) != 1 || len(decoded.Tasks[0].Attempts) != 2 ||
+		decoded.Tasks[0].Attempts[1].Iteration != 2 {
+		t.Fatalf("attempt iteration numbers: %+v", decoded.Tasks)
+	}
+	if !strings.Contains(rr.Body.String(), "loop_failure:refine:2:implement:retry_or_cancel") {
+		t.Fatalf("hold reason must be actionable in the payload: %s", rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/workflows/wf_000002", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), `"loops"`) || strings.Contains(rr.Body.String(), `"iteration"`) {
+		t.Fatalf("loopless views must carry no loop fields: %s", rr.Body.String())
+	}
+}
+
 func TestWorkflowGetWaitValidatesBounds(t *testing.T) {
 	wf := &scriptedWorkflows{waitView: domain.WorkflowExecutionView{ExecutionID: "wf_000001", State: domain.WorkflowRunning}}
 	srv := newWorkflowTestServer(t, wf)

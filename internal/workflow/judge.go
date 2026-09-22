@@ -263,3 +263,29 @@ func (m *Manager) redispatchJudgingLocked(snapshot *domain.WorkflowSnapshot) {
 		}
 	}
 }
+
+// resumeJudgingLocked re-attempts only held verdict classifications (a
+// judging attempt carrying a reason) whose own response artifact verifies.
+// Unlike the recovery path it preserves each attempt's attention hold until
+// the committed outcome resolves it, so a resumed classification cannot
+// prematurely release ordinary task dispatch. Concurrent calls deduplicate
+// through the in-flight run set: a repeated resume never starts a second
+// judge call for the same attempt. Callers hold the lock.
+func (m *Manager) resumeJudgingLocked(snapshot *domain.WorkflowSnapshot) {
+	for _, task := range snapshot.Tasks {
+		for i := range task.Attempts {
+			attempt := &task.Attempts[i]
+			if attempt.State != domain.WorkflowAttemptJudging || attempt.Reason == "" {
+				continue
+			}
+			if attempt.ResultPath != "" {
+				if err := m.store.VerifyWorkflowArtifact(snapshot.ExecutionID, attempt.ResultPath, attempt.ResultSize, attempt.ResultSHA256); err != nil {
+					// The response artifact is damaged: the classification
+					// stays held and the artifact reason keeps blocking.
+					continue
+				}
+			}
+			m.dispatchJudgementLocked(snapshot, task, attempt)
+		}
+	}
+}

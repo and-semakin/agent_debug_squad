@@ -262,6 +262,195 @@ func TestValidateWorkflowDefinitionAcceptsChainsAndDiamonds(t *testing.T) {
 	}
 }
 
+const validLoopYAML = `workflow:
+  version: 1
+  name: loop-review
+  max_parallel: 1
+  loops:
+    refine:
+      max_iterations: 3
+  tasks:
+    implement:
+      agent: reviewer_a
+      prompt: p
+      loop: refine
+    review:
+      agent: reviewer_b
+      prompt: q
+      loop: refine
+      needs: [implement]
+    report:
+      agent: verifier
+      prompt: r
+      needs: [review]
+`
+
+func TestLoadParsesLoopDefinitions(t *testing.T) {
+	cfg, err := Load(writeWorkflowConfig(t, validLoopYAML))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	def := *cfg.Workflow
+	if len(def.Loops) != 1 || def.Loops["refine"].MaxIterations != 3 {
+		t.Fatalf("loops mismatch: %+v", def.Loops)
+	}
+	if def.Tasks["implement"].Loop != "refine" || def.Tasks["review"].Loop != "refine" {
+		t.Fatalf("task loop labels mismatch: %+v", def.Tasks)
+	}
+	if def.Tasks["report"].Loop != "" {
+		t.Fatalf("outside task must stay unlabeled: %+v", def.Tasks["report"])
+	}
+}
+
+func TestLoadAcceptsSiblingLoopsAndOutsideDependencies(t *testing.T) {
+	agents := []domain.AgentSpec{
+		{Name: "a1", Backend: "fake"}, {Name: "a2", Backend: "fake"},
+		{Name: "a3", Backend: "fake"}, {Name: "a4", Backend: "fake"},
+		{Name: "a5", Backend: "fake"},
+	}
+	siblings := domain.WorkflowDefinition{
+		Version: 1, Name: "siblings", MaxParallel: 2, TaskTimeoutSeconds: 60,
+		Loops: map[string]domain.WorkflowLoopDefinition{
+			"left":  {MaxIterations: 2},
+			"right": {MaxIterations: 3},
+		},
+		Tasks: map[string]domain.WorkflowTaskDefinition{
+			"seed":   {Agent: "a1", Prompt: "p"},
+			"l1":     {Agent: "a2", Prompt: "p", Loop: "left", Needs: []string{"seed"}},
+			"r1":     {Agent: "a3", Prompt: "p", Loop: "right", Needs: []string{"seed"}},
+			"r2":     {Agent: "a4", Prompt: "p", Loop: "right", Needs: []string{"r1"}},
+			"report": {Agent: "a5", Prompt: "p", Needs: []string{"l1", "r2"}},
+		},
+	}
+	if err := ValidateWorkflowDefinition(siblings, agents); err != nil {
+		t.Fatalf("sibling loops with outside seed and consumer must validate: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidLoopDefinitions(t *testing.T) {
+	cases := []struct {
+		name      string
+		workflow  string
+		wantParts []string
+	}{
+		{
+			name:      "missing max_iterations",
+			workflow:  strings.Replace(validLoopYAML, "      max_iterations: 3\n", "      {}\n", 1),
+			wantParts: []string{`loop "refine"`, "max_iterations is required", "example:", "max_iterations: 3"},
+		},
+		{
+			name:      "zero max_iterations",
+			workflow:  strings.Replace(validLoopYAML, "max_iterations: 3", "max_iterations: 0", 1),
+			wantParts: []string{`loop "refine"`, "positive integer", "example:"},
+		},
+		{
+			name:      "negative max_iterations",
+			workflow:  strings.Replace(validLoopYAML, "max_iterations: 3", "max_iterations: -2", 1),
+			wantParts: []string{`loop "refine"`, "positive integer", "example:"},
+		},
+		{
+			name:      "unknown loop field",
+			workflow:  strings.Replace(validLoopYAML, "      max_iterations: 3\n", "      max_iterations: 3\n      until: perfect\n", 1),
+			wantParts: []string{"field until"},
+		},
+		{
+			name:      "undeclared loop reference",
+			workflow:  strings.Replace(validLoopYAML, "loop: refine", "loop: forever", 1),
+			wantParts: []string{`loop "forever"`, `referenced by task "implement"`, "example:"},
+		},
+		{
+			name:      "empty loop body",
+			workflow:  strings.ReplaceAll(validLoopYAML, "      loop: refine\n", ""),
+			wantParts: []string{`loop "refine"`, "has no member tasks", "example:"},
+		},
+		{
+			name: "cross-loop dependency",
+			workflow: `workflow:
+  version: 1
+  name: crossed
+  max_parallel: 1
+  loops:
+    left:
+      max_iterations: 2
+    right:
+      max_iterations: 2
+  tasks:
+    l1:
+      agent: reviewer_a
+      prompt: p
+      loop: left
+    r1:
+      agent: reviewer_b
+      prompt: q
+      loop: right
+      needs: [l1]
+`,
+			wantParts: []string{`loop "right"`, "depends on task", "outside all loops", "example:"},
+		},
+		{
+			name: "cycle through loop boundary",
+			workflow: `workflow:
+  version: 1
+  name: boundary-cycle
+  max_parallel: 1
+  loops:
+    refine:
+      max_iterations: 2
+  tasks:
+    implement:
+      agent: reviewer_a
+      prompt: p
+      loop: refine
+      needs: [report]
+    review:
+      agent: reviewer_b
+      prompt: q
+      loop: refine
+      needs: [implement]
+    report:
+      agent: verifier
+      prompt: r
+      needs: [review]
+`,
+			wantParts: []string{`loop "refine"`, "cycle through the loop boundary", "example:"},
+		},
+		{
+			name:      "unsafe loop name",
+			workflow:  strings.Replace(validLoopYAML, "    refine:\n      max_iterations: 3", "    \"bad/name\":\n      max_iterations: 3", 1),
+			wantParts: []string{"unsafe loop name", "example:"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeWorkflowConfig(t, tc.workflow))
+			if err == nil {
+				t.Fatalf("expected an error containing %v, got nil", tc.wantParts)
+			}
+			for _, part := range tc.wantParts {
+				if !strings.Contains(err.Error(), part) {
+					t.Fatalf("error %q does not contain %q", err.Error(), part)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateRejectsBodyInternalCycleWithTaskError(t *testing.T) {
+	agents := []domain.AgentSpec{{Name: "a1", Backend: "fake"}, {Name: "a2", Backend: "fake"}}
+	def := domain.WorkflowDefinition{
+		Version: 1, Name: "self-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
+		Tasks: map[string]domain.WorkflowTaskDefinition{
+			"a": {Agent: "a1", Prompt: "p", Loop: "refine", Needs: []string{"b"}},
+			"b": {Agent: "a2", Prompt: "p", Loop: "refine", Needs: []string{"a"}},
+		},
+	}
+	err := ValidateWorkflowDefinition(def, agents)
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("body-internal cycle must be rejected as a cycle, got %v", err)
+	}
+}
+
 func TestLoadExistingExampleConfigsStillLoad(t *testing.T) {
 	for _, name := range []string{
 		"../../examples/squad.yaml",
@@ -269,6 +458,7 @@ func TestLoadExistingExampleConfigsStillLoad(t *testing.T) {
 		"../../examples/cursor-squad.yaml",
 		"../../examples/workflow-chain.yaml",
 		"../../examples/workflow-review.yaml",
+		"../../examples/workflow-loop.yaml",
 		"../../configs/code-review-squad.yaml",
 	} {
 		if _, err := Load(name); err != nil {
