@@ -23,10 +23,13 @@ type rawWorkflow struct {
 	OnUncertain         string                     `yaml:"on_uncertain"`
 }
 
-// rawWorkflowLoop accepts exactly max_iterations; the strict workflow-subtree
-// decoder rejects any additional loop field.
+// rawWorkflowLoop accepts max_iterations plus the optional condition fields.
+// The strict workflow-subtree decoder rejects any additional loop field.
 type rawWorkflowLoop struct {
-	MaxIterations int `yaml:"max_iterations"`
+	MaxIterations int               `yaml:"max_iterations"`
+	UntilTask     string            `yaml:"until_task"`
+	OnVerdict     map[string]string `yaml:"on_verdict"`
+	OnExhaustion  string            `yaml:"on_exhaustion"`
 }
 
 type rawWorkflowTask struct {
@@ -103,7 +106,21 @@ func parseWorkflow(data []byte) (*domain.WorkflowDefinition, error) {
 		// definitions marshaling byte-identically to pre-loop parsers.
 		def.Loops = make(map[string]domain.WorkflowLoopDefinition, len(raw.Loops))
 		for loopName, loop := range raw.Loops {
-			def.Loops[loopName] = domain.WorkflowLoopDefinition{MaxIterations: loop.MaxIterations}
+			definition := domain.WorkflowLoopDefinition{
+				MaxIterations: loop.MaxIterations,
+				UntilTask:     strings.TrimSpace(loop.UntilTask),
+				OnExhaustion:  strings.TrimSpace(loop.OnExhaustion),
+			}
+			if loop.OnVerdict != nil {
+				// Copy even when empty: an explicitly empty on_verdict map is
+				// a validation error, not an absent declaration.
+				onVerdict := make(map[string]string, len(loop.OnVerdict))
+				for verdict, action := range loop.OnVerdict {
+					onVerdict[verdict] = strings.TrimSpace(action)
+				}
+				definition.OnVerdict = onVerdict
+			}
+			def.Loops[loopName] = definition
 		}
 	}
 	for taskID, task := range raw.Tasks {
@@ -181,9 +198,10 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 		return errors.New("workflow tasks must not be empty")
 	}
 	switch def.OnUncertain {
-	case "", domain.WorkflowOnUncertainHold, domain.WorkflowOnUncertainError:
+	case "", domain.WorkflowOnUncertainNeedsAttention, domain.WorkflowOnUncertainError:
 	default:
-		return fmt.Errorf("workflow on_uncertain must be %q or %q, got %q", domain.WorkflowOnUncertainHold, domain.WorkflowOnUncertainError, def.OnUncertain)
+		return fmt.Errorf("workflow on_uncertain must be %q or %q, got %q (the former %q spelling is no longer supported; use %q)",
+			domain.WorkflowOnUncertainNeedsAttention, domain.WorkflowOnUncertainError, def.OnUncertain, "hold", domain.WorkflowOnUncertainNeedsAttention)
 	}
 	if def.ConfidenceThreshold < 0 || def.ConfidenceThreshold > 1 {
 		return fmt.Errorf("workflow confidence_threshold must be greater than 0 and at most 1, got %v", def.ConfidenceThreshold)
@@ -296,6 +314,9 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 	if cycle := findWorkflowCycle(def.Tasks); cycle != "" {
 		return fmt.Errorf("workflow dependency cycle detected through task %q", cycle)
 	}
+	if err := validateLoopConditions(def); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -304,6 +325,119 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 // agents can repair a definition without additional context.
 func loopErrorf(loopName, problem string, args ...any) error {
 	return fmt.Errorf("loop %q: %s\nexample:\n  loops:\n    %s:\n      max_iterations: 3", loopName, fmt.Sprintf(problem, args...), loopName)
+}
+
+// conditionErrorf formats every loop-condition rejection uniformly: it names
+// the offending loop (and task where relevant), states the problem, and
+// appends a corrective YAML example showing the until_task/on_verdict surface.
+func conditionErrorf(loopName, problem string, args ...any) error {
+	return fmt.Errorf("loop %q: %s\nexample:\n  loops:\n    %s:\n      max_iterations: 3\n      until_task: review\n      on_verdict:\n        review_passed: break\n        issues_found: continue",
+		loopName, fmt.Sprintf(problem, args...), loopName)
+}
+
+// validateLoopConditions enforces the until_task/on_verdict/on_exhaustion
+// rules for every conditioned loop after the base graph and loop-membership
+// checks have passed. Static loops (no condition fields) are skipped except
+// for a stray on_exhaustion, which is rejected rather than silently ignored.
+func validateLoopConditions(def domain.WorkflowDefinition) error {
+	for _, loopName := range sortedLoopNames(def.Loops) {
+		loop := def.Loops[loopName]
+		untilTask := loop.UntilTask
+		hasPair := untilTask != "" || loop.OnVerdict != nil
+		if untilTask == "" && loop.OnVerdict != nil {
+			return conditionErrorf(loopName, "declares on_verdict without until_task; name the condition task and map each of its declared verdicts")
+		}
+		if untilTask != "" && loop.OnVerdict == nil {
+			return conditionErrorf(loopName, "declares until_task %q without on_verdict; map each verdict %q declares to break, continue, or needs_attention", untilTask, untilTask)
+		}
+		if loop.OnExhaustion != "" && !hasPair {
+			return conditionErrorf(loopName, "declares on_exhaustion without a condition; on_exhaustion requires until_task and on_verdict")
+		}
+		if loop.OnExhaustion != "" {
+			switch loop.OnExhaustion {
+			case domain.WorkflowExhaustionNeedsAttention, domain.WorkflowExhaustionSucceed:
+			default:
+				return conditionErrorf(loopName, "on_exhaustion must be %q or %q, got %q",
+					domain.WorkflowExhaustionNeedsAttention, domain.WorkflowExhaustionSucceed, loop.OnExhaustion)
+			}
+		}
+		if untilTask == "" {
+			continue
+		}
+
+		// until_task must be a member of this loop's body.
+		untilDef, exists := def.Tasks[untilTask]
+		if !exists || untilDef.Loop != loopName {
+			return conditionErrorf(loopName, "until_task %q must be a member of the loop body (a task with loop: %s)", untilTask, loopName)
+		}
+		// until_task must declare verdicts.
+		if len(untilDef.Verdicts) == 0 {
+			return conditionErrorf(loopName, "until_task %q must declare verdicts to drive the condition", untilTask)
+		}
+		// until_task must be mandatory.
+		if untilDef.AllowedToFail {
+			return conditionErrorf(loopName, "until_task %q must not set allowed_to_fail: true; the condition task is mandatory, omit allowed_to_fail or set it to false", untilTask)
+		}
+
+		// on_verdict must exactly cover the declared verdict set.
+		for verdictName := range untilDef.Verdicts {
+			action, mapped := loop.OnVerdict[verdictName]
+			if !mapped {
+				return conditionErrorf(loopName, "on_verdict omits the declared verdict %q of until_task %q; map it to break, continue, or needs_attention", verdictName, untilTask)
+			}
+			switch action {
+			case domain.WorkflowLoopActionBreak, domain.WorkflowLoopActionContinue, domain.WorkflowLoopActionNeedsAttention:
+			default:
+				return conditionErrorf(loopName, "on_verdict maps verdict %q of until_task %q to %q; the action must be break, continue, or needs_attention", verdictName, untilTask, action)
+			}
+		}
+		for verdictName := range loop.OnVerdict {
+			if _, declared := untilDef.Verdicts[verdictName]; !declared {
+				return conditionErrorf(loopName, "on_verdict maps verdict %q which until_task %q does not declare", verdictName, untilTask)
+			}
+		}
+
+		// until_task must be the unique body sink: every other body task must
+		// reach it through same-loop needs edges. A singleton body qualifies.
+		if uncovered, ok := findUncoveredBodyTask(def, loopName, untilTask); !ok {
+			return conditionErrorf(loopName, "until_task %q must be the unique body sink, but body task %q does not reach it through same-loop dependencies; connect %q to %q", untilTask, uncovered, uncovered, untilTask)
+		}
+	}
+	return nil
+}
+
+// findUncoveredBodyTask reports whether every body task other than untilTask
+// is a direct or transitive predecessor of untilTask through same-loop needs
+// edges — equivalently, whether untilTask (the loop's sink) transitively
+// depends on every other body task. It returns (uncoveredTaskID, false) for the
+// first body task that does not reach the sink; ok is true when the sink covers
+// the whole body. A singleton body trivially qualifies.
+func findUncoveredBodyTask(def domain.WorkflowDefinition, loopName, untilTask string) (string, bool) {
+	// Walk untilTask's same-loop needs edges transitively: the collected set is
+	// exactly the body tasks whose output flows into the sink. Any body task
+	// outside this set is a branch that never reaches untilTask.
+	reaches := map[string]bool{untilTask: true}
+	queue := []string{untilTask}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, dep := range def.Tasks[current].Needs {
+			if def.Tasks[dep].Loop != loopName || reaches[dep] {
+				continue
+			}
+			reaches[dep] = true
+			queue = append(queue, dep)
+		}
+	}
+	for _, taskID := range sortedTaskIDs(def.Tasks) {
+		if def.Tasks[taskID].Loop != loopName || taskID == untilTask {
+			continue
+		}
+		if !reaches[taskID] {
+			return taskID, false
+		}
+	}
+	return "", true
 }
 
 func loopHasMemberTasks(def domain.WorkflowDefinition, loopName string) bool {

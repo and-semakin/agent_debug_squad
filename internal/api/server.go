@@ -63,6 +63,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /workflows/{execution_id}/cancel", s.handleWorkflowCancel)
 	s.mux.HandleFunc("POST /workflows/{execution_id}/tasks/{task_id}/retry", s.handleWorkflowRetry)
 	s.mux.HandleFunc("POST /workflows/{execution_id}/tasks/{task_id}/attempts/{attempt}/verdict", s.handleWorkflowVerdictOverride)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/loops/{loop_name}/extend", s.handleWorkflowLoopExtend)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/loops/{loop_name}/stop", s.handleWorkflowLoopStop)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

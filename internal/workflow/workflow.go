@@ -32,6 +32,9 @@ var (
 	ErrStorageDamaged        = errors.New("workflow storage error requires attention")
 	ErrAttemptNotFound       = errors.New("workflow attempt not found")
 	ErrVerdictConflict       = errors.New("verdict override conflicts with current attempt state")
+	ErrLoopNotFound          = errors.New("workflow loop not found")
+	ErrLoopControlConflict   = errors.New("loop control conflicts with current loop state")
+	ErrUnsupportedPolicy     = errors.New("workflow definition uses an unsupported on_uncertain policy")
 )
 
 // Store is the persistence surface the scheduler needs; *store.Store
@@ -197,6 +200,14 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 func (m *Manager) recoverExecution(snapshot *domain.WorkflowSnapshot) error {
+	// Reject a saved definition using the removed "hold" uncertainty policy
+	// before any scheduling or mutation: there is no alias, fallback, or
+	// automatic migration, and the saved definition is neither rewritten nor
+	// silently reinterpreted.
+	if snapshot.Definition.OnUncertain == "hold" {
+		return fmt.Errorf("%w: execution %s saved on_uncertain \"hold\", which is no longer supported; edit the definition to %q and resubmit",
+			ErrUnsupportedPolicy, snapshot.ExecutionID, domain.WorkflowOnUncertainNeedsAttention)
+	}
 	now := m.now()
 	uncertain := false
 	for _, task := range snapshot.Tasks {

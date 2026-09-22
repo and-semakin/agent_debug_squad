@@ -1,0 +1,64 @@
+# A conditioned loop: the reviewer's verdict decides whether the loop keeps
+# refining or stops early. The "polish" body runs implement -> review; the
+# review task is the loop's until_task and must declare verdicts. on_verdict
+# maps every declared verdict to an action: review_passed breaks the loop at
+# the current iteration, issues_found continues to the next iteration (up to
+# the cap), and needs_human holds the loop for a manual override, stop, or
+# cancel. The budget is still bounded by max_iterations; a continue at the cap
+# follows on_exhaustion (needs_attention by default, or succeed). The fake
+# backend keeps this example portable and free to run.
+session_name: workflow-loop-conditions
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - name: implementer
+    backend: fake
+    # One-shot lifecycle: each iteration starts from a clean context; prior
+    # review feedback arrives as readable result files, not memory.
+    ephemeral: true
+    startup_prompt: "Implement the requested change. Edit only within the task scope."
+  - name: reviewer
+    backend: fake
+    ephemeral: true
+    startup_prompt: "Review the implementation strictly; end with exactly one verdict."
+  - name: reporter
+    backend: fake
+    startup_prompt: "Summarize the final outcome for the user."
+workflow:
+  version: 1
+  name: review-until-clean
+  max_parallel: 1
+  task_timeout_seconds: 1800
+  loops:
+    polish:
+      max_iterations: 3
+      until_task: review
+      on_verdict:
+        review_passed: break
+        issues_found: continue
+        needs_human: needs_attention
+      # Optional; needs_attention is the default when omitted.
+      on_exhaustion: needs_attention
+  tasks:
+    implement:
+      agent: implementer
+      loop: polish
+      prompt: "Implement the change. In later iterations, address the previous iteration's review feedback."
+    # The condition task: a body member that declares verdicts, is mandatory
+    # (allowed_to_fail is omitted), and is the unique sink of the body.
+    review:
+      agent: reviewer
+      loop: polish
+      needs: [implement]
+      verdicts:
+        review_passed: "No blocking defects remain."
+        issues_found: "Concrete defects to fix in the next iteration."
+        needs_human: "A decision only a human can make is required."
+      prompt: "Review this iteration's implementation and select exactly one verdict."
+    # Outside the loop: stays pending with a waiting_loop reason until the loop
+    # completes (by break, budget, or stop), then consumes the final iteration.
+    report:
+      agent: reporter
+      needs: [review]
+      prompt: "Summarize the final implementation and the last review for the user."

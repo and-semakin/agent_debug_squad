@@ -302,7 +302,13 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: task %q has no attempt %d", ErrAttemptNotFound, taskID, attemptNumber)
 	}
 	if attempt.State != domain.WorkflowAttemptJudging {
-		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: attempt %d of task %q is %s, not judging", ErrVerdictConflict, attemptNumber, taskID, attempt.State)
+		// The narrow extension: a settled attempt is overridable only when its
+		// recorded verdict is load-bearing on a live condition-action
+		// needs_attention hold. Prior-iteration and ordinary settled verdicts
+		// stay immutable.
+		if !isLoadBearingConditionVerdict(snapshot, taskID, attempt) {
+			return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: attempt %d of task %q is %s, not judging or a load-bearing condition verdict", ErrVerdictConflict, attemptNumber, taskID, attempt.State)
+		}
 	}
 
 	now := m.now()
@@ -491,17 +497,22 @@ func stateForMode(snapshot *domain.WorkflowSnapshot) domain.WorkflowState {
 // onlyRetryRepairableReasons reports whether every unresolved attention
 // reason is a condition a caller can retire attempt by attempt with
 // confirmed retries: recoverable interruptions plus durable loop
-// failure/blocking holds. It deliberately allows retrying one failed task
-// while independent siblings still hold—each retry queues its attempt, and
-// dispatch stays held until the last uncertainty is resolved. Artifact or
-// storage damage and held verdict classifications are different: they must
-// be repaired and revalidated through resume before new work.
+// failure/blocking holds plus the semantic condition-action and exhaustion
+// holds. It deliberately allows retrying one failed task while independent
+// siblings still hold—each retry queues its attempt, and dispatch stays held
+// until the last uncertainty is resolved. Queuing a retry under a
+// condition/exhaustion hold does not clear that hold; it only permits the
+// otherwise-eligible attempt. Artifact or storage damage and held verdict
+// classifications are different: they must be repaired and revalidated through
+// resume before new work.
 func onlyRetryRepairableReasons(snapshot *domain.WorkflowSnapshot) bool {
 	for _, reason := range snapshot.AttentionReasons {
 		if strings.HasPrefix(reason, "interrupted_attempt:") ||
 			strings.HasPrefix(reason, "interrupted_attempts_require") ||
 			strings.HasPrefix(reason, "loop_failure:") ||
-			strings.HasPrefix(reason, "loop_blocked:") {
+			strings.HasPrefix(reason, "loop_blocked:") ||
+			strings.HasPrefix(reason, "loop_attention:") ||
+			strings.HasPrefix(reason, "loop_exhausted:") {
 			continue
 		}
 		return false
@@ -568,6 +579,14 @@ func (m *Manager) reconcileLocked() {
 	}
 	changed = m.applyCancellingLocked(snapshot) || changed
 	changed = m.recomputeTaskStatesLocked(snapshot) || changed
+	// Resolve pending manual-stop intents before the execution-state refresh so
+	// a stop can retire its own condition/exhaustion hold even while other
+	// loops remain held. Marking a stopped loop done releases its outside
+	// consumers, so recompute task states again when a stop resolved.
+	if resolveStopsLocked(snapshot) {
+		changed = true
+		changed = m.recomputeTaskStatesLocked(snapshot) || changed
+	}
 	// Refresh the execution state before dispatching so that attention
 	// conditions established above block new work in the same pass.
 	changed = m.refreshExecutionStateLocked(snapshot) || changed
@@ -749,18 +768,31 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 	}
 
 	// Per-loop observation in sorted name order: task counts still count
-	// tasks, iterations are exposed here.
+	// tasks, iterations are exposed here. Condition fields populate only for
+	// conditioned or extended loops so static-loop views stay byte-identical.
 	for _, name := range sortedLoopNames(snapshot.Definition.Loops) {
 		loop := snapshot.Loops[name]
 		if loop == nil {
 			continue
 		}
-		view.Loops = append(view.Loops, domain.WorkflowLoopView{
+		loopDef := snapshot.Definition.Loops[name]
+		loopView := domain.WorkflowLoopView{
 			Name:          name,
 			Iteration:     loop.Iteration,
-			MaxIterations: snapshot.Definition.Loops[name].MaxIterations,
+			MaxIterations: loopDef.MaxIterations,
 			State:         loop.State,
-		})
+			StopRequested: loop.StopRequested,
+		}
+		if loopDef.HasCondition() {
+			loopView.UntilTask = loopDef.UntilTask
+			loopView.EffectiveMaxIterations = loop.EffectiveCap(loopDef.MaxIterations)
+			if verdict, ok := conditionVerdict(snapshot, name); ok {
+				loopView.LastConditionVerdict = verdict
+			}
+		} else if loop.ExtendedIterations > 0 {
+			loopView.EffectiveMaxIterations = loop.EffectiveCap(loopDef.MaxIterations)
+		}
+		view.Loops = append(view.Loops, loopView)
 	}
 
 	if m.active != nil && m.active.snapshot == snapshot {

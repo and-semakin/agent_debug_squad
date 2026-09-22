@@ -34,6 +34,8 @@ type WorkflowManager interface {
 	Cancel(executionID string, opts workflow.CancelOptions) (domain.WorkflowExecutionView, error)
 	RetryTask(executionID, taskID string, req workflow.RetryRequest) (domain.WorkflowExecutionView, bool, error)
 	OverrideVerdict(executionID, taskID string, attempt int, req workflow.OverrideVerdictRequest) (domain.WorkflowExecutionView, bool, error)
+	ExtendLoop(executionID, loopID string, req workflow.ExtendRequest) (domain.WorkflowExecutionView, bool, error)
+	StopLoop(executionID, loopID string, req workflow.StopRequest) (domain.WorkflowExecutionView, bool, error)
 }
 
 func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +209,63 @@ func (s *Server) handleWorkflowVerdictOverride(w http.ResponseWriter, r *http.Re
 	writeJSON(w, status, view)
 }
 
+func (s *Server) handleWorkflowLoopExtend(w http.ResponseWriter, r *http.Request) {
+	if s.workflows == nil {
+		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
+		return
+	}
+	var body workflowLoopExtendRequest
+	if err := decodeStrictJSON(w, r.Body, &body); err != nil {
+		writeJSONWorkflowError(w, err)
+		return
+	}
+	if strings.TrimSpace(body.RequestID) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("request_id is required"))
+		return
+	}
+	view, changed, err := s.workflows.ExtendLoop(r.PathValue("execution_id"), r.PathValue("loop_name"), workflow.ExtendRequest{
+		RequestID:     body.RequestID,
+		AddIterations: body.AddIterations,
+	})
+	if err != nil {
+		writeJSONWorkflowError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if changed {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, view)
+}
+
+func (s *Server) handleWorkflowLoopStop(w http.ResponseWriter, r *http.Request) {
+	if s.workflows == nil {
+		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
+		return
+	}
+	var body workflowLoopStopRequest
+	if err := decodeStrictJSON(w, r.Body, &body); err != nil {
+		writeJSONWorkflowError(w, err)
+		return
+	}
+	if strings.TrimSpace(body.RequestID) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("request_id is required"))
+		return
+	}
+	view, changed, err := s.workflows.StopLoop(r.PathValue("execution_id"), r.PathValue("loop_name"), workflow.StopRequest{
+		RequestID: body.RequestID,
+	})
+	if err != nil {
+		writeJSONWorkflowError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if changed {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, view)
+}
+
 func (s *Server) controlWorkflow(w http.ResponseWriter, call func() (domain.WorkflowExecutionView, error)) {
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
@@ -237,6 +296,15 @@ type workflowRetryRequest struct {
 type workflowVerdictOverrideRequest struct {
 	RequestID string `json:"request_id"`
 	Verdict   string `json:"verdict"`
+}
+
+type workflowLoopExtendRequest struct {
+	RequestID     string `json:"request_id"`
+	AddIterations int    `json:"add_iterations"`
+}
+
+type workflowLoopStopRequest struct {
+	RequestID string `json:"request_id"`
 }
 
 func decodeStrictJSON(w http.ResponseWriter, body io.Reader, target any) error {
@@ -292,7 +360,8 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err)
 	case errors.Is(err, workflow.ErrExecutionNotFound),
 		errors.Is(err, workflow.ErrTaskNotFound),
-		errors.Is(err, workflow.ErrAttemptNotFound):
+		errors.Is(err, workflow.ErrAttemptNotFound),
+		errors.Is(err, workflow.ErrLoopNotFound):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, workflow.ErrInvalidRequest),
 		errors.Is(err, workflow.ErrNoDefinition):
@@ -302,6 +371,7 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 		errors.Is(err, workflow.ErrInvalidTransition),
 		errors.Is(err, workflow.ErrRetryConflict),
 		errors.Is(err, workflow.ErrVerdictConflict),
+		errors.Is(err, workflow.ErrLoopControlConflict),
 		errors.Is(err, workflow.ErrUncertaintyUnresolved),
 		errors.Is(err, workflow.ErrWorkerActive):
 		writeError(w, http.StatusConflict, err)

@@ -129,10 +129,12 @@ judge:
 
 The API key lives in a one-line file containing the bare token (no `Bearer` prefix, no quoting). The default location is in the user's home directory — outside the workspace — so credentials never land in a git repository. Startup requires the key file only when the configured workflow declares verdict tasks or a `judge:` section is present; otherwise the server starts and operates with no judge dependency.
 
-Workflow-level settings: `confidence_threshold` (default `0.8`) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `hold`):
+Workflow-level settings: `confidence_threshold` (default `0.8`) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `needs_attention`):
 
-- `hold`: below-threshold confidence keeps the attempt in the `judging` state and moves the execution to `needs_attention`, exposing the full distribution (`uncertain_verdict:<task>:<n>` attention reason). Resolve it with a manual override or `resume` (which re-runs classification).
+- `needs_attention`: below-threshold confidence keeps the attempt in the `judging` state and moves the execution to `needs_attention`, exposing the full distribution (`uncertain_verdict:<task>:<n>` attention reason). Resolve it with a manual override or `resume` (which re-runs classification).
 - `error`: below-threshold confidence fails the attempt with reason `uncertain_verdict`; existing failure policy and retries apply.
+
+The former `hold` spelling of the waiting policy is no longer accepted: new YAML using `on_uncertain: hold` is rejected with guidance to use `needs_attention`, and a saved execution carrying `hold` fails to load with an actionable unsupported-policy error (no alias, fallback, or automatic migration).
 
 Judge unavailability (transport errors after retries, call timeout) never fails the task: the execution holds in `needs_attention` with a `judge_unavailable` reason, and `resume` re-classifies the held attempt. Recovery treats mid-judging attempts the same way — their backend work is already committed, so a restart re-runs only the classification, never the agent.
 
@@ -143,7 +145,7 @@ curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/tasks/review_a/attemp
   -H 'Content-Type: application/json' -d '{"request_id":"verdict-1","verdict":"review_passed"}'
 ```
 
-The verdict must be one the task declares (`400` otherwise), the attempt must still be judging (`409` otherwise), and the request is idempotent per `request_id` — replaying the same verdict returns the recorded result, a different verdict for the same ID returns `409`. The attempt settles as succeeded with the verdict recorded as manually sourced.
+The verdict must be one the task declares (`400` otherwise), and the request is idempotent per `request_id` — replaying the same verdict returns the recorded result, a different verdict for the same ID returns `409`. A judging attempt settles as succeeded with the verdict recorded as manually sourced. A *settled* attempt is also overridable when its verdict is load-bearing on a live loop hold (a condition task whose `needs_attention` action currently holds its loop): the override rewrites that verdict manually, the attempt stays settled, and the next reconcile re-derives the condition — clearing the hold and following the replacement action. Attempts from an iteration the loop has already advanced past remain immutable (`409`).
 
 ### Backend Notes
 
@@ -358,7 +360,7 @@ Fields and defaults:
 - `task_timeout_seconds` defaults to `1800`; a task may override it with a positive `timeout_seconds`. The timeout counts wall time from dispatch, including permission and subagent waits, and `0` does not disable it.
 - Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
 - An agent definition may set `ephemeral: true` to declare a one-shot lifecycle: every invocation starts from a clean context. See [Configuration](#configuration); note the flag does not allow referencing one agent from multiple tasks in this version.
-- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.8`) and `on_uncertain` (`hold` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
+- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.8`) and `on_uncertain` (`needs_attention` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
 - The workflow may declare a `loops` map of bounded loops and label tasks with `loop:`; see [Bounded Loops](#bounded-loops).
 
 Start, observe, and control an execution:
@@ -437,7 +439,7 @@ workflow:
 
 Semantics and limits of this stage:
 
-- The body runs exactly `max_iterations` times — there is no condition-based exit and no nesting yet, and loops cannot share tasks or depend across loop boundaries (validation rejects all of these; sibling loops and outside consumers are supported).
+- A static loop (no condition fields) runs its body exactly `max_iterations` times; a conditioned loop may exit early through its condition (see [Loop Conditions](#loop-conditions)). Nesting is not supported yet, and loops cannot share tasks or depend across loop boundaries (validation rejects all of these; sibling loops and outside consumers are supported).
 - Automatic work is bounded by construction: one dispatch per body task per iteration (body tasks × `max_iterations` initial attempts). Failures never trigger automatic retries. Explicit user/coordinator retries are excluded from that bound — there is no retry-count or elapsed-time guarantee, only the descendant guards below.
 - An iteration advances when every body task has a settled current-iteration attempt that is acceptable under the ordinary dependency rules: `allowed_to_fail` and `min_successful_dependencies` compose per iteration exactly as in a flat graph, so tolerated failures don't block advance but re-run in the next iteration.
 - Handoff is iteration-scoped: `needs` inside the loop resolve to the dependency's current-iteration committed attempt; dependencies from outside the loop resolve once the loop is done and consume only the final iteration. Prior iterations are immutable inputs — completed iterations are never re-executed.
@@ -448,7 +450,49 @@ Semantics and limits of this stage:
 - Resume is independent of retry/cancel and never dispatches loop work by itself: it revalidates restored artifacts and re-attempts held judge classifications (a completed resume can still return `200` with `needs_attention` while unresolved causes remain). Iteration counters survive restart; the advance is committed before any next-iteration backend work, so recovery never repeats, skips, or double-dispatches an iteration.
 - Loop executions raise the snapshot schema to version 2; compatibility is upgrade-only (schema 1 loads as loopless, unknown versions fail closed) and downgrade support is out of scope.
 
-See [examples/workflow-chain.yaml](examples/workflow-chain.yaml), [examples/workflow-review.yaml](examples/workflow-review.yaml), and [examples/workflow-loop.yaml](examples/workflow-loop.yaml) for runnable fake-backend graphs.
+### Loop Conditions
+
+A loop may decide its continuation from a verdict instead of running a fixed budget. Three optional fields turn a static loop into a conditioned one (a loop with none of them stays fully static):
+
+```yaml
+workflow:
+  version: 1
+  name: review-until-clean
+  loops:
+    polish:
+      max_iterations: 3
+      until_task: review            # the loop's single condition task
+      on_verdict:                   # total map, one entry per declared verdict
+        review_passed: break        # complete now at this iteration
+        issues_found: continue      # re-arm, or hit the budget cap
+        needs_human: needs_attention  # hold for intervention
+      on_exhaustion: needs_attention  # or `succeed`; requires the pair above
+  tasks:
+    implement:
+      agent: implementer
+      loop: polish
+      prompt: "Implement, then address the previous iteration's review."
+    review:
+      agent: reviewer
+      loop: polish
+      needs: [implement]
+      verdicts:                       # until_task must declare verdicts
+        review_passed: "No blocking defects remain."
+        issues_found: "Concrete defects to fix."
+        needs_human: "A decision only a human can make."
+      prompt: "Review this iteration; pick exactly one verdict."
+```
+
+- `until_task` names the loop's condition task. It must be a body member, must declare `verdicts`, must be mandatory (`allowed_to_fail` omitted or `false`; other body tasks may stay optional reviewers), and must be the **unique body sink** — every other body task reaches it through same-loop `needs` edges (a singleton body qualifies). `on_verdict` must map each declared verdict exactly once, to `break`, `continue`, or `needs_attention`; missing keys, unknown verdict names, and bad actions are rejected with a corrective example. `until_task` and `on_verdict` pair up, and an explicit `on_exhaustion` requires that pair (a static loop that sets only `on_exhaustion` is rejected rather than ignored).
+- **Evaluation point:** the condition is read only after the whole iteration settles acceptably, and it reads `until_task`'s latest committed current-iteration verdict. Loop failure/blocking holds, an interrupted attempt, a held/judging classification, and `on_uncertain: error` all take precedence and prevent evaluation — a failed condition attempt holds for retry and never supplies a continuation decision, and a synthetic `uncertain` value is never looked up in `on_verdict`.
+- **Actions:** `break` completes the loop at the current iteration and releases outside consumers with that iteration's results; `continue` re-arms the next iteration, or at the effective cap triggers the exhaustion policy; `needs_attention` holds at the current iteration with a `loop_attention:<loop>:<iter>:<task>:<verdict>` reason offering override, stop, or cancel. A `needs_attention` action keeps priority even at the cap.
+- **Exhaustion** (`continue` at the effective cap): `needs_attention` (default) holds with a `loop_exhausted:<loop>:<iter>` reason offering extend, stop, or cancel; `succeed` completes the loop like a `break`, preserving the recorded verdict and ordinary tolerated-failure accounting (it never forces workflow success or finalizes failure on its own).
+- **Verdict names carry no built-in scheduling meaning.** `blocked`, `needs_input`, and any other declared name are ordinary verdicts; to wait for a human on a condition task, map its verdict to `needs_attention` explicitly. Non-condition tasks' verdicts stay observational and never hold execution by name, and a task without `verdicts` is never classified (free-form "please help" text creates no structured outcome). No automatic answer injection or successful-attempt rerun is provided ("answer and continue" is deferred).
+- **Extend control:** `POST /workflows/{id}/loops/{name}/extend` with a positive `add_iterations` durably raises the loop's effective cap (`max_iterations` + granted extensions) — a manual, audited, idempotent action. The system itself never loops unboundedly. Identical requests replay without a second increase even after completion or restart; reusing a request ID for another loop or amount returns `409`; new requests against a done loop or a terminal/cancelling execution return `409`. Extending an exhausted loop clears its `loop_exhausted` cause on the next reconcile.
+- **Stop control:** `POST /workflows/{id}/loops/{name}/stop` durably requests a manual break after the current iteration. Remaining body work finishes under normal dependency and pause rules, no next iteration begins, and outside consumers wait for acceptable settlement. Stop resolves a condition-action or exhaustion hold locally even while another loop is held, but it never cancels workers, unpauses, or waives failures, interruptions, or unresolved classification. Intent survives restart and same-iteration retries; `stop_requested` is exposed in loop views.
+- **Views:** a conditioned loop view carries `until_task`, `effective_max_iterations` (declared plus extensions), the latest settled `last_condition_verdict`, and `stop_requested` when pending; static-loop views are unchanged. There is no automatic downgrade: an older binary must not be relied on to preserve condition semantics, extensions, or pending stop intent.
+
+See [examples/workflow-chain.yaml](examples/workflow-chain.yaml), [examples/workflow-review.yaml](examples/workflow-review.yaml), [examples/workflow-loop.yaml](examples/workflow-loop.yaml), and [examples/workflow-loop-conditions.yaml](examples/workflow-loop-conditions.yaml) for runnable fake-backend graphs.
 
 ## Artifacts
 

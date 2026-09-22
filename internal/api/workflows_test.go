@@ -47,6 +47,16 @@ type scriptedWorkflows struct {
 	overrideView    domain.WorkflowExecutionView
 	overrideCreated bool
 	overrideErr     error
+
+	extendView    domain.WorkflowExecutionView
+	extendCreated bool
+	extendErr     error
+	extendCalls   []workflow.ExtendRequest
+
+	stopView    domain.WorkflowExecutionView
+	stopCreated bool
+	stopErr     error
+	stopCalls   []workflow.StopRequest
 }
 
 func (s *scriptedWorkflows) Create(requestID string) (domain.WorkflowExecutionView, bool, error) {
@@ -113,6 +123,22 @@ func (s *scriptedWorkflows) OverrideVerdict(executionID, taskID string, attempt 
 		return domain.WorkflowExecutionView{}, false, s.overrideErr
 	}
 	return s.overrideView, s.overrideCreated, nil
+}
+
+func (s *scriptedWorkflows) ExtendLoop(executionID, loopName string, req workflow.ExtendRequest) (domain.WorkflowExecutionView, bool, error) {
+	s.extendCalls = append(s.extendCalls, req)
+	if s.extendErr != nil {
+		return domain.WorkflowExecutionView{}, false, s.extendErr
+	}
+	return s.extendView, s.extendCreated, nil
+}
+
+func (s *scriptedWorkflows) StopLoop(executionID, loopName string, req workflow.StopRequest) (domain.WorkflowExecutionView, bool, error) {
+	s.stopCalls = append(s.stopCalls, req)
+	if s.stopErr != nil {
+		return domain.WorkflowExecutionView{}, false, s.stopErr
+	}
+	return s.stopView, s.stopCreated, nil
 }
 
 func newWorkflowTestServer(t *testing.T, wf WorkflowManager) *Server {
@@ -500,4 +526,97 @@ func TestWorkflowVerdictOverrideRoute(t *testing.T) {
 
 func fmtInvalidRequest(message string) error {
 	return fmt.Errorf("%w: %s", workflow.ErrInvalidRequest, message)
+}
+
+func TestWorkflowLoopExtendRoute(t *testing.T) {
+	wf := &scriptedWorkflows{
+		extendView:    domain.WorkflowExecutionView{ExecutionID: "wf_000001", State: domain.WorkflowRunning},
+		extendCreated: true,
+	}
+	srv := newWorkflowTestServer(t, wf)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/extend", strings.NewReader(`{"request_id":"ext-1","add_iterations":2}`)))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("extend status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if len(wf.extendCalls) != 1 {
+		t.Fatalf("extend calls: %+v", wf.extendCalls)
+	}
+	if call := wf.extendCalls[0]; call.RequestID != "ext-1" || call.AddIterations != 2 {
+		t.Fatalf("extend payload: %+v", call)
+	}
+
+	wf.extendCreated = false
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/extend", strings.NewReader(`{"request_id":"ext-1","add_iterations":2}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("replay status = %d", rr.Code)
+	}
+
+	wf.extendErr = workflow.ErrLoopNotFound
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/ghost/extend", strings.NewReader(`{"request_id":"ext-2","add_iterations":1}`)))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown loop status = %d", rr.Code)
+	}
+
+	wf.extendErr = workflow.ErrLoopControlConflict
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/extend", strings.NewReader(`{"request_id":"ext-3","add_iterations":1}`)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("conflict status = %d", rr.Code)
+	}
+
+	wf.extendErr = nil
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/extend", strings.NewReader(`{"add_iterations":1}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing request id status = %d", rr.Code)
+	}
+}
+
+func TestWorkflowLoopStopRoute(t *testing.T) {
+	wf := &scriptedWorkflows{
+		stopView:    domain.WorkflowExecutionView{ExecutionID: "wf_000001", State: domain.WorkflowRunning},
+		stopCreated: true,
+	}
+	srv := newWorkflowTestServer(t, wf)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/stop", strings.NewReader(`{"request_id":"stop-1"}`)))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("stop status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if len(wf.stopCalls) != 1 || wf.stopCalls[0].RequestID != "stop-1" {
+		t.Fatalf("stop calls: %+v", wf.stopCalls)
+	}
+
+	wf.stopCreated = false
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/stop", strings.NewReader(`{"request_id":"stop-1"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("replay status = %d", rr.Code)
+	}
+
+	wf.stopErr = workflow.ErrLoopNotFound
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/ghost/stop", strings.NewReader(`{"request_id":"stop-2"}`)))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown loop status = %d", rr.Code)
+	}
+
+	wf.stopErr = workflow.ErrLoopControlConflict
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/stop", strings.NewReader(`{"request_id":"stop-3"}`)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("conflict status = %d", rr.Code)
+	}
+
+	wf.stopErr = nil
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/loops/refine/stop", strings.NewReader(`{}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing request id status = %d", rr.Code)
+	}
 }

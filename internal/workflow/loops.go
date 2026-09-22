@@ -77,11 +77,37 @@ func lastCommittedAttemptInIteration(task *domain.WorkflowTaskExecution, iterati
 	return nil
 }
 
-// loopHoldReasons derives the durable failure/blocking attention reasons of
-// every unfinished loop from the current-iteration task states and updates
-// each loop's observable state (running versus needs_attention). Reasons name
-// the loop, iteration, and offending task, and point at retry-or-cancel
-// intervention. Done loops never hold.
+// conditionVerdict returns the verdict value recorded on the loop's condition
+// task (until_task) latest committed attempt in the loop's current iteration.
+// ok is false when the loop has no condition, the condition task has no
+// committed current-iteration attempt, or that attempt carries no verdict.
+func conditionVerdict(snapshot *domain.WorkflowSnapshot, loopName string) (string, bool) {
+	loopDef := snapshot.Definition.Loops[loopName]
+	if loopDef.UntilTask == "" {
+		return "", false
+	}
+	loop := snapshot.Loops[loopName]
+	if loop == nil {
+		return "", false
+	}
+	task := snapshot.Tasks[loopDef.UntilTask]
+	if task == nil {
+		return "", false
+	}
+	attempt := lastCommittedAttemptInIteration(task, loop.Iteration)
+	if attempt == nil || attempt.Verdict == nil {
+		return "", false
+	}
+	return attempt.Verdict.Value, true
+}
+
+// loopHoldReasons derives the durable attention reasons of every unfinished
+// loop from persisted state: failure/blocking holds first, then — for a
+// conditioned loop whose current iteration has settled acceptably — the
+// condition-action and exhaustion holds. It also updates each loop's observed
+// state (running versus needs_attention). Because every reason is recomputed
+// from the counter, cap, and settled verdicts, recovery re-derives holds with
+// no extra persistence. Done loops never hold.
 func loopHoldReasons(snapshot *domain.WorkflowSnapshot) []string {
 	var reasons []string
 	def := snapshot.Definition
@@ -107,6 +133,14 @@ func loopHoldReasons(snapshot *domain.WorkflowSnapshot) []string {
 				held = true
 			}
 		}
+		// Failure/blocking holds take precedence and prevent condition
+		// evaluation: a half-settled or failed iteration never steers the loop.
+		if !held && def.Loops[loopName].HasCondition() && iterationSettledAcceptably(snapshot, loopName) {
+			if reason, hold := conditionHoldReason(snapshot, loopName); hold {
+				reasons = append(reasons, reason)
+				held = true
+			}
+		}
 		if held {
 			loop.State = domain.WorkflowLoopNeedsAttention
 		} else {
@@ -114,6 +148,66 @@ func loopHoldReasons(snapshot *domain.WorkflowSnapshot) []string {
 		}
 	}
 	return reasons
+}
+
+// conditionHoldReason decides whether a settled acceptably conditioned loop
+// holds for intervention. A needs_attention action always holds; a continue
+// action holds only at the effective cap under the default needs_attention
+// exhaustion policy (succeed completes without holding). break and below-cap
+// continue produce no hold so the advance pass can act on them.
+func conditionHoldReason(snapshot *domain.WorkflowSnapshot, loopName string) (string, bool) {
+	loop := snapshot.Loops[loopName]
+	loopDef := snapshot.Definition.Loops[loopName]
+	verdict, ok := conditionVerdict(snapshot, loopName)
+	if !ok {
+		return "", false
+	}
+	switch loopDef.OnVerdict[verdict] {
+	case domain.WorkflowLoopActionNeedsAttention:
+		return fmt.Sprintf("loop_attention:%s:%d:%s:%s:override_or_stop_or_cancel", loopName, loop.Iteration, loopDef.UntilTask, verdict), true
+	case domain.WorkflowLoopActionContinue:
+		if loop.Iteration >= loop.EffectiveCap(loopDef.MaxIterations) && loopDef.EffectiveOnExhaustion() != domain.WorkflowExhaustionSucceed {
+			return fmt.Sprintf("loop_exhausted:%s:%d:extend_or_stop_or_cancel", loopName, loop.Iteration), true
+		}
+	}
+	return "", false
+}
+
+// isLoadBearingConditionVerdict reports whether the given settled attempt is
+// the verdict currently holding a conditioned loop through a needs_attention
+// action: taskID is that loop's until_task, the attempt belongs to the loop's
+// current iteration, the iteration has settled acceptably, and the attempt's
+// recorded verdict maps to needs_attention and is the value the loop is
+// actually holding on. This is the narrow target the manual override may
+// rewrite; prior-iteration and ordinary settled verdicts never qualify.
+func isLoadBearingConditionVerdict(snapshot *domain.WorkflowSnapshot, taskID string, attempt *domain.WorkflowAttempt) bool {
+	if attempt.State != domain.WorkflowAttemptSucceeded || attempt.Verdict == nil {
+		return false
+	}
+	for _, loopName := range sortedLoopNames(snapshot.Definition.Loops) {
+		loopDef := snapshot.Definition.Loops[loopName]
+		if !loopDef.HasCondition() || loopDef.UntilTask != taskID {
+			continue
+		}
+		if loopDef.OnVerdict[attempt.Verdict.Value] != domain.WorkflowLoopActionNeedsAttention {
+			continue
+		}
+		loop := snapshot.Loops[loopName]
+		if loop == nil || loop.State == domain.WorkflowLoopDone {
+			continue
+		}
+		// History immutability: only the loop's current iteration is live.
+		if attempt.Iteration != loop.Iteration {
+			continue
+		}
+		if !iterationSettledAcceptably(snapshot, loopName) {
+			continue
+		}
+		if current, ok := conditionVerdict(snapshot, loopName); ok && current == attempt.Verdict.Value {
+			return true
+		}
+	}
+	return false
 }
 
 // iterationSettledAcceptably reports whether every body task of the loop has
@@ -142,10 +236,42 @@ func iterationSettledAcceptably(snapshot *domain.WorkflowSnapshot, loopName stri
 	return true
 }
 
+// resolveStopsLocked resolves pending manual-stop intents whose loop's current
+// iteration has settled acceptably, marking those loops done at that iteration
+// so their condition-action and exhaustion holds clear. It is a local control
+// resolution: it never dispatches work, never advances another loop, and never
+// waives unfinished classification, failure, or interruption — those keep the
+// iteration unsettled so the stop stays pending. Callers run it before the
+// execution-state refresh so a stop can release its own cause even while other
+// loops remain held. Returns whether any loop state changed.
+func resolveStopsLocked(snapshot *domain.WorkflowSnapshot) bool {
+	changed := false
+	def := snapshot.Definition
+	for _, loopName := range sortedLoopNames(def.Loops) {
+		loop := snapshot.Loops[loopName]
+		if loop == nil || loop.State == domain.WorkflowLoopDone || !loop.StopRequested {
+			continue
+		}
+		if !iterationSettledAcceptably(snapshot, loopName) {
+			continue
+		}
+		loop.State = domain.WorkflowLoopDone
+		changed = true
+	}
+	return changed
+}
+
 // advanceLoopsLocked re-arms loops whose current iteration settled
 // acceptably and completes loops at their final iteration. Callers run it
 // only while the execution is attention-free and in running mode; each loop
-// moves at most one iteration per pass.
+// moves at most one iteration per pass. A static loop runs its effective
+// budget (declared max_iterations plus any accepted extension) unchanged. A
+// conditioned loop acts on until_task's settled verdict:
+// break completes at the current iteration, continue re-arms below the
+// effective cap, and a continue at the cap under the succeed exhaustion policy
+// completes like a break. needs_attention actions and needs_attention
+// exhaustion are derived as holds in loopHoldReasons, which keeps the gate
+// closed, so they never reach this pass.
 func (m *Manager) advanceLoopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 	advanced := false
 	def := snapshot.Definition
@@ -157,12 +283,36 @@ func (m *Manager) advanceLoopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 		if !iterationSettledAcceptably(snapshot, loopName) {
 			continue
 		}
-		if loop.Iteration < def.Loops[loopName].MaxIterations {
-			loop.Iteration++
-		} else {
-			loop.State = domain.WorkflowLoopDone
+		loopDef := def.Loops[loopName]
+		if !loopDef.HasCondition() {
+			// A static loop runs its declared budget plus any accepted manual
+			// extension: the effective cap, not the original max_iterations,
+			// gates the last iteration.
+			if loop.Iteration < loop.EffectiveCap(loopDef.MaxIterations) {
+				loop.Iteration++
+			} else {
+				loop.State = domain.WorkflowLoopDone
+			}
+			advanced = true
+			continue
 		}
-		advanced = true
+		verdict, ok := conditionVerdict(snapshot, loopName)
+		if !ok {
+			continue
+		}
+		switch loopDef.OnVerdict[verdict] {
+		case domain.WorkflowLoopActionBreak:
+			loop.State = domain.WorkflowLoopDone
+			advanced = true
+		case domain.WorkflowLoopActionContinue:
+			if loop.Iteration < loop.EffectiveCap(loopDef.MaxIterations) {
+				loop.Iteration++
+				advanced = true
+			} else if loopDef.EffectiveOnExhaustion() == domain.WorkflowExhaustionSucceed {
+				loop.State = domain.WorkflowLoopDone
+				advanced = true
+			}
+		}
 	}
 	return advanced
 }

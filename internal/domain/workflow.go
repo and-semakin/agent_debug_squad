@@ -23,10 +23,27 @@ const (
 	ReservedVerdictName = "uncertain"
 )
 
-// Uncertainty policies for verdict resolution.
+// Uncertainty policies for verdict resolution. The waiting policy is named
+// after the execution state it produces; the former "hold" spelling is no
+// longer accepted, with no alias or automatic migration.
 const (
-	WorkflowOnUncertainHold  = "hold"
-	WorkflowOnUncertainError = "error"
+	WorkflowOnUncertainNeedsAttention = "needs_attention"
+	WorkflowOnUncertainError          = "error"
+)
+
+// Loop condition actions: the mapped meaning of a condition verdict at an
+// acceptable iteration settlement.
+const (
+	WorkflowLoopActionBreak          = "break"
+	WorkflowLoopActionContinue       = "continue"
+	WorkflowLoopActionNeedsAttention = "needs_attention"
+)
+
+// Loop exhaustion policies: what happens when the condition maps to continue
+// at the effective iteration cap. needs_attention is the default.
+const (
+	WorkflowExhaustionNeedsAttention = "needs_attention"
+	WorkflowExhaustionSucceed        = "succeed"
 )
 
 type WorkflowState string
@@ -137,7 +154,7 @@ type WorkflowDefinition struct {
 	// to DefaultConfidenceThreshold at use.
 	ConfidenceThreshold float64 `json:"confidence_threshold,omitempty" yaml:"-"`
 	// OnUncertain selects the below-threshold policy: "" (unset, hashing as
-	// absent) resolves to WorkflowOnUncertainHold at use.
+	// absent) resolves to WorkflowOnUncertainNeedsAttention at use.
 	OnUncertain string `json:"on_uncertain,omitempty" yaml:"-"`
 }
 
@@ -152,7 +169,7 @@ func (d WorkflowDefinition) EffectiveOnUncertain() string {
 	if d.OnUncertain != "" {
 		return d.OnUncertain
 	}
-	return WorkflowOnUncertainHold
+	return WorkflowOnUncertainNeedsAttention
 }
 
 type WorkflowTaskDefinition struct {
@@ -173,10 +190,34 @@ type WorkflowTaskDefinition struct {
 	Verdicts map[string]string `json:"verdicts,omitempty" yaml:"-"`
 }
 
-// WorkflowLoopDefinition is a bounded static loop. Exactly MaxIterations is
-// required and must be positive; the loop runs its body that many times.
+// WorkflowLoopDefinition is a bounded loop: exactly MaxIterations is required
+// and must be positive. Condition fields are optional; a loop with none of
+// them stays fully static. When present, UntilTask names the loop's single
+// condition task (the unique body sink), OnVerdict maps each of its declared
+// verdicts to a continuation action, and OnExhaustion selects the policy for a
+// continue action at the effective cap. Unset condition fields must marshal
+// byte-identically to definitions parsed before conditions existed.
 type WorkflowLoopDefinition struct {
-	MaxIterations int `json:"max_iterations" yaml:"max_iterations"`
+	MaxIterations int               `json:"max_iterations" yaml:"max_iterations"`
+	UntilTask     string            `json:"until_task,omitempty" yaml:"until_task,omitempty"`
+	OnVerdict     map[string]string `json:"on_verdict,omitempty" yaml:"on_verdict,omitempty"`
+	OnExhaustion  string            `json:"on_exhaustion,omitempty" yaml:"on_exhaustion,omitempty"`
+}
+
+// HasCondition reports whether the loop declares a condition. A loop is
+// conditioned only when it names an until_task and a complete on_verdict map;
+// validation enforces the pairing, so UntilTask alone is the reliable signal.
+func (d WorkflowLoopDefinition) HasCondition() bool {
+	return d.UntilTask != ""
+}
+
+// EffectiveOnExhaustion resolves the unset exhaustion policy to the default
+// needs_attention hold.
+func (d WorkflowLoopDefinition) EffectiveOnExhaustion() string {
+	if d.OnExhaustion != "" {
+		return d.OnExhaustion
+	}
+	return WorkflowExhaustionNeedsAttention
 }
 
 func (d WorkflowTaskDefinition) EffectiveTimeoutSeconds(fallback int) int {
@@ -228,10 +269,25 @@ func (t *WorkflowTaskExecution) LastAttempt() *WorkflowAttempt {
 }
 
 // WorkflowLoopExecution is the durable runtime state of one loop: its current
-// 1-based iteration and observed lifecycle state.
+// 1-based iteration, observed lifecycle state, extensions granted through the
+// explicit extend control, and a pending manual-stop intent. The extension
+// counter and stop flag are additive (omitempty) so pre-condition snapshots
+// and static loops persist byte-identically.
 type WorkflowLoopExecution struct {
 	Iteration int               `json:"iteration"`
 	State     WorkflowLoopState `json:"state"`
+	// ExtendedIterations is the cumulative count granted by extend controls;
+	// the effective cap is the declared max plus this value.
+	ExtendedIterations int `json:"extended_iterations,omitempty"`
+	// StopRequested records a durable manual-break intent: the loop finishes
+	// its current iteration and never starts another.
+	StopRequested bool `json:"stop_requested,omitempty"`
+}
+
+// EffectiveCap returns the loop's iteration ceiling: the declared maximum plus
+// extensions granted through the explicit extend control.
+func (e *WorkflowLoopExecution) EffectiveCap(declaredMax int) int {
+	return declaredMax + e.ExtendedIterations
 }
 
 // AttemptVerdict records the resolved classification of one attempt, plus
@@ -287,6 +343,10 @@ type WorkflowControlEvent struct {
 	Attempt                int       `json:"attempt,omitempty"`
 	Detail                 string    `json:"detail,omitempty"`
 	ConfirmPreviousStopped bool      `json:"confirm_previous_stopped,omitempty"`
+	// Loop names the target loop for loop control events (extend/stop); it is
+	// omitted for task-level and lifecycle events so their serialization is
+	// unchanged.
+	Loop string `json:"loop,omitempty"`
 }
 
 // WorkflowInputManifest describes every direct dependency of one attempt in
@@ -393,12 +453,24 @@ type WorkflowPendingPermission struct {
 	Request PermissionRequest `json:"request"`
 }
 
-// WorkflowLoopView exposes the observable state of one bounded loop.
+// WorkflowLoopView exposes the observable state of one bounded loop. Condition
+// fields are populated only for conditioned or extended loops so static-loop
+// views remain byte-identical to pre-condition releases.
 type WorkflowLoopView struct {
 	Name          string            `json:"name"`
 	Iteration     int               `json:"iteration"`
 	MaxIterations int               `json:"max_iterations"`
 	State         WorkflowLoopState `json:"state"`
+	// UntilTask names the loop's condition task; omitted for static loops.
+	UntilTask string `json:"until_task,omitempty"`
+	// EffectiveMaxIterations is the declared maximum plus granted extensions;
+	// omitted when equal to MaxIterations on a static loop.
+	EffectiveMaxIterations int `json:"effective_max_iterations,omitempty"`
+	// LastConditionVerdict is the latest settled current-iteration verdict of
+	// the condition task; omitted when none has settled yet.
+	LastConditionVerdict string `json:"last_condition_verdict,omitempty"`
+	// StopRequested exposes a pending manual-stop intent; omitted when false.
+	StopRequested bool `json:"stop_requested,omitempty"`
 }
 
 type WorkflowExecutionView struct {
