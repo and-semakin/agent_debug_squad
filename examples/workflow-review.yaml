@@ -29,6 +29,14 @@ workflow:
       agent: reviewer_a
       prompt: "Review the requested diff; report evidence and severity."
       allowed_to_fail: true
+      # Machine-readable outcome classification: after this task's response
+      # is saved, the judge model classifies it into exactly one of the
+      # declared verdicts (visible in the execution view). Verdicts are
+      # recorded metadata in this version; scheduling is unchanged.
+      verdicts:
+        review_passed: "No further iteration is needed"
+        issues_found: "Problems remain that require another iteration"
+        error: "The agent failed to complete its task"
     review_b:
       agent: reviewer_b
       prompt: "Review the requested diff; report evidence and severity."

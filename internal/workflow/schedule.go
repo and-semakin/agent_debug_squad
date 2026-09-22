@@ -79,7 +79,10 @@ func (m *Manager) applyCancellingLocked(snapshot *domain.WorkflowSnapshot) bool 
 		}
 		for i := range task.Attempts {
 			attempt := &task.Attempts[i]
-			if attempt.State == domain.WorkflowAttemptQueued {
+			switch attempt.State {
+			case domain.WorkflowAttemptQueued, domain.WorkflowAttemptJudging:
+				// Judging attempts have no live worker; a late
+				// classification result is dropped by the state guard.
 				attempt.State = domain.WorkflowAttemptCancelled
 				attempt.Reason = "cancelled"
 				completed := now
@@ -165,11 +168,12 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 		}
 		if last := task.LastAttempt(); last != nil {
 			switch last.State {
-			case domain.WorkflowAttemptRunning, domain.WorkflowAttemptDispatching, domain.WorkflowAttemptCancelling:
+			case domain.WorkflowAttemptRunning, domain.WorkflowAttemptDispatching, domain.WorkflowAttemptCancelling, domain.WorkflowAttemptJudging:
 				task.State = map[domain.WorkflowAttemptState]domain.WorkflowTaskState{
 					domain.WorkflowAttemptRunning:     domain.WorkflowTaskRunning,
 					domain.WorkflowAttemptDispatching: domain.WorkflowTaskDispatching,
 					domain.WorkflowAttemptCancelling:  domain.WorkflowTaskRunning,
+					domain.WorkflowAttemptJudging:     domain.WorkflowTaskRunning,
 				}[last.State]
 				continue
 			case domain.WorkflowAttemptSucceeded:
@@ -439,9 +443,16 @@ func (m *Manager) setStorageErrorLocked(err error) {
 
 // handleCompletion commits one worker-stopped outcome into the snapshot. The
 // result file is written and verified before success is durably published.
+// Verdict-task completions enter the judging phase here; handleJudgement
+// commits their classification.
 func (m *Manager) handleCompletion(c completion) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if c.judgement != nil {
+		m.handleJudgement(c.judgement)
+		return
+	}
 
 	if m.active == nil {
 		return
@@ -494,10 +505,19 @@ func (m *Manager) handleCompletion(c completion) {
 			attempt.Error = err.Error()
 			break
 		}
-		attempt.State = domain.WorkflowAttemptSucceeded
 		attempt.ResultPath = path
 		attempt.ResultSize = size
 		attempt.ResultSHA256 = sha
+		if len(snapshot.Definition.Tasks[live.taskID].Verdicts) > 0 {
+			// The response is committed; classification settles the
+			// attempt. Dependents wait for that settlement because a
+			// judging attempt is not committed.
+			attempt.State = domain.WorkflowAttemptJudging
+			task := snapshot.Tasks[live.taskID]
+			m.dispatchJudgementLocked(snapshot, task, attempt)
+		} else {
+			attempt.State = domain.WorkflowAttemptSucceeded
+		}
 	case cancelRequested && c.outcome.Status != domain.RunCompleted:
 		attempt.State = domain.WorkflowAttemptCancelled
 		attempt.Reason = "cancelled"
@@ -578,6 +598,11 @@ func collectAttentionReasons(snapshot *domain.WorkflowSnapshot) []string {
 			switch {
 			case attempt.State == domain.WorkflowAttemptInterrupted && attempt.CleanupConfirmedAt == nil:
 				reasons = append(reasons, fmt.Sprintf("interrupted_attempt:%s:%d", task.TaskID, attempt.Attempt))
+			case attempt.State == domain.WorkflowAttemptJudging && attempt.Reason != "":
+				// A held classification: the judge was unavailable or its
+				// confidence fell below the threshold. The verdict record
+				// keeps the distribution for inspection.
+				reasons = append(reasons, fmt.Sprintf("%s:%s:%d", attempt.Reason, task.TaskID, attempt.Attempt))
 			}
 		}
 	}

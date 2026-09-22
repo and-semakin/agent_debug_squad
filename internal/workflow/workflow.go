@@ -15,6 +15,7 @@ import (
 
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/judge"
 )
 
 var (
@@ -29,6 +30,8 @@ var (
 	ErrUncertaintyUnresolved = errors.New("workflow has unresolved recovery or artifact uncertainty")
 	ErrWorkerActive          = errors.New("a known active worker cannot be overridden by a cleanup assertion")
 	ErrStorageDamaged        = errors.New("workflow storage error requires attention")
+	ErrAttemptNotFound       = errors.New("workflow attempt not found")
+	ErrVerdictConflict       = errors.New("verdict override conflicts with current attempt state")
 )
 
 // Store is the persistence surface the scheduler needs; *store.Store
@@ -40,6 +43,7 @@ type Store interface {
 	NextWorkflowExecutionID() (string, error)
 	WriteWorkflowAttemptInput(executionID, taskID string, attempt int, prompt, manifest []byte) (promptPath, manifestPath string, err error)
 	WriteWorkflowResponse(executionID, taskID string, attempt int, content []byte) (path string, size int64, sha256hex string, err error)
+	WriteWorkflowDecision(executionID, taskID string, attempt int, content []byte) (path string, err error)
 	ReadWorkflowArtifact(executionID, relativePath string) ([]byte, error)
 	VerifyWorkflowArtifact(executionID, relativePath string, size int64, sha256hex string) error
 	AppendWorkflowEvent(executionID string, event domain.WorkflowControlEvent) error
@@ -84,13 +88,35 @@ type execution struct {
 type completion struct {
 	runID   string
 	outcome domain.OwnedRunOutcome
+	// judgement, when set, marks this completion as a verdict
+	// classification result rather than a worker outcome.
+	judgement *judgement
+}
+
+// judgement carries one asynchronous judge result back into the serialized
+// commit path.
+type judgement struct {
+	runID     string
+	taskID    string
+	attempt   int
+	decision  judge.Decision
+	err       error
+	truncated bool
 }
 
 type Manager struct {
 	cfg   domain.SessionConfig
 	store Store
 	exec  Executor
-	now   func() time.Time
+	// judge classifies verdict tasks; nil means classification is
+	// unavailable and verdict attempts hold with judge_unavailable.
+	judge judge.Judge
+	// judging tracks run IDs with an in-flight classification, so recovery
+	// and resume never double-dispatch the same judge call.
+	judging map[string]bool
+	// judgeCtx bounds in-flight classifications; set in Start.
+	judgeCtx context.Context
+	now      func() time.Time
 
 	cancelGrace       time.Duration
 	reconcileInterval time.Duration
@@ -121,11 +147,23 @@ func NewManager(cfg domain.SessionConfig, st Store, exec Executor) *Manager {
 	}
 }
 
+// SetJudge wires the verdict judge. It must be called before Start; the
+// startup gating in the server wiring guarantees a judge whenever the
+// configured workflow declares verdicts.
+func (m *Manager) SetJudge(j judge.Judge) {
+	m.mu.Lock()
+	m.judge = j
+	m.mu.Unlock()
+}
+
 // Start recovers persisted executions and begins scheduling. It never
 // creates a new execution: submission is explicit.
 func (m *Manager) Start(ctx context.Context) error {
 	loopCtx, cancel := context.WithCancel(ctx)
 	m.stop = cancel
+	m.mu.Lock()
+	m.judgeCtx = loopCtx
+	m.mu.Unlock()
 
 	ids, err := m.store.ListWorkflowExecutions()
 	if err != nil {
@@ -209,6 +247,9 @@ func (m *Manager) recoverExecution(snapshot *domain.WorkflowSnapshot) error {
 	}
 	m.mu.Lock()
 	m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
+	// Attempts caught mid-judging have committed backend work; their
+	// side-effect-free classification simply re-runs.
+	m.redispatchJudgingLocked(snapshot)
 	m.mu.Unlock()
 	m.Notify()
 	return nil

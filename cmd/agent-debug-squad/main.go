@@ -16,6 +16,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/api"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/judge"
 	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 	"github.com/and-semakin/agent_debug_squad/internal/selfupdate"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
@@ -114,7 +115,12 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	judgeClient, err := judge.Setup(cfg.Judge, cfg.Workflow, homeDir())
+	if err != nil {
+		return err
+	}
 	workflows := workflow.NewManager(cfg, st, orch)
+	workflows.SetJudge(judgeClient)
 	if err := workflows.Start(ctx); err != nil {
 		return fmt.Errorf("recover workflows: %w", err)
 	}
@@ -229,4 +235,14 @@ func usage(out *os.File) {
 	fmt.Fprintln(out, "  agent-debug-squad serve --config squad.yaml [--no-auto-update]")
 	fmt.Fprintln(out, "  agent-debug-squad version")
 	fmt.Fprintln(out, "  agent-debug-squad update")
+}
+
+// homeDir resolves the user's home directory for the default judge key
+// location.
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }

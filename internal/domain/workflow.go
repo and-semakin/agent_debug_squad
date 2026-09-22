@@ -5,6 +5,18 @@ import "time"
 const (
 	WorkflowSchemaVersion         = 1
 	DefaultWorkflowTaskTimeoutSec = 1800
+	// DefaultConfidenceThreshold gates judge verdicts: the chosen verdict
+	// applies only when judge confidence meets it.
+	DefaultConfidenceThreshold = 0.8
+	// ReservedVerdictName is the synthetic outcome for a judge answer below
+	// the confidence threshold; declaring it is a validation error.
+	ReservedVerdictName = "uncertain"
+)
+
+// Uncertainty policies for verdict resolution.
+const (
+	WorkflowOnUncertainHold  = "hold"
+	WorkflowOnUncertainError = "error"
 )
 
 type WorkflowState string
@@ -69,6 +81,12 @@ const (
 	WorkflowAttemptQueued      WorkflowAttemptState = "queued"
 	WorkflowAttemptDispatching WorkflowAttemptState = "dispatching"
 	WorkflowAttemptRunning     WorkflowAttemptState = "running"
+	// WorkflowAttemptJudging is the post-response classification phase of a
+	// verdict task: the backend work is committed, the response artifact is
+	// saved, and the attempt settles only once its verdict is resolved. A
+	// held judging attempt carries a Reason of "uncertain_verdict" or
+	// "judge_unavailable".
+	WorkflowAttemptJudging     WorkflowAttemptState = "judging"
 	WorkflowAttemptCancelling  WorkflowAttemptState = "cancelling"
 	WorkflowAttemptSucceeded   WorkflowAttemptState = "succeeded"
 	WorkflowAttemptFailed      WorkflowAttemptState = "failed"
@@ -92,6 +110,27 @@ type WorkflowDefinition struct {
 	MaxParallel        int                               `json:"max_parallel" yaml:"max_parallel"`
 	TaskTimeoutSeconds int                               `json:"task_timeout_seconds" yaml:"task_timeout_seconds"`
 	Tasks              map[string]WorkflowTaskDefinition `json:"tasks" yaml:"tasks"`
+	// ConfidenceThreshold gates judge verdicts: 0 means unset, which hashes
+	// identically to definitions parsed before verdicts existed and resolves
+	// to DefaultConfidenceThreshold at use.
+	ConfidenceThreshold float64 `json:"confidence_threshold,omitempty" yaml:"-"`
+	// OnUncertain selects the below-threshold policy: "" (unset, hashing as
+	// absent) resolves to WorkflowOnUncertainHold at use.
+	OnUncertain string `json:"on_uncertain,omitempty" yaml:"-"`
+}
+
+func (d WorkflowDefinition) EffectiveConfidenceThreshold() float64 {
+	if d.ConfidenceThreshold > 0 {
+		return d.ConfidenceThreshold
+	}
+	return DefaultConfidenceThreshold
+}
+
+func (d WorkflowDefinition) EffectiveOnUncertain() string {
+	if d.OnUncertain != "" {
+		return d.OnUncertain
+	}
+	return WorkflowOnUncertainHold
 }
 
 type WorkflowTaskDefinition struct {
@@ -101,6 +140,11 @@ type WorkflowTaskDefinition struct {
 	AllowedToFail             bool     `json:"allowed_to_fail,omitempty" yaml:"allowed_to_fail,omitempty"`
 	MinSuccessfulDependencies int      `json:"min_successful_dependencies,omitempty" yaml:"min_successful_dependencies,omitempty"`
 	TimeoutSeconds            int      `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	// Verdicts declares the classification contract of this task's
+	// responses: verdict name to optional human description. A non-empty
+	// map routes completed attempts through the judging phase. Unset must
+	// marshal identically to tasks parsed before verdicts existed.
+	Verdicts map[string]string `json:"verdicts,omitempty" yaml:"-"`
 }
 
 func (d WorkflowTaskDefinition) EffectiveTimeoutSeconds(fallback int) int {
@@ -148,6 +192,21 @@ func (t *WorkflowTaskExecution) LastAttempt() *WorkflowAttempt {
 	return &t.Attempts[len(t.Attempts)-1]
 }
 
+// AttemptVerdict records the resolved classification of one attempt, plus
+// everything needed to audit the decision: the full probability
+// distribution, the model that served it, the threshold it was judged
+// against, and whether the judge saw a truncated response.
+type AttemptVerdict struct {
+	Value         string             `json:"value"`
+	Confidence    float64            `json:"confidence"`
+	Probabilities map[string]float64 `json:"probabilities,omitempty"`
+	Model         string             `json:"model,omitempty"`
+	Threshold     float64            `json:"threshold"`
+	Source        string             `json:"source"` // judge | manual
+	Truncated     bool               `json:"truncated,omitempty"`
+	JudgedAt      time.Time          `json:"judged_at"`
+}
+
 type WorkflowAttempt struct {
 	Attempt            int                  `json:"attempt"`
 	RunID              string               `json:"run_id"`
@@ -159,6 +218,7 @@ type WorkflowAttempt struct {
 	ResultPath         string               `json:"result_path,omitempty"`
 	ResultSize         int64                `json:"result_size,omitempty"`
 	ResultSHA256       string               `json:"result_sha256,omitempty"`
+	Verdict            *AttemptVerdict      `json:"verdict,omitempty"`
 	ReservedAt         *time.Time           `json:"reserved_at,omitempty"`
 	DispatchedAt       *time.Time           `json:"dispatched_at,omitempty"`
 	CompletedAt        *time.Time           `json:"completed_at,omitempty"`
@@ -179,6 +239,7 @@ type WorkflowControlEvent struct {
 	At                     time.Time `json:"at"`
 	RequestID              string    `json:"request_id,omitempty"`
 	TaskID                 string    `json:"task_id,omitempty"`
+	Attempt                int       `json:"attempt,omitempty"`
 	Detail                 string    `json:"detail,omitempty"`
 	ConfirmPreviousStopped bool      `json:"confirm_previous_stopped,omitempty"`
 }
@@ -246,6 +307,7 @@ type WorkflowAttemptView struct {
 	DispatchedAt *time.Time           `json:"dispatched_at,omitempty"`
 	CompletedAt  *time.Time           `json:"completed_at,omitempty"`
 	Result       *WorkflowResultRef   `json:"result,omitempty"`
+	Verdict      *AttemptVerdict      `json:"verdict,omitempty"`
 }
 
 type WorkflowTaskView struct {

@@ -13,20 +13,23 @@ import (
 )
 
 type rawWorkflow struct {
-	Version            int                        `yaml:"version"`
-	Name               string                     `yaml:"name"`
-	MaxParallel        int                        `yaml:"max_parallel"`
-	TaskTimeoutSeconds *int                       `yaml:"task_timeout_seconds"`
-	Tasks              map[string]rawWorkflowTask `yaml:"tasks"`
+	Version             int                        `yaml:"version"`
+	Name                string                     `yaml:"name"`
+	MaxParallel         int                        `yaml:"max_parallel"`
+	TaskTimeoutSeconds  *int                       `yaml:"task_timeout_seconds"`
+	Tasks               map[string]rawWorkflowTask `yaml:"tasks"`
+	ConfidenceThreshold *float64                   `yaml:"confidence_threshold"`
+	OnUncertain         string                     `yaml:"on_uncertain"`
 }
 
 type rawWorkflowTask struct {
-	Agent                     string   `yaml:"agent"`
-	Prompt                    string   `yaml:"prompt"`
-	Needs                     []string `yaml:"needs"`
-	AllowedToFail             bool     `yaml:"allowed_to_fail"`
-	MinSuccessfulDependencies int      `yaml:"min_successful_dependencies"`
-	TimeoutSeconds            *int     `yaml:"timeout_seconds"`
+	Agent                     string            `yaml:"agent"`
+	Prompt                    string            `yaml:"prompt"`
+	Needs                     []string          `yaml:"needs"`
+	AllowedToFail             bool              `yaml:"allowed_to_fail"`
+	MinSuccessfulDependencies int               `yaml:"min_successful_dependencies"`
+	TimeoutSeconds            *int              `yaml:"timeout_seconds"`
+	Verdicts                  map[string]string `yaml:"verdicts"`
 }
 
 // parseWorkflow extracts the optional `workflow` mapping from the document and
@@ -79,9 +82,13 @@ func parseWorkflow(data []byte) (*domain.WorkflowDefinition, error) {
 		MaxParallel:        raw.MaxParallel,
 		TaskTimeoutSeconds: domain.DefaultWorkflowTaskTimeoutSec,
 		Tasks:              make(map[string]domain.WorkflowTaskDefinition, len(raw.Tasks)),
+		OnUncertain:        strings.TrimSpace(raw.OnUncertain),
 	}
 	if raw.TaskTimeoutSeconds != nil {
 		def.TaskTimeoutSeconds = *raw.TaskTimeoutSeconds
+	}
+	if raw.ConfidenceThreshold != nil {
+		def.ConfidenceThreshold = *raw.ConfidenceThreshold
 	}
 	for taskID, task := range raw.Tasks {
 		needs := append([]string(nil), task.Needs...)
@@ -91,6 +98,15 @@ func parseWorkflow(data []byte) (*domain.WorkflowDefinition, error) {
 			Needs:                     needs,
 			AllowedToFail:             task.AllowedToFail,
 			MinSuccessfulDependencies: task.MinSuccessfulDependencies,
+		}
+		if task.Verdicts != nil {
+			// Copy even when empty: an explicitly empty verdict map is a
+			// validation error, not an absent declaration.
+			verdicts := make(map[string]string, len(task.Verdicts))
+			for name, description := range task.Verdicts {
+				verdicts[name] = description
+			}
+			resolved.Verdicts = verdicts
 		}
 		if task.TimeoutSeconds != nil {
 			resolved.TimeoutSeconds = *task.TimeoutSeconds
@@ -147,6 +163,14 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 	if len(def.Tasks) == 0 {
 		return errors.New("workflow tasks must not be empty")
 	}
+	switch def.OnUncertain {
+	case "", domain.WorkflowOnUncertainHold, domain.WorkflowOnUncertainError:
+	default:
+		return fmt.Errorf("workflow on_uncertain must be %q or %q, got %q", domain.WorkflowOnUncertainHold, domain.WorkflowOnUncertainError, def.OnUncertain)
+	}
+	if def.ConfidenceThreshold < 0 || def.ConfidenceThreshold > 1 {
+		return fmt.Errorf("workflow confidence_threshold must be greater than 0 and at most 1, got %v", def.ConfidenceThreshold)
+	}
 
 	knownAgents := make(map[string]bool, len(agents))
 	for _, agent := range agents {
@@ -181,6 +205,19 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 		}
 		if task.TimeoutSeconds < 0 {
 			return fmt.Errorf("workflow task %q: timeout_seconds must be a positive integer, got %d", taskID, task.TimeoutSeconds)
+		}
+		if task.Verdicts != nil {
+			if len(task.Verdicts) < 2 {
+				return fmt.Errorf("workflow task %q: verdicts must declare at least two options, got %d", taskID, len(task.Verdicts))
+			}
+			for verdictName := range task.Verdicts {
+				if !workflowIdentifierPattern.MatchString(verdictName) {
+					return fmt.Errorf("workflow task %q: unsafe verdict name %q: must match %s", taskID, verdictName, workflowIdentifierPattern.String())
+				}
+				if verdictName == domain.ReservedVerdictName {
+					return fmt.Errorf("workflow task %q: verdict name %q is reserved for the below-threshold outcome", taskID, domain.ReservedVerdictName)
+				}
+			}
 		}
 
 		seenNeeds := map[string]bool{}

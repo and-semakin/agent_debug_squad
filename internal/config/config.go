@@ -23,6 +23,15 @@ type rawConfig struct {
 	LogLevel     string      `yaml:"log_level"`
 	Defaults     rawDefaults `yaml:"defaults"`
 	Agents       []rawAgent  `yaml:"agents"`
+	Judge        *rawJudge   `yaml:"judge"`
+}
+
+type rawJudge struct {
+	Provider       string `yaml:"provider"`
+	Model          string `yaml:"model"`
+	APIKeyFile     string `yaml:"api_key_file"`
+	ProxyURL       string `yaml:"proxy_url"`
+	TimeoutSeconds *int   `yaml:"timeout_seconds"`
 }
 
 type rawDefaults struct {
@@ -117,6 +126,22 @@ func Load(path string) (domain.SessionConfig, error) {
 		}
 	}
 
+	var judgeCfg *domain.JudgeConfig
+	if raw.Judge != nil {
+		judgeCfg = &domain.JudgeConfig{
+			Provider:   strings.TrimSpace(raw.Judge.Provider),
+			Model:      strings.TrimSpace(raw.Judge.Model),
+			APIKeyFile: strings.TrimSpace(raw.Judge.APIKeyFile),
+			ProxyURL:   strings.TrimSpace(raw.Judge.ProxyURL),
+		}
+		if raw.Judge.TimeoutSeconds != nil {
+			if *raw.Judge.TimeoutSeconds < 1 {
+				return domain.SessionConfig{}, fmt.Errorf("judge timeout_seconds must be a positive integer, got %d", *raw.Judge.TimeoutSeconds)
+			}
+			judgeCfg.TimeoutSeconds = *raw.Judge.TimeoutSeconds
+		}
+	}
+
 	return domain.SessionConfig{
 		SessionName:  sessionName,
 		SessionID:    stableSessionID(sessionName, workspace),
@@ -128,6 +153,7 @@ func Load(path string) (domain.SessionConfig, error) {
 		Defaults:     defaults,
 		Agents:       agents,
 		Workflow:     workflow,
+		Judge:        judgeCfg,
 	}, nil
 }
 

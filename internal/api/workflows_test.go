@@ -43,6 +43,10 @@ type scriptedWorkflows struct {
 	retryCreated bool
 	retryErr     error
 	retryCalls   []workflow.RetryRequest
+
+	overrideView    domain.WorkflowExecutionView
+	overrideCreated bool
+	overrideErr     error
 }
 
 func (s *scriptedWorkflows) Create(requestID string) (domain.WorkflowExecutionView, bool, error) {
@@ -102,6 +106,13 @@ func (s *scriptedWorkflows) RetryTask(executionID, taskID string, req workflow.R
 		return domain.WorkflowExecutionView{}, false, s.retryErr
 	}
 	return s.retryView, s.retryCreated, nil
+}
+
+func (s *scriptedWorkflows) OverrideVerdict(executionID, taskID string, attempt int, req workflow.OverrideVerdictRequest) (domain.WorkflowExecutionView, bool, error) {
+	if s.overrideErr != nil {
+		return domain.WorkflowExecutionView{}, false, s.overrideErr
+	}
+	return s.overrideView, s.overrideCreated, nil
 }
 
 func newWorkflowTestServer(t *testing.T, wf WorkflowManager) *Server {
@@ -355,6 +366,61 @@ func TestWorkflowRetryRoute(t *testing.T) {
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/a/retry", strings.NewReader(`{"expected_attempt":1}`)))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("missing request id status = %d", rr.Code)
+	}
+}
+
+func TestWorkflowVerdictOverrideRoute(t *testing.T) {
+	wf := &scriptedWorkflows{
+		overrideView:    domain.WorkflowExecutionView{ExecutionID: "wf_000001", State: domain.WorkflowRunning},
+		overrideCreated: true,
+	}
+	srv := newWorkflowTestServer(t, wf)
+
+	body := `{"request_id":"ovr-1","verdict":"review_passed"}`
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/1/verdict", strings.NewReader(body)))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("override status = %d, body %s", rr.Code, rr.Body.String())
+	}
+
+	wf.overrideCreated = false
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/1/verdict", strings.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("replay status = %d", rr.Code)
+	}
+
+	wf.overrideErr = workflow.ErrVerdictConflict
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/1/verdict", strings.NewReader(`{"request_id":"ovr-2","verdict":"issues_found"}`)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("conflict status = %d", rr.Code)
+	}
+
+	wf.overrideErr = fmtInvalidRequest("verdict %q is not declared by task %q")
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/1/verdict", strings.NewReader(`{"request_id":"ovr-3","verdict":"nope"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("undeclared verdict status = %d", rr.Code)
+	}
+
+	wf.overrideErr = workflow.ErrAttemptNotFound
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/9/verdict", strings.NewReader(`{"request_id":"ovr-4","verdict":"review_passed"}`)))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown attempt status = %d", rr.Code)
+	}
+
+	wf.overrideErr = nil
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/1/verdict", strings.NewReader(`{"verdict":"review_passed"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing request id status = %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/workflows/wf_000001/tasks/review_a/attempts/0/verdict", strings.NewReader(`{"request_id":"ovr-5","verdict":"review_passed"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid attempt status = %d", rr.Code)
 	}
 }
 

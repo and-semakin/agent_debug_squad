@@ -33,6 +33,7 @@ type WorkflowManager interface {
 	Resume(executionID string) (domain.WorkflowExecutionView, error)
 	Cancel(executionID string, opts workflow.CancelOptions) (domain.WorkflowExecutionView, error)
 	RetryTask(executionID, taskID string, req workflow.RetryRequest) (domain.WorkflowExecutionView, bool, error)
+	OverrideVerdict(executionID, taskID string, attempt int, req workflow.OverrideVerdictRequest) (domain.WorkflowExecutionView, bool, error)
 }
 
 func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +169,44 @@ func (s *Server) handleWorkflowRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, view)
 }
 
+func (s *Server) handleWorkflowVerdictOverride(w http.ResponseWriter, r *http.Request) {
+	if s.workflows == nil {
+		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
+		return
+	}
+	attempt, err := strconv.Atoi(r.PathValue("attempt"))
+	if err != nil || attempt < 1 {
+		writeError(w, http.StatusBadRequest, errors.New("attempt must be a positive integer"))
+		return
+	}
+	var body workflowVerdictOverrideRequest
+	if err := decodeStrictJSON(w, r.Body, &body); err != nil {
+		writeJSONWorkflowError(w, err)
+		return
+	}
+	if strings.TrimSpace(body.RequestID) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("request_id is required"))
+		return
+	}
+	if strings.TrimSpace(body.Verdict) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("verdict is required"))
+		return
+	}
+	view, created, err := s.workflows.OverrideVerdict(r.PathValue("execution_id"), r.PathValue("task_id"), attempt, workflow.OverrideVerdictRequest{
+		RequestID: body.RequestID,
+		Verdict:   body.Verdict,
+	})
+	if err != nil {
+		writeJSONWorkflowError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, view)
+}
+
 func (s *Server) controlWorkflow(w http.ResponseWriter, call func() (domain.WorkflowExecutionView, error)) {
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
@@ -193,6 +232,11 @@ type workflowRetryRequest struct {
 	RequestID              string `json:"request_id"`
 	ExpectedAttempt        int    `json:"expected_attempt"`
 	ConfirmPreviousStopped bool   `json:"confirm_previous_stopped"`
+}
+
+type workflowVerdictOverrideRequest struct {
+	RequestID string `json:"request_id"`
+	Verdict   string `json:"verdict"`
 }
 
 func decodeStrictJSON(w http.ResponseWriter, body io.Reader, target any) error {
@@ -246,7 +290,9 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusRequestEntityTooLarge, errors.New("request body exceeds 1 MiB limit"))
 	case errors.Is(err, errInvalidBody), isJSONSyntaxError(err):
 		writeError(w, http.StatusBadRequest, err)
-	case errors.Is(err, workflow.ErrExecutionNotFound), errors.Is(err, workflow.ErrTaskNotFound):
+	case errors.Is(err, workflow.ErrExecutionNotFound),
+		errors.Is(err, workflow.ErrTaskNotFound),
+		errors.Is(err, workflow.ErrAttemptNotFound):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, workflow.ErrInvalidRequest),
 		errors.Is(err, workflow.ErrNoDefinition):
@@ -255,6 +301,7 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 		errors.Is(err, workflow.ErrExecutionActive),
 		errors.Is(err, workflow.ErrInvalidTransition),
 		errors.Is(err, workflow.ErrRetryConflict),
+		errors.Is(err, workflow.ErrVerdictConflict),
 		errors.Is(err, workflow.ErrUncertaintyUnresolved),
 		errors.Is(err, workflow.ErrWorkerActive):
 		writeError(w, http.StatusConflict, err)

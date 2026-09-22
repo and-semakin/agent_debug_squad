@@ -192,6 +192,20 @@ func (s *Store) WriteWorkflowResponse(executionID, taskID string, attempt int, c
 	return relative, int64(len(content)), hex.EncodeToString(sum[:]), nil
 }
 
+// WriteWorkflowDecision persists the raw judge decision of one attempt as a
+// readable audit artifact next to its inputs and response.
+func (s *Store) WriteWorkflowDecision(executionID, taskID string, attempt int, content []byte) (string, error) {
+	dir, err := s.workflowAttemptDir(executionID, taskID, attempt)
+	if err != nil {
+		return "", err
+	}
+	absolute := filepath.Join(dir, "decision.json")
+	if err := writeFileAtomic(absolute, content); err != nil {
+		return "", fmt.Errorf("write decision: %w", err)
+	}
+	return s.toExecutionRelative(executionID, absolute)
+}
+
 // ReadWorkflowArtifact returns the bytes of an execution-relative artifact.
 func (s *Store) ReadWorkflowArtifact(executionID, relativePath string) ([]byte, error) {
 	absolute, err := s.resolveWorkflowArtifact(executionID, relativePath)

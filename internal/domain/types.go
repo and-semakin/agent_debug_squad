@@ -75,6 +75,24 @@ type SessionDefaults struct {
 	Yolo bool `json:"yolo"`
 }
 
+// Judge provider identifiers and defaults for the verdict judge.
+const (
+	JudgeProviderOpenRouter    = "openrouter"
+	DefaultJudgeModel          = "~typesafe/jev-latest"
+	DefaultJudgeTimeoutSeconds = 30
+)
+
+// JudgeConfig configures the external verdict judge. The key itself never
+// lives here: APIKeyFile points at a one-line token file, defaulting to
+// ~/.agent-debug-squad/openrouter-api-key.
+type JudgeConfig struct {
+	Provider       string `json:"provider,omitempty"`
+	Model          string `json:"model,omitempty"`
+	APIKeyFile     string `json:"api_key_file,omitempty"`
+	ProxyURL       string `json:"proxy_url,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
 type SessionConfig struct {
 	SessionName  string              `json:"session_name"`
 	SessionID    string              `json:"session_id"`
@@ -86,6 +104,7 @@ type SessionConfig struct {
 	Defaults     SessionDefaults     `json:"defaults"`
 	Agents       []AgentSpec         `json:"agents"`
 	Workflow     *WorkflowDefinition `json:"workflow,omitempty"`
+	Judge        *JudgeConfig        `json:"judge,omitempty"`
 }
 
 func (cfg SessionConfig) AgentYolo(spec AgentSpec) bool {

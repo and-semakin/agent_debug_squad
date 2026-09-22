@@ -62,6 +62,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /workflows/{execution_id}/resume", s.handleWorkflowResume)
 	s.mux.HandleFunc("POST /workflows/{execution_id}/cancel", s.handleWorkflowCancel)
 	s.mux.HandleFunc("POST /workflows/{execution_id}/tasks/{task_id}/retry", s.handleWorkflowRetry)
+	s.mux.HandleFunc("POST /workflows/{execution_id}/tasks/{task_id}/attempts/{attempt}/verdict", s.handleWorkflowVerdictOverride)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

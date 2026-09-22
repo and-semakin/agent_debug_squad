@@ -90,6 +90,9 @@ func (m *Manager) Resume(executionID string) (domain.WorkflowExecutionView, erro
 	if err := m.persistLocked(snapshot); err != nil {
 		return domain.WorkflowExecutionView{}, err
 	}
+	// Held classifications get a fresh judge round before scheduling
+	// continues; their attention reasons are gone with the hold.
+	m.redispatchJudgingLocked(snapshot)
 	m.Notify()
 	return m.buildViewLocked(snapshot), nil
 }
@@ -219,6 +222,83 @@ type RetryRequest struct {
 	RequestID              string
 	ExpectedAttempt        int
 	ConfirmPreviousStopped bool
+}
+
+type OverrideVerdictRequest struct {
+	RequestID string
+	Verdict   string
+}
+
+// OverrideVerdict settles a held judging attempt with a human-chosen
+// verdict, recorded as manually sourced. It is idempotent per request ID
+// through the snapshot's control history.
+func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int, req OverrideVerdictRequest) (domain.WorkflowExecutionView, bool, error) {
+	if req.RequestID == "" {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request_id is required", ErrInvalidRequest)
+	}
+	if req.Verdict == "" {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: verdict is required", ErrInvalidRequest)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snapshot, err := m.loadSnapshotLocked(executionID)
+	if err != nil {
+		return domain.WorkflowExecutionView{}, false, err
+	}
+	for _, event := range snapshot.Controls {
+		if event.Type != "verdict_override" || event.RequestID != req.RequestID {
+			continue
+		}
+		if event.TaskID == taskID && event.Attempt == attemptNumber && event.Detail == req.Verdict {
+			return m.buildViewLocked(snapshot), false, nil
+		}
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request id already used", ErrVerdictConflict)
+	}
+
+	task := snapshot.Tasks[taskID]
+	if task == nil {
+		return domain.WorkflowExecutionView{}, false, ErrTaskNotFound
+	}
+	taskDef := snapshot.Definition.Tasks[taskID]
+	if _, declared := taskDef.Verdicts[req.Verdict]; !declared {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: verdict %q is not declared by task %q", ErrInvalidRequest, req.Verdict, taskID)
+	}
+	attempt := findAttempt(snapshot, taskID, attemptNumber)
+	if attempt == nil {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: task %q has no attempt %d", ErrAttemptNotFound, taskID, attemptNumber)
+	}
+	if attempt.State != domain.WorkflowAttemptJudging {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: attempt %d of task %q is %s, not judging", ErrVerdictConflict, attemptNumber, taskID, attempt.State)
+	}
+
+	now := m.now()
+	attempt.State = domain.WorkflowAttemptSucceeded
+	attempt.Reason = ""
+	attempt.Error = ""
+	attempt.Verdict = &domain.AttemptVerdict{
+		Value:     req.Verdict,
+		Threshold: snapshot.Definition.EffectiveConfidenceThreshold(),
+		Source:    verdictSourceManual,
+		JudgedAt:  now,
+	}
+	event := domain.WorkflowControlEvent{
+		Type: "verdict_override", At: now, RequestID: req.RequestID,
+		TaskID: taskID, Attempt: attemptNumber, Detail: req.Verdict,
+	}
+	snapshot.Controls = append(snapshot.Controls, event)
+	_ = m.store.AppendWorkflowEvent(executionID, event)
+	snapshot.AttentionReasons = collectAttentionReasons(snapshot)
+	if len(snapshot.AttentionReasons) == 0 && !snapshot.State.Terminal() {
+		snapshot.State = stateForMode(snapshot)
+	}
+	if err := m.persistLocked(snapshot); err != nil {
+		return domain.WorkflowExecutionView{}, false, err
+	}
+	m.reconcileLocked()
+	m.Notify()
+	return m.buildViewLocked(snapshot), true, nil
 }
 
 // RetryTask reserves a fresh queued attempt for a failed or interrupted task
@@ -555,6 +635,7 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 				ReservedAt:   attempt.ReservedAt,
 				DispatchedAt: attempt.DispatchedAt,
 				CompletedAt:  attempt.CompletedAt,
+				Verdict:      attempt.Verdict,
 			}
 			if attempt.ResultPath != "" {
 				attemptView.Result = &domain.WorkflowResultRef{

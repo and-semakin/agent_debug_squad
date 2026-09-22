@@ -112,6 +112,39 @@ Agent definitions accept an optional `ephemeral: true` flag declaring a one-shot
 
 See [examples/squad.yaml](examples/squad.yaml) for a self-contained fake squad, [examples/cursor-squad.yaml](examples/cursor-squad.yaml) for a read-only Cursor reviewer, and [configs/code-review-squad.yaml](configs/code-review-squad.yaml) for a larger facilitator/implementer/critic setup.
 
+### Verdict Judge
+
+Workflow tasks can declare a `verdicts` map (verdict name → optional human description). After such a task's attempt saves its response, an external judge model classifies the response into exactly one of the declared verdicts and the classification is recorded on the attempt — verdict, confidence, the full probability distribution, the model string, and the source (`judge` or `manual`). The raw decision response is stored as `tasks/<task>/attempts/<n>/decision.json` next to the attempt's artifacts; the response file itself is never modified. In this version verdicts are recorded metadata: they do not change scheduling, dependency evaluation, or the execution's final state.
+
+The judge is configured through an optional top-level `judge:` section:
+
+```yaml
+judge:
+  provider: openrouter           # the only provider in this version
+  model: "~typesafe/jev-latest"  # routing alias; pin e.g. "typesafe/jev-1.13" for a fixed version
+  api_key_file: ""               # default: ~/.agent-debug-squad/openrouter-api-key
+  proxy_url: ""                  # HTTP proxy for decision requests; empty uses environment proxy settings
+  timeout_seconds: 30            # per-call timeout; transient failures are retried with backoff
+```
+
+The API key lives in a one-line file containing the bare token (no `Bearer` prefix, no quoting). The default location is in the user's home directory — outside the workspace — so credentials never land in a git repository. Startup requires the key file only when the configured workflow declares verdict tasks or a `judge:` section is present; otherwise the server starts and operates with no judge dependency.
+
+Workflow-level settings: `confidence_threshold` (default `0.8`) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `hold`):
+
+- `hold`: below-threshold confidence keeps the attempt in the `judging` state and moves the execution to `needs_attention`, exposing the full distribution (`uncertain_verdict:<task>:<n>` attention reason). Resolve it with a manual override or `resume` (which re-runs classification).
+- `error`: below-threshold confidence fails the attempt with reason `uncertain_verdict`; existing failure policy and retries apply.
+
+Judge unavailability (transport errors after retries, call timeout) never fails the task: the execution holds in `needs_attention` with a `judge_unavailable` reason, and `resume` re-classifies the held attempt. Recovery treats mid-judging attempts the same way — their backend work is already committed, so a restart re-runs only the classification, never the agent.
+
+A held judging attempt can be settled by hand without re-running the agent or the judge:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/tasks/review_a/attempts/1/verdict \
+  -H 'Content-Type: application/json' -d '{"request_id":"verdict-1","verdict":"review_passed"}'
+```
+
+The verdict must be one the task declares (`400` otherwise), the attempt must still be judging (`409` otherwise), and the request is idempotent per `request_id` — replaying the same verdict returns the recorded result, a different verdict for the same ID returns `409`. The attempt settles as succeeded with the verdict recorded as manually sourced.
+
 ### Backend Notes
 
 | Backend | Connection | Session continuity | Important options |
@@ -197,6 +230,7 @@ POST /workflows/{execution_id}/pause
 POST /workflows/{execution_id}/resume
 POST /workflows/{execution_id}/cancel
 POST /workflows/{execution_id}/tasks/{task_id}/retry
+POST /workflows/{execution_id}/tasks/{task_id}/attempts/{attempt}/verdict
 ```
 
 Append `?wait=true&timeout_seconds=N` when creating a run or reading one by ID to long-poll for progress. A wait timeout does not cancel the run; it returns the latest `RunRecord`. Starting a second run for an already-busy agent returns `409 Conflict`.
@@ -324,6 +358,7 @@ Fields and defaults:
 - `task_timeout_seconds` defaults to `1800`; a task may override it with a positive `timeout_seconds`. The timeout counts wall time from dispatch, including permission and subagent waits, and `0` does not disable it.
 - Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
 - An agent definition may set `ephemeral: true` to declare a one-shot lifecycle: every invocation starts from a clean context. See [Configuration](#configuration); note the flag does not allow referencing one agent from multiple tasks in this version.
+- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.8`) and `on_uncertain` (`hold` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
 
 Start, observe, and control an execution:
 
@@ -339,7 +374,7 @@ curl -sS -X POST http://127.0.0.1:8080/workflows/wf_000001/tasks/review_a/retry 
 
 Repeating `POST /workflows` with the same `request_id` returns the original execution (`200`) without new work, including after restart; reusing the ID with a changed definition returns `409`. Only one nonterminal execution per server session is admitted in v1. `wait=true` long-polls until a terminal state or an intervention (pending permission, failed auto-approval, recovery uncertainty), within one second of local publication; `timeout_seconds` is an integer from 1 to 600 (default 30) and expiry returns the current state without cancelling anything.
 
-Task states: `pending`, `ready`, `dispatching`, `running`, `succeeded`, `failed`, `interrupted`, `blocked`, `cancelled`. Execution states: `running`, `paused`, `needs_attention`, `cancelling`, `cancelled`, `succeeded`, `completed_with_errors`, `failed`. When all work settles: any blocked task or non-tolerated failure makes the execution `failed`; otherwise tolerated failures produce `completed_with_errors`; otherwise `succeeded`.
+Task states: `pending`, `ready`, `dispatching`, `running`, `succeeded`, `failed`, `interrupted`, `blocked`, `cancelled`. Attempt states additionally include the transient `judging` phase of verdict tasks (the response is saved, classification pending). Execution states: `running`, `paused`, `needs_attention`, `cancelling`, `cancelled`, `succeeded`, `completed_with_errors`, `failed`. When all work settles: any blocked task or non-tolerated failure makes the execution `failed`; otherwise tolerated failures produce `completed_with_errors`; otherwise `succeeded`.
 
 Failure truth table for a task T with direct dependencies:
 
@@ -360,6 +395,7 @@ workflows/<execution_id>/events.jsonl           # control/audit log
 workflows/<execution_id>/tasks/<task>/attempts/<n>/prompt.txt
 workflows/<execution_id>/tasks/<task>/attempts/<n>/input-manifest.json
 workflows/<execution_id>/tasks/<task>/attempts/<n>/response.txt
+workflows/<execution_id>/tasks/<task>/attempts/<n>/decision.json   # raw judge decision, verdict tasks only
 ```
 
 Shared workspace: tasks run concurrently in the same workspace. Squad does not detect file-write intent, serialize workspace access, or create worktrees — coordinating edits is the workflow author's responsibility, and "read only" instructions are agent instructions, not sandbox guarantees.
