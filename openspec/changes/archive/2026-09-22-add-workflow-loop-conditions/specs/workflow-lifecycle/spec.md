@@ -1,44 +1,6 @@
-# workflow-lifecycle Specification
+# workflow-lifecycle Delta
 
-## Purpose
-
-Make declarative workflow executions durable, inspectable, and controllable while preventing accidental replay of uncertain agent work and retaining usable manual sessions.
-
-## Requirements
-
-### Requirement: Workflow submission is explicit and idempotent
-Serving a configuration SHALL NOT automatically start a new workflow. `POST /workflows` with a nonempty `request_id` SHALL create an execution of the configured definition and return 202. Repeating the same request ID with the same resolved definition SHALL return the original execution with 200 without new work, including after restart. Reusing an ID with a changed resolved definition SHALL return 409. Only one nonterminal workflow execution per server session SHALL be admitted in v1; competing submissions SHALL return 409. New executions SHALL retain an immutable copy of their resolved definition and agent configuration. Invalid submissions SHALL return 400 without dispatch.
-
-#### Scenario: Lost creation response
-- **WHEN** a client retries a submission after losing its HTTP response
-- **THEN** it receives the original execution and no additional agent attempt is created
-
-#### Scenario: Restart does not create a new execution
-- **WHEN** the server restarts with the same configured workflow
-- **THEN** it recovers saved executions without treating startup as a new submission
-
-#### Scenario: Definition changes
-- **WHEN** configuration is edited after an execution was created
-- **THEN** that execution retains its original definition and the changed definition requires a new request ID
-
-### Requirement: Dispatch and completion are durable decisions
-The system SHALL durably reserve an attempt identity and its exact inputs before sending work to a backend, SHALL never dispatch that identity more than once in a live owner, and SHALL publish successful completion durably before releasing dependent tasks. Duplicate or lost completion notifications SHALL NOT cause duplicate or missing scheduling. Persistence failures SHALL stop new dispatch and surface an error rather than claim successful completion. A second server owner for the same session state SHALL be rejected before it mutates state or starts work.
-
-#### Scenario: Duplicate completion
-- **WHEN** a completion notification is delivered twice
-- **THEN** each dependent task still has at most one initial attempt
-
-#### Scenario: Lost wake-up
-- **WHEN** a completion is durably saved but its scheduler notification is lost
-- **THEN** subsequent reconciliation detects readiness and dispatches the dependent task
-
-#### Scenario: Save failure
-- **WHEN** storing a dispatch reservation or successful completion fails
-- **THEN** no downstream work is released on the unsaved state and the error is observable
-
-#### Scenario: Competing process
-- **WHEN** another server attempts to use the same session directory
-- **THEN** it fails before modifying execution records or calling backends
+## MODIFIED Requirements
 
 ### Requirement: Recovery never silently repeats uncertain work
 Saved definitions containing `on_uncertain: hold` SHALL be rejected with an actionable unsupported-policy error before scheduling. The system SHALL NOT alias this value to `needs_attention`, silently fall back to the default, or automatically migrate the definition. On restart, the system SHALL preserve committed completed tasks and their artifacts, recompute readiness, and automatically continue an otherwise running execution with no uncertain attempts. Paused executions SHALL stay paused. Attempts reserved or running without a committed terminal outcome SHALL become interrupted and put the execution in needs_attention with new dispatch stopped. No such attempt SHALL be automatically resent or treated as an allowed failure. Attempts in the `judging` phase are an exception: their backend work is complete and their response artifact is committed, so recovery SHALL NOT interrupt them and SHALL re-run their verdict classification. For executions with loops, the persisted loop iteration counters SHALL survive restart: committed iterations and their artifacts are preserved, an interrupted body attempt recovers as any interrupted attempt, and retrying it continues the same iteration — the loop neither advances to the next iteration nor restarts from the first. The new binary SHALL load snapshots saved with schema version 1 or 2 whose definitions use supported values; this is an upgrade compatibility guarantee only. Reading schema-2 snapshots with older binaries and downgrade conversion are outside this change's supported contract. Newly written snapshots SHALL carry schema version 2 and MUST NOT be relabeled as schema 1 to accommodate old readers; unknown other schema versions or damaged authoritative state SHALL fail closed with an actionable error. Cancellation intent SHALL survive restart. Loop failure/blocking holds SHALL survive restart with the same iteration, failed outcomes, and actionable attention reasons; recovery MUST NOT automatically retry failed work or turn the hold into terminal failure. Iteration advance SHALL be durably committed before next-iteration backend dispatch, with task states atomically saved or derivable from the committed counter. Recovery around this commit MUST neither repeat a completed iteration nor skip an iteration. Persistence failure during advance MUST stop new dispatch.
@@ -82,6 +44,7 @@ Saved definitions containing `on_uncertain: hold` SHALL be rejected with an acti
 #### Scenario: Removed uncertainty policy is rejected in saved state
 - **WHEN** an execution saved with explicit on_uncertain hold is loaded by the new binary
 - **THEN** loading fails with an actionable unsupported-policy error, no task dispatches, and the saved definition is neither rewritten nor silently interpreted as needs_attention
+
 ### Requirement: Execution observation includes outcomes and intervention
 `GET /workflows` SHALL list historical and active execution summaries. `GET /workflows/{id}` SHALL expose execution state/revision, task and attempt identities/states, dependency-blocking reasons, active/ready counts, errors, output paths, and current run progress including pending permissions. Attempt states SHALL include the `judging` phase, and views SHALL expose per-attempt verdict data — verdict name, confidence, probability distribution, model, and source — together with judge-related attention reasons for uncertain verdicts and judge unavailability. Attempt views SHALL expose the iteration number for loop body attempts, and the execution view SHALL expose per-loop state: loop name, current iteration, and `max_iterations`. For loops with conditions, loop views SHALL additionally expose the `until_task` name, the effective iteration cap (declared plus extensions), and the latest settled condition verdict. Task counts SHALL count tasks, not iterations. Unknown IDs SHALL return 404. Task states SHALL include pending, ready, dispatching, running, succeeded, failed, interrupted, blocked, and cancelled. Execution states SHALL include running, paused, needs_attention, cancelling, cancelled, succeeded, completed_with_errors, and failed.
 
@@ -110,46 +73,7 @@ An unresolved loop failure/blocking hold SHALL take precedence over final-state 
 #### Scenario: Condition state is observable
 - **WHEN** a conditioned loop is held on exhaustion or a needs_attention verdict action
 - **THEN** the loop view shows until_task, the effective cap, and the latest settled condition verdict, and attention reasons indicate the available interventions
-### Requirement: Pause and cancellation have distinct effects
-`POST /workflows/{id}/pause` SHALL durably prevent new dispatch reservations while allowing already dispatched tasks to finish. Repeated pause while paused SHALL be idempotent. `POST /workflows/{id}/resume` SHALL revalidate state and artifacts and resume paused or needs_attention work only when no recovery/artifact uncertainty remains. `POST /workflows/{id}/cancel` SHALL durably prevent new scheduling, cancel active owned runs, and mark remaining unstarted tasks cancelled. It SHALL reach cancelled only after owned workers stop or, for interrupted attempts whose cleanup cannot be checked after restart, the caller explicitly supplies `confirm_previous_stopped: true`. The system SHALL record that assertion and MUST NOT allow it to override known active workers in the current process. Unconfirmed cleanup SHALL remain observable and MUST NOT be reported as completed cancellation. Cancellation SHALL override allowed_to_fail and success thresholds. For a paused or needs_attention execution with loops, a valid resume request SHALL be accepted with HTTP 200 and the current execution view even if loop failure/blocking reasons remain. It SHALL request running mode and independently revalidate artifacts, clear only reasons proven resolved, and re-attempt held verdict classifications whose own response artifacts are verified and whose state can be durably persisted. An unrelated loop failure or interruption MUST NOT prevent these safe recovery actions. Pending classification recovery SHALL retain its attention hold until its committed outcome resolves it, and repeated resume MUST NOT create concurrent duplicate judge calls for the same attempt. Resume MUST NOT waive failed dependencies, unmet thresholds, or unresolved uncertainty, and MUST NOT repeat agent work. While any attention reason remains, the execution SHALL remain needs_attention with no ordinary task dispatch or loop advance. A successful HTTP response acknowledges the recovery request, not that execution has resumed. Actual storage failures SHALL remain errors. Existing loopless control behavior SHALL remain unchanged. Cancellation SHALL be accepted from that hold and take precedence over failure attention while following the same cleanup requirements. Invalid state transitions SHALL return 409; repeated cancellation while cancelling/cancelled SHALL be idempotent.
 
-#### Scenario: Pause races with completion
-- **WHEN** pause is committed while a predecessor finishes
-- **THEN** its result is preserved but no subsequent reservation occurs until resume
-
-#### Scenario: Cancel optional work
-- **WHEN** an execution is cancelled while an optional reviewer is active
-- **THEN** that cancellation cannot release the verifier as though it were a tolerated reviewer failure
-
-#### Scenario: Cancel after crash cleanup
-- **WHEN** prior interrupted backend work has been stopped externally and the caller cancels with explicit cleanup confirmation
-- **THEN** cancellation can finish, the assertion is recorded, and no dependent task is released
-
-#### Scenario: Restored result
-- **WHEN** a missing committed output is restored with its original hash and resume is requested
-- **THEN** the system revalidates it and resumes only if no other attention reason remains
-
-
-#### Scenario: Resume cannot waive a loop failure
-- **WHEN** the caller resumes an execution whose loop still has a failed mandatory task or unmet dependency threshold
-- **THEN** resume returns 200 with a needs_attention execution view and the unresolved reasons, without retrying agent work, dispatching tasks, or advancing the loop
-
-#### Scenario: Cancel a held loop
-- **WHEN** the caller cancels an execution held on a loop failure
-- **THEN** cancellation stops owned work, cancels remaining unstarted tasks, and reaches cancelled once cleanup requirements are met instead of remaining stuck in needs_attention
-
-
-#### Scenario: Loop failure and judge outage can be repaired independently
-- **WHEN** a loop has a failed mandatory task and an independent attempt held on judge unavailability, the provider recovers, and resume is requested
-- **THEN** resume accepts the request and re-attempts classification without rerunning the independent agent; the loop failure continues to hold task dispatch, classification settlement clears only its own attention reason, and an eligible explicit retry can then repair the failed task
-
-#### Scenario: Restored artifact can be revalidated during a loop failure
-- **WHEN** a loop failure coexists with a missing-artifact attention reason, the original artifact is restored, and resume is requested
-- **THEN** resume revalidates and clears the repaired artifact reason while retaining the loop failure hold, permitting an otherwise eligible retry without requiring restart or cancellation
-
-#### Scenario: Repeated recovery does not duplicate judging
-- **WHEN** resume is repeated while a recovery classification is already in flight and a loop failure remains unresolved
-- **THEN** only one classification call for that attempt runs concurrently, attention continues to block ordinary dispatch, and remaining reasons stay observable
 ### Requirement: Explicit retries preserve history and input consistency
 `POST /workflows/{id}/tasks/{task}/retry` SHALL accept a nonempty `request_id` and `expected_attempt`, creating a new queued attempt identity only for a failed/interrupted task that passes the descendant-reservation guard. For a task outside all loops, every transitive descendant through `needs` MUST have no attempt reservations, as before. For a loop body task, a new retry MUST target its latest failed/interrupted attempt in the loop's current iteration: same-loop transitive descendants MUST have no reservations in that iteration, and descendants outside that loop MUST have no reservations in any iteration. Reservations from earlier iterations of the same loop MUST NOT block the retry. New retries targeting earlier iterations SHALL return 409 without changing history or loop counters. The retry attempt SHALL retain the target iteration and receive the next monotonically increasing per-task attempt number. If an eligible retry reopens a done loop, that loop SHALL return to running at the same iteration, and outside consumers SHALL wait until it settles again. Guard evaluation and retry reservation SHALL be serialized with iteration advance and dispatch. Repeated identical retry requests SHALL return the originally created attempt; stale or conflicting requests SHALL return 409. Retry SHALL preserve prior artifacts, reset derived blocked descendants for reevaluation, preserve independent completed work, and use a fresh backend conversation. Interrupted retries SHALL additionally require `confirm_previous_stopped: true`, recorded as the caller's cleanup assertion rather than a guarantee by Squad; a known active worker MUST NOT be bypassed. Cancelled/cancelling executions SHALL reject retries. A failed or completed_with_errors execution can reopen only if no other execution is active; a paused execution SHALL remain paused after retry. No retries SHALL happen automatically. Explicit retries requested by users or coordinator agents SHALL NOT count against the automatic dispatch bound or consume additional loop iterations; this change imposes no explicit-retry count limit, while all eligibility and consistency guards remain enforced. Loop failure/blocking, condition-action, and loop-exhausted attention reasons MUST NOT by themselves reject an otherwise eligible retry; multiple eligible retries SHALL be queueable while those reasons or recoverable interruptions remain. Queuing a retry MUST NOT clear unrelated condition or exhaustion causes; actual dispatch SHALL wait for every attention cause to resolve. Artifact/storage and judge-related holds retain their resolution requirements; resume SHALL be able to address those causes independently of loop failures, as specified by the control requirement. After reserving a retry, the system SHALL recompute dependent readiness using the queued attempt as pending, remove only resolved failure/blocking reasons, and resume dispatch only when every attention reason is cleared and the execution is not paused. Blocked tasks without attempts SHALL be repaired by retrying eligible failed causal predecessors, not by retrying the blocked tasks themselves.
 
@@ -213,20 +137,8 @@ An unresolved loop failure/blocking hold SHALL take precedence over final-state 
 #### Scenario: Retry queues under an exhausted sibling
 - **WHEN** loop A is exhausted and loop B has an otherwise retryable failed task
 - **THEN** retry of B may be queued, A's exhaustion cause remains, and dispatch waits until extension or stop resolves A as well
-### Requirement: Workflow ownership preserves manual and backend contracts
-Existing configurations without workflow, manual run/reset APIs, manual follow-up session continuity, and saved artifact readability SHALL remain usable. Workflow-owned attempts SHALL be observable through run APIs and use existing permission-reply APIs and approval policies. Manual run/reset mutations targeting workflow-owned runtimes SHALL return 409. Workflow isolation MUST NOT be implemented by resetting a user's existing manual conversation. Existing loopback-only access and constrained child-process environment handling SHALL remain in force.
 
-#### Scenario: Legacy manual review
-- **WHEN** a facilitator uses an old configuration to send a review and a follow-up to the same manual agent
-- **THEN** both turns use the existing manual behavior and preserve backend conversation continuity
-
-#### Scenario: Permission reply routing
-- **WHEN** a workflow task exposes an owned backend permission request
-- **THEN** the existing run-scoped reply endpoint resolves only that active request, with existing stale-request and approval rules
-
-#### Scenario: External mutation of owned task
-- **WHEN** a caller attempts manual reset or an extra turn on a workflow-owned runtime
-- **THEN** the call returns 409 without changing the task session or graph state
+## ADDED Requirements
 
 ### Requirement: Loop conditions admit human intervention
 `POST /workflows/{id}/loops/{name}/extend` SHALL accept a nonempty `request_id` and a positive integer `add_iterations`, durably raising the loop's effective iteration cap by that amount on a nonterminal, non-cancelling execution. Accepted extend requests SHALL be identified within the execution by request_id and bound to the loop name and add_iterations. Repeating an identical accepted request SHALL return the current execution view without a second increase, including after loop completion, execution completion, cancellation, or restart. This replay check SHALL precede lifecycle eligibility checks. Reusing the same extend request_id with a different loop name or add_iterations SHALL return 409 without mutation. Non-positive or non-integer amounts SHALL return 400; unknown execution or loop identifiers SHALL return 404; new requests against done loops or terminal or cancelling executions SHALL return 409. A successful extension SHALL resolve the target loop's loop_exhausted cause independently of other holds; the loop SHALL continue at the next iteration only once all attention causes are resolved and the execution is in running mode. Extension SHALL NOT clear a condition-action needs_attention cause or unpause the execution; extensions of a still-running loop raise its future cap. Extensions are audited as control events and participate in the automatic dispatch bound only after being granted.

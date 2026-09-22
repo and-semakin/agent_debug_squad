@@ -1,10 +1,57 @@
-# declarative-workflows Specification
+# declarative-workflows Delta
 
-## Purpose
+## MODIFIED Requirements
 
-Execute declarative graphs of independent agent conversations with predictable dependency ordering, bounded parallelism, and explicit transfer of predecessor results.
+### Requirement: Loop bodies re-arm for a bounded number of iterations
+A loop SHALL execute its member tasks (the body) as an ordinary dependency graph with at most one initial automatic attempt per task per iteration. The loop MUST NOT exceed its effective iteration cap — the declared `max_iterations` plus extensions granted only through the explicit extend control — and SHALL complete exactly that many iterations on normal completion unless its condition breaks the loop or an explicit stop completes the current iteration; cancellation may end it earlier and intervention may hold it indefinitely. When an iteration settles acceptably — every body task succeeded or failed under the existing tolerance rules, evaluated within that iteration — the system SHALL re-arm the body: reset body task states and dispatch the next iteration's attempts on fresh runtime conversations, exactly as first attempts. Each attempt SHALL record its one-based iteration number, and prior iterations' attempts SHALL remain inspectable history. A non-tolerated body task failure or any blocked body task SHALL hold the loop at its current iteration and put the execution in `needs_attention`, rather than finalize it as failed. This includes unmet success thresholds and blocking caused by outside prerequisites. Failed attempts and blocked body tasks SHALL retain their states and reasons. Outside consumers SHALL remain pending with an explicit loop-wait reason until the loop completes acceptably. While this hold exists, no new task SHALL dispatch and no loop SHALL advance anywhere in the execution; already dispatched work MAY finish and its outcomes SHALL be preserved. Eligible explicit retries SHALL repair the current iteration under the retry consistency rules; cancellation SHALL abandon the execution under the existing cleanup rules. Resume MUST NOT waive unresolved failures or thresholds, but SHALL be allowed to resolve independent artifact or judge attention causes while preserving the loop hold. This recovery activity is not task dispatch or iteration advance. A tolerated failure that leaves no body task blocked SHALL NOT cause this hold. The number of initial automatic body dispatches SHALL be bounded by the number of body tasks multiplied by the effective iteration cap; every cap increase is an explicit, idempotent, audited human action, so the system itself never dispatches unboundedly. Explicit retries through the retry API, whether requested by a user or coordinator agent, SHALL be excluded from this dispatch bound; they MUST retain the current iteration and MUST NOT consume or extend the iteration cap. This change SHALL NOT introduce a limit on explicit retry count or elapsed execution time. Retry eligibility and input-consistency guards SHALL continue to apply; failures MUST NOT trigger automatic retries. The execution's final state SHALL be derived from the final iteration's task states; tolerated failures in earlier iterations remain visible in attempt history but MUST NOT degrade the final verdict.
 
-## Requirements
+#### Scenario: Static loop runs exactly N times
+- **WHEN** a loop with `max_iterations: 3` and a two-task body completes without failures
+- **THEN** each body task records three attempts with iteration numbers 1 through 3, and downstream tasks outside the loop start after the third iteration settles
+
+#### Scenario: Explicit retries do not consume the iteration budget
+- **WHEN** a one-task loop has max_iterations 1, its initial attempt fails, and two successive eligible explicit retries are requested, the first failing and the second succeeding
+- **THEN** all three attempts belong to iteration 1, the loop completes after the successful retry, no iteration 2 is created, and no retry occurs without an explicit request
+
+#### Scenario: Automatic dispatch bound excludes explicit retries
+- **WHEN** a two-task loop with max_iterations 3 completes all iterations and one body task required an eligible explicit retry
+- **THEN** there are six initial automatic body attempts and one explicit retry attempt, while the loop still completes exactly three iterations
+
+#### Scenario: Extended budget stays explicit and bounded
+- **WHEN** a 2-iteration loop is extended by 3 iterations through the control and completes the extended budget
+- **THEN** the loop runs five iterations in total, the extension is recorded as an audited control action, and the automatic dispatch bound grows to the extended cap only
+
+#### Scenario: Tolerated failure re-runs next iteration
+- **WHEN** an `allowed_to_fail` body task fails in iteration 1 and succeeds in iteration 2 of a 2-iteration loop
+- **THEN** iteration 1 settles acceptably, the task is dispatched fresh in iteration 2, and the execution succeeds with the iteration-1 failure visible in history
+
+#### Scenario: Hard failure waits for intervention
+- **WHEN** a body task without `allowed_to_fail` fails in any iteration
+- **THEN** the loop and execution enter needs_attention at the same iteration, outside consumers remain pending with a loop-wait reason, and new dispatch stops until intervention
+
+#### Scenario: Threshold failure waits for repair
+- **WHEN** tolerated reviewer failures leave a body consumer below its minimum successful dependency count
+- **THEN** the consumer is blocked, the loop and execution need attention, and an eligible retry of a failed reviewer can restore readiness without advancing or restarting the iteration
+
+#### Scenario: Outside prerequisite blocks a loop
+- **WHEN** a failed outside prerequisite makes a body task blocked before its first attempt
+- **THEN** the execution needs attention, identifies the failed prerequisite, and permits its retry only under the existing outside-task descendant guard
+
+#### Scenario: Failure holds even without outside consumers
+- **WHEN** a loop has a non-tolerated failure and all tasks are settled with no live workers or outside consumers
+- **THEN** the execution remains needs_attention rather than becoming terminal failed
+
+#### Scenario: Hold stops new independent work
+- **WHEN** one loop needs intervention while independent work elsewhere in the execution is running or ready
+- **THEN** running work may finish, ready work is not dispatched, and no loop advances until attention is resolved
+
+#### Scenario: Thresholds compose per iteration
+- **WHEN** a body consumer requires two of three same-loop dependencies and one fails tolerably in an iteration
+- **THEN** that iteration's consumer runs on the two successful results, exactly as the same graph without a loop
+
+#### Scenario: Sibling loops are independent
+- **WHEN** a definition declares two loops and an outside task depends on both
+- **THEN** each loop runs its own bounded iterations, and the outside task starts after both complete
 
 ### Requirement: Workflow definitions are validated before execution
 The system SHALL accept an optional YAML `workflow` with `version: 1`, nonempty `name`, positive integer `max_parallel`, and a nonempty task map. Tasks SHALL declare nonempty `agent` and `prompt`, optional `needs` defaulting to an empty list, boolean `allowed_to_fail` defaulting to false, and integer `min_successful_dependencies` defaulting to zero. Tasks SHALL also accept an optional `verdicts` map of verdict names to optional human descriptions and an optional `loop` naming a declared loop. The workflow SHALL accept optional `confidence_threshold` (a number greater than 0 and at most 1, defaulting to 0.8), `on_uncertain` (either `needs_attention` or `error`, defaulting to `needs_attention`), and a `loops` map of loop name to loop definition, where a loop definition declares exactly a required positive integer `max_iterations` and optional condition fields: `until_task` naming the loop's condition task, `on_verdict` mapping verdicts to actions, and `on_exhaustion` selecting an exhaustion policy. The system MUST reject unknown workflow/task fields, duplicate YAML keys, unsafe identifiers, unknown agents/dependencies, repeated dependency entries, self-dependencies, cycles, repeated agent references across tasks, and thresholds outside zero through the number of direct dependencies, before dispatching any task. It MUST also reject verdict maps that are empty, contain unsafe or duplicated verdict names, contain the reserved name `uncertain`, or declare fewer than two verdicts; `confidence_threshold` or `on_uncertain` values outside their allowed sets; loop definitions with a missing or non-positive `max_iterations`; `loop` references to undeclared loops; loops with no member tasks; dependencies from a task in one loop to a task in another loop; and dependency cycles that pass through a loop boundary (detected on the graph with each loop collapsed to a single node). It MUST additionally reject condition misconfiguration: an `until_task` that is not a member of the loop's body, does not declare `verdicts`, sets `allowed_to_fail: true`, or is not the unique sink within the body (every other body task MUST reach until_task through same-loop dependency edges); an `on_verdict` without `until_task` and an `until_task` without `on_verdict`; an `on_verdict` that maps a verdict not declared by `until_task`, omits a declared verdict, or uses an action other than `break`, `continue`, or `needs_attention`; an `on_exhaustion` without the until_task/on_verdict pair; and an `on_exhaustion` other than `needs_attention` or `succeed`. A singleton body with until_task as its only task SHALL satisfy the unique-sink rule. Every loop-related rejection message SHALL name the offending loop or task and include a short corrective example, so agents authoring YAML can repair the definition without additional context. Identical model/backend configurations under different agent names SHALL be accepted. The `verdicts`, `confidence_threshold`, `on_uncertain`, `loops`, `loop`, `until_task`, `on_verdict`, and `on_exhaustion` fields SHALL participate in the definition identity used for idempotent replay; when unset, the identity MUST remain byte-identical to definitions parsed by previous versions.
@@ -104,77 +151,6 @@ The system SHALL accept an optional YAML `workflow` with `version: 1`, nonempty 
 #### Scenario: Definitions without conditions hash identically
 - **WHEN** a definition declares loops without condition fields
 - **THEN** its definition identity is byte-identical to the same definition parsed before conditions existed
-### Requirement: Task conversations are isolated
-Every task attempt SHALL start a fresh backend conversation owned by its workflow execution, task, and attempt. It MUST NOT inherit another task's chat history, a manual agent conversation, or a previous execution's conversation. A retry SHALL also use a fresh conversation. Identical model/backend selections SHALL NOT imply a shared session. Dependency results SHALL be provided explicitly.
-
-#### Scenario: Matching model without matching context
-- **WHEN** two nodes using the same model run and a manual conversation for that model already exists
-- **THEN** all three conversations remain distinct and workflow nodes receive only their own instructions and declared dependency inputs
-
-#### Scenario: Subsequent execution
-- **WHEN** a completed definition is submitted again with a new request ID
-- **THEN** its nodes start fresh conversations and the previous execution's artifacts remain available
-
-### Requirement: Program-driven scheduling respects the graph and limit
-After explicit workflow submission, the system SHALL schedule tasks without additional coordinator turns. It SHALL wait for all direct dependencies to settle before evaluating a dependent task. At most `max_parallel` task attempts SHALL be dispatched or running at once within the execution, counting permission waits and attempts whose cancellation has not completed. Ready-task ties SHALL use lexicographic task ID order. Completion order of concurrently executing tasks is not guaranteed. Backend-native subagents and independent manual runs are outside this limit. The system SHALL NOT detect file-write intent, impose workspace edit locks, or create worktrees.
-
-#### Scenario: Linear chain
-- **WHEN** A succeeds in A to B to C
-- **THEN** B is automatically dispatched, and C waits until B succeeds
-
-#### Scenario: Fan-out and fan-in
-- **WHEN** A succeeds, B and C depend on A, D depends on both B and C, and two slots are available
-- **THEN** B and C can execute concurrently, and D starts once both settle acceptably, receiving both outcomes regardless of completion order
-
-#### Scenario: Slot accounting
-- **WHEN** two attempts occupy a limit of two and one is waiting for permission
-- **THEN** a third ready task stays queued until an occupied slot is released
-
-#### Scenario: Shared files are not coordinated
-- **WHEN** two otherwise eligible tasks intend to modify the same workspace
-- **THEN** the scheduler does not serialize them based on file access or create isolated worktrees
-
-### Requirement: Dependency failure tolerance and success thresholds compose
-A direct dependency SHALL be acceptable only when it succeeded or when it failed with its own `allowed_to_fail: true`. A task SHALL start only after every dependency settles acceptably and the count of succeeded direct dependencies meets its `min_successful_dependencies`. Tolerated failures MUST remain failed and MUST NOT count as successes. A threshold MUST NOT override an unacceptable dependency. Blocked tasks SHALL have explicit reasons and propagate blocking to descendants; their `allowed_to_fail` SHALL NOT convert non-execution into an acceptable failure. An interruption or cancellation SHALL NOT be waived by `allowed_to_fail`.
-
-#### Scenario: Optional reviewer fails
-- **WHEN** one optional reviewer fails, another succeeds, and their consumer requires one success
-- **THEN** the consumer runs after both attempts settle and receives the successful output plus the failed reviewer's error
-
-#### Scenario: All reviewers fail
-- **WHEN** all reviewers fail with allowed failures and their consumer requires one success
-- **THEN** the consumer is blocked with a success-threshold reason and is not dispatched
-
-#### Scenario: Default zero threshold
-- **WHEN** all direct dependencies are tolerated failures and the consumer's threshold is omitted
-- **THEN** the consumer can run after all dependencies settle and receives their failure information
-
-#### Scenario: Mandatory failure despite enough successes
-- **WHEN** one mandatory dependency fails and another succeeds, satisfying the numerical threshold
-- **THEN** the consumer remains blocked by the mandatory failure
-
-#### Scenario: Threshold does not cause early aggregation
-- **WHEN** one reviewer succeeds, another is still running, and the threshold is one
-- **THEN** the consumer waits for the remaining reviewer
-
-#### Scenario: Blocking and independent work
-- **WHEN** a required predecessor fails and blocks one branch
-- **THEN** blocking propagates through that branch, while independent runnable branches continue
-
-### Requirement: Handoff is complete and bound to saved attempt results
-Before dispatch, the system SHALL save the exact task message and an input manifest containing every direct dependency in sorted task ID order, with task/agent/attempt/run identities, outcome, error when present, and successful result path, byte size, and content hash. It SHALL provide the manifest and readable local result references to the receiving agent, without sharing predecessor chat history. It MUST verify committed successful result files before dispatch, MUST NOT silently truncate them, and MUST hold execution for intervention if they are missing or changed. Partial output from a failed attempt SHALL NOT be represented as successful output. Agent response text MUST NOT modify the graph or scheduling policy.
-
-#### Scenario: Stable fan-in input
-- **WHEN** B and C complete in either order and D becomes ready
-- **THEN** D's saved manifest contains the same ordered dependency identities and references their exact successful attempt results
-
-#### Scenario: Missing committed result
-- **WHEN** a successful dependency's committed result file is removed or its contents change before consumer dispatch
-- **THEN** the workflow enters needs_attention and the consumer is not dispatched
-
-#### Scenario: Large responses
-- **WHEN** predecessor responses are too large to embed conveniently in the next prompt
-- **THEN** the complete saved responses remain readable through manifest paths without silent truncation
 
 ### Requirement: Success and timeouts have explicit boundaries
 A workflow task SHALL succeed only after its backend turn completes successfully, owned execution stops, a nonempty final response is saved, and the outcome is durably committed. An empty response SHALL produce a failed task with a missing-output reason. For a task that declares verdicts, the attempt SHALL additionally pass through a `judging` phase after the response is saved and SHALL settle only after its verdict is resolved; dependent tasks wait for that settlement. The task timeout SHALL NOT extend into the judging phase; judging is bounded by the judge's own decision timeout. The workflow SHALL have `task_timeout_seconds` defaulting to 1800 and tasks SHALL accept an optional positive `timeout_seconds` override. The timeout SHALL count wall time from dispatch, including permissions and backend subagents, excluding dependency/queue wait. Expiry SHALL cancel owned work and produce a failed timeout outcome only after cleanup is confirmed; uncertain cleanup SHALL produce interruption requiring intervention. V1 SHALL NOT claim that a successful textual response proves substantive task correctness, and a resolved semantic verdict SHALL influence loop continuation only through the declared until_task/on_verdict mapping. Other tasks' semantic verdicts MUST NOT alter scheduling or dependency evaluation, and no declared verdict name has implicit intervention semantics. Existing classifier uncertainty and outage policies remain applicable.
@@ -198,116 +174,8 @@ A workflow task SHALL succeed only after its backend turn completes successfully
 #### Scenario: Verdict value does not drive scheduling
 - **WHEN** a non-condition verdict task settles with any declared verdict
 - **THEN** dependency evaluation, dispatch decisions, and the execution's final state are exactly those of the same definition without verdicts
-### Requirement: Reviewer quorum is an ordinary workflow
-The repository skill and examples SHALL demonstrate translating a familiar reviewer-quorum request into parallel reviewer tasks and a dependent verifier task without requiring the user to author YAML. The verifier SHALL be instructed to check evidence against code, deduplicate findings, align severity, produce the final report, and identify missing reviews. User-specified models, backends, and constraints SHALL be preserved. Optional reviewer failures and a positive success threshold SHALL be demonstrated explicitly. The Go service MUST NOT require a special review execution mode.
 
-#### Scenario: Familiar review request
-- **WHEN** a facilitator follows the skill for a request to run specified reviewers and rank findings
-- **THEN** it can prepare and submit an ordinary workflow, wait for completion, and deliver the verifier result without manually dispatching each dependency transition
-
-#### Scenario: No review results
-- **WHEN** every reviewer in the documented optional-reviewer example fails
-- **THEN** the positive threshold prevents a verifier report being presented as a completed review
-
-### Requirement: Ephemeral agents declare a one-shot lifecycle
-Agent definitions SHALL accept an optional boolean `ephemeral` field, defaulting to false. An ephemeral agent declares a one-shot execution model for workflows: every invocation — every task attempt, every retry, and any future repeated visit such as a loop iteration — MUST execute on a newly created runtime whose backend session starts empty, and MUST NOT inherit conversation history, backend session identity, or runtime state from any earlier invocation of that agent, whether within the same execution or another. The declaration SHALL be captured in the execution's immutable saved agent configuration at submission, SHALL participate in the definition identity used for idempotent replay, and MUST be preserved through recovery so a recovered execution keeps its original flag value. In this version the flag MUST NOT relax graph validation: one agent may still be referenced by at most one task. It MUST NOT alter facilitator-driven manual turns, which retain backend session continuity exactly as for non-ephemeral agents, and it MUST NOT change HTTP response shapes.
-
-#### Scenario: Declaration persists with the execution
-- **WHEN** a workflow referencing an agent configured with `ephemeral: true` is submitted
-- **THEN** the execution's saved agent configuration records the flag, and the persisted snapshot retains that value across recovery restarts
-
-#### Scenario: Flag participates in definition identity
-- **WHEN** the same request ID is resubmitted after the referenced agent's `ephemeral` value changed
-- **THEN** the submission is treated as a changed definition and rejected, rather than replayed as the original execution
-
-#### Scenario: Fresh runtime on every invocation
-- **WHEN** a task attempt of an ephemeral agent is dispatched, and later a retry of that task is dispatched
-- **THEN** each attempt runs on a new runtime whose backend session starts empty, with no conversation or session state carried between the attempts
-
-#### Scenario: Default preserves behavior
-- **WHEN** the `ephemeral` field is omitted or set to false
-- **THEN** configuration loading, graph validation, scheduling, and observable results are indistinguishable from the behavior without this field
-
-#### Scenario: One reference per task still enforced
-- **WHEN** a definition references the same ephemeral agent from two different tasks
-- **THEN** validation rejects the graph with the same reused-agent explanation as for non-ephemeral agents
-
-#### Scenario: Facilitator continuity unchanged
-- **WHEN** a facilitator sends consecutive manual turns to an agent declared ephemeral
-- **THEN** the manual conversation preserves backend session continuity exactly as it does for non-ephemeral agents
-
-#### Scenario: Non-boolean flag value is rejected
-- **WHEN** an agent definition sets `ephemeral` to a non-boolean value
-- **THEN** configuration loading fails with an actionable error and no workflow execution starts
-
-### Requirement: Loop bodies re-arm for a bounded number of iterations
-A loop SHALL execute its member tasks (the body) as an ordinary dependency graph with at most one initial automatic attempt per task per iteration. The loop MUST NOT exceed its effective iteration cap — the declared `max_iterations` plus extensions granted only through the explicit extend control — and SHALL complete exactly that many iterations on normal completion unless its condition breaks the loop or an explicit stop completes the current iteration; cancellation may end it earlier and intervention may hold it indefinitely. When an iteration settles acceptably — every body task succeeded or failed under the existing tolerance rules, evaluated within that iteration — the system SHALL re-arm the body: reset body task states and dispatch the next iteration's attempts on fresh runtime conversations, exactly as first attempts. Each attempt SHALL record its one-based iteration number, and prior iterations' attempts SHALL remain inspectable history. A non-tolerated body task failure or any blocked body task SHALL hold the loop at its current iteration and put the execution in `needs_attention`, rather than finalize it as failed. This includes unmet success thresholds and blocking caused by outside prerequisites. Failed attempts and blocked body tasks SHALL retain their states and reasons. Outside consumers SHALL remain pending with an explicit loop-wait reason until the loop completes acceptably. While this hold exists, no new task SHALL dispatch and no loop SHALL advance anywhere in the execution; already dispatched work MAY finish and its outcomes SHALL be preserved. Eligible explicit retries SHALL repair the current iteration under the retry consistency rules; cancellation SHALL abandon the execution under the existing cleanup rules. Resume MUST NOT waive unresolved failures or thresholds, but SHALL be allowed to resolve independent artifact or judge attention causes while preserving the loop hold. This recovery activity is not task dispatch or iteration advance. A tolerated failure that leaves no body task blocked SHALL NOT cause this hold. The number of initial automatic body dispatches SHALL be bounded by the number of body tasks multiplied by the effective iteration cap; every cap increase is an explicit, idempotent, audited human action, so the system itself never dispatches unboundedly. Explicit retries through the retry API, whether requested by a user or coordinator agent, SHALL be excluded from this dispatch bound; they MUST retain the current iteration and MUST NOT consume or extend the iteration cap. This change SHALL NOT introduce a limit on explicit retry count or elapsed execution time. Retry eligibility and input-consistency guards SHALL continue to apply; failures MUST NOT trigger automatic retries. The execution's final state SHALL be derived from the final iteration's task states; tolerated failures in earlier iterations remain visible in attempt history but MUST NOT degrade the final verdict.
-
-#### Scenario: Static loop runs exactly N times
-- **WHEN** a loop with `max_iterations: 3` and a two-task body completes without failures
-- **THEN** each body task records three attempts with iteration numbers 1 through 3, and downstream tasks outside the loop start after the third iteration settles
-
-#### Scenario: Explicit retries do not consume the iteration budget
-- **WHEN** a one-task loop has max_iterations 1, its initial attempt fails, and two successive eligible explicit retries are requested, the first failing and the second succeeding
-- **THEN** all three attempts belong to iteration 1, the loop completes after the successful retry, no iteration 2 is created, and no retry occurs without an explicit request
-
-#### Scenario: Automatic dispatch bound excludes explicit retries
-- **WHEN** a two-task loop with max_iterations 3 completes all iterations and one body task required an eligible explicit retry
-- **THEN** there are six initial automatic body attempts and one explicit retry attempt, while the loop still completes exactly three iterations
-
-#### Scenario: Extended budget stays explicit and bounded
-- **WHEN** a 2-iteration loop is extended by 3 iterations through the control and completes the extended budget
-- **THEN** the loop runs five iterations in total, the extension is recorded as an audited control action, and the automatic dispatch bound grows to the extended cap only
-
-#### Scenario: Tolerated failure re-runs next iteration
-- **WHEN** an `allowed_to_fail` body task fails in iteration 1 and succeeds in iteration 2 of a 2-iteration loop
-- **THEN** iteration 1 settles acceptably, the task is dispatched fresh in iteration 2, and the execution succeeds with the iteration-1 failure visible in history
-
-#### Scenario: Hard failure waits for intervention
-- **WHEN** a body task without `allowed_to_fail` fails in any iteration
-- **THEN** the loop and execution enter needs_attention at the same iteration, outside consumers remain pending with a loop-wait reason, and new dispatch stops until intervention
-
-#### Scenario: Threshold failure waits for repair
-- **WHEN** tolerated reviewer failures leave a body consumer below its minimum successful dependency count
-- **THEN** the consumer is blocked, the loop and execution need attention, and an eligible retry of a failed reviewer can restore readiness without advancing or restarting the iteration
-
-#### Scenario: Outside prerequisite blocks a loop
-- **WHEN** a failed outside prerequisite makes a body task blocked before its first attempt
-- **THEN** the execution needs attention, identifies the failed prerequisite, and permits its retry only under the existing outside-task descendant guard
-
-#### Scenario: Failure holds even without outside consumers
-- **WHEN** a loop has a non-tolerated failure and all tasks are settled with no live workers or outside consumers
-- **THEN** the execution remains needs_attention rather than becoming terminal failed
-
-#### Scenario: Hold stops new independent work
-- **WHEN** one loop needs intervention while independent work elsewhere in the execution is running or ready
-- **THEN** running work may finish, ready work is not dispatched, and no loop advances until attention is resolved
-
-#### Scenario: Thresholds compose per iteration
-- **WHEN** a body consumer requires two of three same-loop dependencies and one fails tolerably in an iteration
-- **THEN** that iteration's consumer runs on the two successful results, exactly as the same graph without a loop
-
-#### Scenario: Sibling loops are independent
-- **WHEN** a definition declares two loops and an outside task depends on both
-- **THEN** each loop runs its own bounded iterations, and the outside task starts after both complete
-### Requirement: Iteration handoff is scoped and carried over
-A body task's input manifest SHALL resolve each `needs` entry to the same iteration's attempt for same-loop dependencies and to the single settled attempt for dependencies outside all loops. When a body re-arms for the next iteration, every body task's manifest SHALL additionally include a previous-iteration outcomes section: the settled attempts of all body tasks from the prior iteration in sorted task ID order, with task/agent/attempt/iteration identities, states, verdicts where recorded, errors, and successful result references — so a producer's output reaches an upstream body task (for example, reviewer reports reaching the implementer) without cyclic `needs`. For each prior-iteration body task, the section SHALL select its latest committed terminal attempt in that iteration, including any successful retry, rather than every historical retry attempt. Once the loop advances, prior iterations SHALL remain immutable and SHALL NOT accept new retries. Referenced artifacts remain subject to the existing verification rules, and responses MUST NOT be silently truncated in manifests.
-
-#### Scenario: Same-iteration resolution
-- **WHEN** body task B depends on body task A and iteration 2 dispatches B
-- **THEN** B's manifest references A's iteration-2 attempt result, never an earlier iteration's
-
-#### Scenario: Carry-over reaches upstream tasks
-- **WHEN** a loop's body contains an implementer with no dependencies and reviewers depending on it, and iteration 2 begins
-- **THEN** the implementer's iteration-2 manifest includes the reviewers' iteration-1 outcomes as readable result references
-
-#### Scenario: Outside consumers see final iteration results
-- **WHEN** a task outside a completed loop depends on a body task
-- **THEN** its manifest references that task's final-iteration attempt result
-
-#### Scenario: Outside dependencies are stable across iterations
-- **WHEN** a body task depends on a task outside all loops
-- **THEN** every iteration's manifest references that task's single settled attempt
+## ADDED Requirements
 
 ### Requirement: Loop conditions evaluate settled verdicts
 A loop with an `until_task` SHALL decide its continuation only after the whole iteration settles acceptably under the existing rules: loop failure and blocking holds, interrupted work, and pending or held verdict classification prevent evaluation and take precedence. A failed condition attempt, including timeout, missing response, backend failure, or uncertainty resolved as failure by `on_uncertain: error`, SHALL cause the existing non-tolerated loop-failure hold and SHALL NOT be evaluated through `on_verdict`. The verdict evaluated is the one recorded on `until_task`'s latest committed current-iteration attempt; a manual override of that verdict re-evaluates the condition. An accepted stop request SHALL take precedence over mapped actions and exhaustion policy once that loop's current iteration settles acceptably, even when other loops remain held; resolving that local control MUST preserve unrelated attention and MUST NOT itself release task dispatch or iteration advance; failure, interruption, and unresolved classification holds SHALL still prevent completion. The mapped action SHALL otherwise apply as follows: `break` completes the loop at the current iteration and outside consumers proceed with that iteration's results; `continue` re-arms the next iteration, or triggers the exhaustion policy when the effective iteration cap is reached; `needs_attention` holds the loop at the current iteration with an attention reason naming the loop, iteration, task, and verdict. No declared verdict name SHALL have implicit scheduling semantics. Names such as blocked or needs_input SHALL be treated as ordinary declared verdicts and SHALL require a mapping when declared by until_task. A structured information-request outcome MUST be explicitly declared; for a condition task its needs_attention mapping SHALL govern intervention. Non-condition tasks' semantic verdicts SHALL NOT independently hold execution. Tasks without verdicts SHALL NOT be classified, and free-form requests in their response SHALL NOT create a structured intervention outcome. Classification of tasks with verdicts SHALL still run even when no information-request option is declared; synthetic uncertainty remains governed by on_uncertain. A mapped needs_attention action SHALL retain priority at the cap, including when on_exhaustion is succeed. Only a continue action at the effective cap SHALL invoke exhaustion policy; manual overrides SHALL use the same decision path and MUST NOT advance beyond the effective cap. Exhaustion policies: `succeed` completes the loop exactly as a `break`; `needs_attention` (the default) holds with a `loop_exhausted` reason admitting the extend and stop controls. Exhaustion alone MUST NOT finalize the execution as failed. The succeed policy SHALL preserve the recorded condition verdict and ordinary task-outcome accounting, including tolerated failures; it completes the loop but does not guarantee workflow success or substantive correctness. Loops without condition fields keep the static behavior of completing their full budget.
