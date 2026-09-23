@@ -1,0 +1,117 @@
+# Nested bounded loops: three levels deep, following design section 9's compact
+# graph implement -> review -> consolidate -> test -> accept.
+#
+#   delivery_loop (root)      conditioned on `accept`
+#     test_loop               conditioned on `test`
+#       review_loop           conditioned on `consolidate`
+#
+# Each loop is a forest node wired with `parent`; a task's `loop` names its
+# direct owner. A loop's body is its whole task subtree, so the inner
+# implement/review/consolidate work re-runs inside every test_loop iteration,
+# and the whole subtree re-runs inside every delivery_loop iteration.
+#
+# The key distinction this example demonstrates: a NEGATIVE VERDICT (for
+# example `test` reporting `failed`) is a deliberate continuation signal that
+# re-arms the loop up to its cap. It is NOT a backend failure. A real task
+# error (a crashed or non-responsive agent) instead triggers a durable
+# needs_attention hold and is never silently converted into another iteration.
+#
+# The fake backend keeps this example portable and free to run.
+session_name: workflow-nested-loop
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - name: implementer
+    backend: fake
+    ephemeral: true
+    startup_prompt: "Implement the requested change. Edit only within the task scope."
+  - name: reviewer
+    backend: fake
+    ephemeral: true
+    startup_prompt: "Review the implementation strictly; list concrete defects with evidence."
+  - name: consolidator
+    backend: fake
+    ephemeral: true
+    startup_prompt: "Consolidate the review into a decision; end with exactly one verdict."
+  - name: tester
+    backend: fake
+    ephemeral: true
+    startup_prompt: "Run the tests and report the outcome; end with exactly one verdict."
+  - name: acceptor
+    backend: fake
+    startup_prompt: "Confirm the delivery is complete; end with exactly one verdict."
+workflow:
+  version: 1
+  name: nested-delivery
+  max_parallel: 1
+  task_timeout_seconds: 1800
+  loops:
+    # Innermost loop: iterate the code until the consolidator calls it ready.
+    review_loop:
+      max_iterations: 3
+      parent: test_loop
+      until_task: consolidate
+      on_verdict:
+        ready: break
+        revise: continue
+      on_exhaustion: needs_attention
+    # Middle loop: run the review subtree, then test it. A `failed` verdict is a
+    # negative verdict that re-arms the loop (re-running the whole inner review
+    # subtree), not a backend failure.
+    test_loop:
+      max_iterations: 2
+      parent: delivery_loop
+      until_task: test
+      on_verdict:
+        passed: break
+        failed: continue
+      on_exhaustion: needs_attention
+    # Root loop: gate final acceptance on the test result for this delivery.
+    delivery_loop:
+      max_iterations: 2
+      until_task: accept
+      on_verdict:
+        accepted: break
+        reject: continue
+      on_exhaustion: needs_attention
+  tasks:
+    implement:
+      agent: implementer
+      loop: review_loop
+      prompt: "Implement the change. In later iterations, address the previous iteration's review feedback."
+    review:
+      agent: reviewer
+      loop: review_loop
+      needs: [implement]
+      prompt: "Review this iteration's implementation; report remaining defects or state it is acceptable."
+    # The review_loop condition task: directly owned, declares verdicts, is
+    # mandatory, and is the unique sink of the review_loop subtree.
+    consolidate:
+      agent: consolidator
+      loop: review_loop
+      needs: [review]
+      verdicts:
+        ready: "The implementation is clean enough to test."
+        revise: "Concrete defects remain; iterate again."
+      prompt: "Decide whether the review subtree is done; select exactly one verdict."
+    # The test_loop condition task: it consumes the inner subtree's final result
+    # and its negative `failed` verdict re-arms the whole nested review subtree.
+    test:
+      agent: tester
+      loop: test_loop
+      needs: [consolidate]
+      verdicts:
+        passed: "All checks pass for this delivery."
+        failed: "Tests failed; the inner work must iterate again."
+      prompt: "Test the consolidated result; select exactly one verdict."
+    # The root delivery_loop condition task: its `reject` verdict repeats the
+    # outer loop; `accepted` completes the delivery.
+    accept:
+      agent: acceptor
+      loop: delivery_loop
+      needs: [test]
+      verdicts:
+        accepted: "The delivery is complete and shippable."
+        reject: "Not shippable yet; run another delivery iteration."
+      prompt: "Confirm the delivery outcome; select exactly one verdict."

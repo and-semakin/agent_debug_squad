@@ -23,10 +23,14 @@ type rawWorkflow struct {
 	OnUncertain         string                     `yaml:"on_uncertain"`
 }
 
-// rawWorkflowLoop accepts max_iterations plus the optional condition fields.
-// The strict workflow-subtree decoder rejects any additional loop field.
+// rawWorkflowLoop accepts max_iterations plus the optional condition fields
+// and the optional parent. Parent is captured as a raw node so parseWorkflow
+// can distinguish an omitted key (a root loop) from a present-but-invalid
+// value without coercing or trimming it. The strict workflow-subtree decoder
+// rejects any additional loop field.
 type rawWorkflowLoop struct {
 	MaxIterations int               `yaml:"max_iterations"`
+	Parent        yaml.Node         `yaml:"parent"`
 	UntilTask     string            `yaml:"until_task"`
 	OnVerdict     map[string]string `yaml:"on_verdict"`
 	OnExhaustion  string            `yaml:"on_exhaustion"`
@@ -106,8 +110,13 @@ func parseWorkflow(data []byte) (*domain.WorkflowDefinition, error) {
 		// definitions marshaling byte-identically to pre-loop parsers.
 		def.Loops = make(map[string]domain.WorkflowLoopDefinition, len(raw.Loops))
 		for loopName, loop := range raw.Loops {
+			parent, err := resolveLoopParent(loopName, &loop.Parent)
+			if err != nil {
+				return nil, err
+			}
 			definition := domain.WorkflowLoopDefinition{
 				MaxIterations: loop.MaxIterations,
+				Parent:        parent,
 				UntilTask:     strings.TrimSpace(loop.UntilTask),
 				OnExhaustion:  strings.TrimSpace(loop.OnExhaustion),
 			}
@@ -177,6 +186,35 @@ func nodeKindName(node *yaml.Node) string {
 	}
 }
 
+// resolveLoopParent strictly interprets a loop's optional `parent` node. An
+// omitted key (a zero node) declares a root loop and returns the empty string,
+// preserving absent-parent hashing. A present key must be a nonempty,
+// non-whitespace-only string; null, numeric, boolean, sequence, and map values
+// as well as empty or whitespace-only strings are rejected without trimming or
+// coercion, so an explicit invalid parent is never mistaken for an absent one.
+func resolveLoopParent(loopName string, node *yaml.Node) (string, error) {
+	if node.Kind == 0 {
+		return "", nil
+	}
+	rejection := func(reason string) error {
+		return fmt.Errorf("loop %q: parent %s\nexample:\n  loops:\n    %s:\n      max_iterations: 3\n      parent: outer_loop", loopName, reason, loopName)
+	}
+	if node.Kind != yaml.ScalarNode {
+		return "", rejection(fmt.Sprintf("must be a declared loop name, got %s", nodeKindName(node)))
+	}
+	switch node.Tag {
+	case "!!str":
+		if node.Value == "" || strings.TrimSpace(node.Value) == "" {
+			return "", rejection("must be a nonempty declared loop name; omit the field for a root loop")
+		}
+		return node.Value, nil
+	case "!!null":
+		return "", rejection("must name a declared loop; omit the field for a root loop rather than setting null")
+	default:
+		return "", rejection(fmt.Sprintf("must be a string naming a declared loop, got %s", node.Tag))
+	}
+}
+
 var workflowIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // ValidateWorkflowDefinition checks graph invariants and agent references
@@ -229,6 +267,20 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 		if def.Loops[loopName].MaxIterations < 1 {
 			return loopErrorf(loopName, "max_iterations is required and must be a positive integer, got %d", def.Loops[loopName].MaxIterations)
 		}
+		if parent := def.Loops[loopName].Parent; parent != "" {
+			if parent == loopName {
+				return loopErrorf(loopName, "cannot be its own parent; name a distinct enclosing loop or omit parent for a root loop")
+			}
+			if _, declared := def.Loops[parent]; !declared {
+				return loopErrorf(loopName, "parent %q is not a declared loop; name an enclosing loop or omit parent for a root loop", parent)
+			}
+		}
+	}
+	// A well-formed parent set must be a forest: reject any parent cycle after
+	// the direct self/undeclared checks above so a cycle of length > 1 is
+	// named with a valid example rather than looping during ancestry walks.
+	if loopName, cycle := findLoopParentCycle(def); loopName != "" {
+		return loopErrorf(loopName, "parent relationship forms a cycle: %s; parents must form a forest, so break the loop by removing one parent", cycle)
 	}
 
 	usedAgents := map[string]string{}
@@ -289,26 +341,40 @@ func ValidateWorkflowDefinition(def domain.WorkflowDefinition, agents []domain.A
 	}
 
 	for _, loopName := range loopNames {
-		if !loopHasMemberTasks(def, loopName) {
-			return loopErrorf(loopName, "has no member tasks; label at least one task with loop: %s", loopName)
+		if len(def.LoopSubtreeTasks(loopName)) == 0 {
+			return loopErrorf(loopName, "has no member tasks anywhere in its subtree; label at least one task with loop: %s or with one of its descendant loops", loopName)
 		}
 	}
 	for _, taskID := range taskIDs {
 		task := def.Tasks[taskID]
-		if task.Loop == "" {
+		consumerLoop := task.Loop
+		if consumerLoop == "" {
 			continue
 		}
 		for _, dep := range task.Needs {
-			depLoop := def.Tasks[dep].Loop
-			if depLoop != "" && depLoop != task.Loop {
-				return loopErrorf(task.Loop, "task %q depends on task %q in loop %q; a loop body may depend only on its own tasks and on tasks outside all loops, so route the handoff through an outside task", taskID, dep, depLoop)
+			producerLoop := def.Tasks[dep].Loop
+			// A dependency is permitted when either endpoint is at workflow
+			// scope, when both share one direct owner, or when one owner is an
+			// ancestor-or-self of the other (ancestor input or descendant
+			// output). Only edges between two unrelated loop branches are
+			// rejected; authors bridge them with an explicit task in the
+			// least-common enclosing scope (workflow scope for separate roots).
+			if producerLoop == "" || producerLoop == consumerLoop {
+				continue
 			}
+			if def.LoopContains(consumerLoop, producerLoop) || def.LoopContains(producerLoop, consumerLoop) {
+				continue
+			}
+			return loopErrorf(consumerLoop, "task %q depends on task %q in loop %q; these loops are unrelated branches, so route the handoff through an explicit task in their common enclosing scope or outside all loops, subject to the same boundary-cycle checks", taskID, dep, producerLoop)
 		}
 	}
 
 	// Boundary cycles can also appear as raw cycles when body tasks chain;
-	// detect them on the condensed graph first so the rejection names the loop.
-	if loopName, cycle := findWorkflowBoundaryCycle(def); loopName != "" {
+	// detect them at every scope first so the rejection names the loop. Each
+	// scope projects its whole subtree onto directly owned tasks plus immediate
+	// child-loop nodes, so `inner.A -> outer.X -> inner.B` is caught at outer's
+	// scope even when the raw task graph is acyclic.
+	if loopName, cycle := findBoundaryCycle(def); loopName != "" {
 		return loopErrorf(loopName, "dependency cycle through the loop boundary: %s", cycle)
 	}
 	if cycle := findWorkflowCycle(def.Tasks); cycle != "" {
@@ -397,32 +463,38 @@ func validateLoopConditions(def domain.WorkflowDefinition) error {
 			}
 		}
 
-		// until_task must be the unique body sink: every other body task must
-		// reach it through same-loop needs edges. A singleton body qualifies.
+		// until_task must be the unique subtree sink: every other task in the
+		// loop's whole subtree must reach it through needs edges contained in
+		// that subtree. A singleton body qualifies.
 		if uncovered, ok := findUncoveredBodyTask(def, loopName, untilTask); !ok {
-			return conditionErrorf(loopName, "until_task %q must be the unique body sink, but body task %q does not reach it through same-loop dependencies; connect %q to %q", untilTask, uncovered, uncovered, untilTask)
+			return conditionErrorf(loopName, "until_task %q must be the unique body sink, but subtree task %q does not reach it through dependencies contained in the loop subtree; connect %q to %q", untilTask, uncovered, uncovered, untilTask)
 		}
 	}
 	return nil
 }
 
-// findUncoveredBodyTask reports whether every body task other than untilTask
-// is a direct or transitive predecessor of untilTask through same-loop needs
-// edges — equivalently, whether untilTask (the loop's sink) transitively
-// depends on every other body task. It returns (uncoveredTaskID, false) for the
-// first body task that does not reach the sink; ok is true when the sink covers
-// the whole body. A singleton body trivially qualifies.
+// findUncoveredBodyTask reports whether every task in loopName's subtree other
+// than untilTask is a direct or transitive predecessor of untilTask through
+// needs edges that stay inside that subtree — equivalently, whether untilTask
+// (the loop's sink) transitively depends on every other subtree task. It
+// returns (uncoveredTaskID, false) for the first subtree task that does not
+// reach the sink; ok is true when the sink covers the whole subtree. A
+// singleton subtree trivially qualifies.
 func findUncoveredBodyTask(def domain.WorkflowDefinition, loopName, untilTask string) (string, bool) {
-	// Walk untilTask's same-loop needs edges transitively: the collected set is
-	// exactly the body tasks whose output flows into the sink. Any body task
-	// outside this set is a branch that never reaches untilTask.
+	subtree := map[string]bool{}
+	for _, taskID := range def.LoopSubtreeTasks(loopName) {
+		subtree[taskID] = true
+	}
+	// Walk untilTask's in-subtree needs edges backwards (to predecessors): the
+	// collected set is exactly the subtree tasks whose output flows into the
+	// sink. Any subtree task outside this set never reaches untilTask.
 	reaches := map[string]bool{untilTask: true}
 	queue := []string{untilTask}
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 		for _, dep := range def.Tasks[current].Needs {
-			if def.Tasks[dep].Loop != loopName || reaches[dep] {
+			if !subtree[dep] || reaches[dep] {
 				continue
 			}
 			reaches[dep] = true
@@ -430,7 +502,7 @@ func findUncoveredBodyTask(def domain.WorkflowDefinition, loopName, untilTask st
 		}
 	}
 	for _, taskID := range sortedTaskIDs(def.Tasks) {
-		if def.Tasks[taskID].Loop != loopName || taskID == untilTask {
+		if !subtree[taskID] || taskID == untilTask {
 			continue
 		}
 		if !reaches[taskID] {
@@ -440,35 +512,98 @@ func findUncoveredBodyTask(def domain.WorkflowDefinition, loopName, untilTask st
 	return "", true
 }
 
-func loopHasMemberTasks(def domain.WorkflowDefinition, loopName string) bool {
-	for _, task := range def.Tasks {
-		if task.Loop == loopName {
-			return true
+// findLoopParentCycle walks every loop's parent chain to detect a cycle among
+// parent relationships of length greater than one (self-parenting and
+// undeclared parents are rejected by the caller beforehand). It returns the
+// offending loop name and a `a -> b -> a` path string, or the zero values when
+// the parents form a forest.
+func findLoopParentCycle(def domain.WorkflowDefinition) (string, string) {
+	const (
+		unvisited = 0
+		visiting  = 1
+		done      = 2
+	)
+	state := make(map[string]int, len(def.Loops))
+	var walk func(name string, path []string) (string, string)
+	walk = func(name string, path []string) (string, string) {
+		state[name] = visiting
+		path = append(path, name)
+		parent := def.Loops[name].Parent
+		if parent != "" {
+			switch state[parent] {
+			case visiting:
+				for i, open := range path {
+					if open == parent {
+						cycle := append(append([]string{}, path[i:]...), parent)
+						return name, strings.Join(cycle, " -> ")
+					}
+				}
+				return name, parent + " -> " + parent
+			case unvisited:
+				if loop, cycle := walk(parent, path); loop != "" {
+					return loop, cycle
+				}
+			}
+		}
+		state[name] = done
+		return "", ""
+	}
+	for _, name := range sortedLoopNames(def.Loops) {
+		if state[name] != unvisited {
+			continue
+		}
+		if loop, cycle := walk(name, nil); loop != "" {
+			return loop, cycle
 		}
 	}
-	return false
+	return "", ""
 }
 
-// findWorkflowBoundaryCycle collapses every loop body into a single node and
-// looks for dependency cycles in the condensed graph; it runs before the raw
-// graph check so boundary cycles are reported with the loop's name. Cycles
-// that never touch a loop are left to findWorkflowCycle's task-named error,
-// as are body-internal cycles (invisible once a body collapses to one node).
-// The reported loop and cycle path are deterministic (sorted task/edge order).
-func findWorkflowBoundaryCycle(def domain.WorkflowDefinition) (string, string) {
-	node := func(taskID string) string {
-		if loop := def.Tasks[taskID].Loop; loop != "" {
-			return "loop:" + loop
+// findBoundaryCycle looks for a dependency cycle that crosses a loop boundary
+// at any scope — the workflow root and every declared loop. Each scope is
+// checked by projecting its whole subtree onto nodes that are either directly
+// owned tasks or immediate child loops; edges internal to one child are omitted
+// because that child is checked in its own recursive pass. Only cycles that
+// include at least one loop node are reported here; a cycle among directly owned
+// task nodes is a raw task cycle left to findWorkflowCycle so its message is
+// unchanged. Scopes are examined root-first, then by loop name, and each scope
+// is deterministic (sorted task/edge order), so nonnested definitions report
+// exactly the loop and path the previous single-collapse check did.
+func findBoundaryCycle(def domain.WorkflowDefinition) (string, string) {
+	scopes := append([]string{""}, sortedLoopNames(def.Loops)...)
+	for _, scope := range scopes {
+		if loopName, cycle, found := findScopeBoundaryCycle(def, scope); found {
+			return loopName, cycle
 		}
-		return taskID
+	}
+	return "", ""
+}
+
+// findScopeBoundaryCycle builds the projected dependency graph for one scope and
+// reports a boundary cycle through it. When the scope is a loop, the offending
+// loop is that scope; at workflow scope it is the lexicographically first loop
+// node in the cycle.
+func findScopeBoundaryCycle(def domain.WorkflowDefinition, scope string) (string, string, bool) {
+	inSubtree := func(taskID string) bool {
+		if scope == "" {
+			return true
+		}
+		owner := def.Tasks[taskID].Loop
+		return owner != "" && def.LoopContains(scope, owner)
 	}
 	edges := map[string][]string{}
 	nodes := map[string]bool{}
 	for _, taskID := range sortedTaskIDs(def.Tasks) {
-		from := node(taskID)
+		if !inSubtree(taskID) {
+			continue
+		}
+		from := projectToScope(def, scope, taskID)
 		nodes[from] = true
 		for _, dep := range def.Tasks[taskID].Needs {
-			to := node(dep)
+			if !inSubtree(dep) {
+				continue
+			}
+			to := projectToScope(def, scope, dep)
 			nodes[to] = true
 			if from != to {
 				edges[from] = append(edges[from], to)
@@ -488,14 +623,14 @@ func findWorkflowBoundaryCycle(def domain.WorkflowDefinition) (string, string) {
 		visiting = 1
 		visited  = 2
 	)
-	states := make(map[string]int, len(nodes))
+	state := make(map[string]int, len(nodes))
 	var stack []string
 	var visit func(name string) []string
 	visit = func(name string) []string {
-		states[name] = visiting
+		state[name] = visiting
 		stack = append(stack, name)
 		for _, dep := range edges[name] {
-			switch states[dep] {
+			switch state[dep] {
 			case visiting:
 				for i, open := range stack {
 					if open == dep {
@@ -512,11 +647,11 @@ func findWorkflowBoundaryCycle(def domain.WorkflowDefinition) (string, string) {
 			}
 		}
 		stack = stack[:len(stack)-1]
-		states[name] = visited
+		state[name] = visited
 		return nil
 	}
 	for _, name := range sortedNodeNames {
-		if states[name] != 0 {
+		if state[name] != 0 {
 			continue
 		}
 		if cycle := visit(name); cycle != nil {
@@ -526,17 +661,45 @@ func findWorkflowBoundaryCycle(def domain.WorkflowDefinition) (string, string) {
 					loops = append(loops, strings.TrimPrefix(entry, "loop:"))
 				}
 			}
+			if len(loops) == 0 {
+				// A cycle among directly owned tasks only: a raw task cycle,
+				// left to findWorkflowCycle's task-named error.
+				return "", "", false
+			}
 			sort.Strings(loops)
 			reported := strings.Join(cycle, " -> ")
-			if len(loops) == 0 {
-				// An outside-only cycle: not a boundary problem, let the raw
-				// graph check report it with its task-named error.
-				return "", reported
+			if scope != "" {
+				return scope, reported, true
 			}
-			return loops[0], reported
+			return loops[0], reported, true
 		}
 	}
-	return "", ""
+	return "", "", false
+}
+
+// projectToScope maps a task to its node in the given scope's projected graph:
+// its own ID when directly owned by the scope (including workflow scope with no
+// loop owner), otherwise the immediate child loop of the scope that contains
+// it, rendered as `loop:name`. At workflow scope a loop-owned task projects to
+// its root ancestor loop.
+func projectToScope(def domain.WorkflowDefinition, scope, taskID string) string {
+	owner := def.Tasks[taskID].Loop
+	if owner == scope {
+		return taskID
+	}
+	ancestry := def.LoopAncestry(owner)
+	if len(ancestry) == 0 {
+		return taskID
+	}
+	if scope == "" {
+		return "loop:" + ancestry[0]
+	}
+	for i, name := range ancestry {
+		if name == scope && i+1 < len(ancestry) {
+			return "loop:" + ancestry[i+1]
+		}
+	}
+	return taskID
 }
 
 func sortedLoopNames(loops map[string]domain.WorkflowLoopDefinition) []string {

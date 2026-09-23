@@ -482,7 +482,7 @@ func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, 
 		}
 	}
 	snapshot := &domain.WorkflowSnapshot{
-		SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
+		SchemaVersion:  schemaVersionForDefinition(def),
 		ExecutionID:    executionID,
 		Revision:       1,
 		Definition:     def,

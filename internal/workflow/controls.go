@@ -394,14 +394,23 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 	}
 
 	// A body task's retry targets its latest failed/interrupted attempt in
-	// the loop's current iteration and retains that iteration. Earlier
-	// iterations are immutable history: after an advance the task state no
+	// the loop's current invocation and retains that invocation. Earlier
+	// invocations are immutable history: after an advance the task state no
 	// longer reports a current-iteration failure, so the guard above
-	// rejects the request.
+	// rejects the request. A nested execution identifies the invocation by its
+	// complete iteration path; a nonnested execution keeps the local iteration.
 	taskDef := snapshot.Definition.Tasks[taskID]
+	nested := snapshot.Definition.HasNesting()
 	retryIteration := currentIteration(snapshot, taskDef)
+	var retryPath []domain.IterationEntry
 	if taskDef.Loop != "" {
-		target := lastAttemptInIteration(task, retryIteration)
+		var target *domain.WorkflowAttempt
+		if nested {
+			retryPath = loopCurrentPath(snapshot, taskDef.Loop)
+			target = lastAttemptInLoopContext(task, snapshot.Loops[taskDef.Loop], true)
+		} else {
+			target = lastAttemptInIteration(task, retryIteration)
+		}
 		if target == nil || (target.State != domain.WorkflowAttemptFailed && target.State != domain.WorkflowAttemptInterrupted) {
 			return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: task %q has no failed or interrupted attempt in loop %s iteration %d", ErrRetryConflict, taskID, taskDef.Loop, retryIteration)
 		}
@@ -428,21 +437,27 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 	now := m.now()
 	attemptNumber := len(task.Attempts) + 1
 	task.Attempts = append(task.Attempts, domain.WorkflowAttempt{
-		Attempt:    attemptNumber,
-		Iteration:  retryIteration,
-		State:      domain.WorkflowAttemptQueued,
-		Reason:     "retry_reserved",
-		ReservedAt: &now,
+		Attempt:       attemptNumber,
+		Iteration:     retryIteration,
+		IterationPath: retryPath,
+		State:         domain.WorkflowAttemptQueued,
+		Reason:        "retry_reserved",
+		ReservedAt:    &now,
 	})
 	task.State = domain.WorkflowTaskPending
 	task.BlockedReason = ""
-	// An eligible retry reopens a done loop as running at the same
-	// iteration; outside consumers wait for it to settle again.
+	// An eligible retry reopens a done owning invocation and, for a nested
+	// execution, every done ancestor invocation at the same paths; outside
+	// consumers wait for it to settle again. Counters, extensions, and stop
+	// intent are kept; descendants are never reinitialized.
 	if taskDef.Loop != "" {
-		if loop := snapshot.Loops[taskDef.Loop]; loop != nil && loop.State == domain.WorkflowLoopDone {
-			loop.State = domain.WorkflowLoopRunning
+		for _, name := range snapshot.Definition.LoopAncestry(taskDef.Loop) {
+			if loop := snapshot.Loops[name]; loop != nil && loop.State == domain.WorkflowLoopDone {
+				loop.State = domain.WorkflowLoopRunning
+			}
 		}
 	}
+
 	snapshot.RetryRequests[req.RequestID] = domain.WorkflowRetryRecord{
 		RequestID:              req.RequestID,
 		TaskID:                 taskID,
@@ -472,6 +487,7 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 
 	_ = m.store.AppendWorkflowEvent(executionID, domain.WorkflowControlEvent{
 		Type: "retry", At: now, RequestID: req.RequestID, TaskID: taskID,
+		IterationPath:          retryPath,
 		ConfirmPreviousStopped: req.ConfirmPreviousStopped,
 	})
 	if err := m.persistLocked(snapshot); err != nil {
@@ -526,8 +542,12 @@ func onlyRetryRepairableReasons(snapshot *domain.WorkflowSnapshot) bool {
 // block only when they already have an attempt in the retried iteration;
 // earlier iterations are immutable history and never block. Descendants
 // outside the loop block on any reservation because they consume the loop's
-// final result.
+// final result. A nested execution instead scopes each reservation by the
+// deepest loop shared between the producer's and descendant's owner chains.
 func assertNoDescendantAttempts(snapshot *domain.WorkflowSnapshot, taskID string) error {
+	if snapshot.Definition.HasNesting() {
+		return assertNoDescendantAttemptsNested(snapshot, taskID)
+	}
 	taskLoop := snapshot.Definition.Tasks[taskID].Loop
 	currentIter := 0
 	if taskLoop != "" {
@@ -741,16 +761,17 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 		for i := range task.Attempts {
 			attempt := &task.Attempts[i]
 			attemptView := domain.WorkflowAttemptView{
-				Attempt:      attempt.Attempt,
-				Iteration:    attempt.Iteration,
-				RunID:        attempt.RunID,
-				State:        attempt.State,
-				Reason:       attempt.Reason,
-				Error:        attempt.Error,
-				ReservedAt:   attempt.ReservedAt,
-				DispatchedAt: attempt.DispatchedAt,
-				CompletedAt:  attempt.CompletedAt,
-				Verdict:      attempt.Verdict,
+				Attempt:       attempt.Attempt,
+				Iteration:     attempt.Iteration,
+				IterationPath: attempt.IterationPath,
+				RunID:         attempt.RunID,
+				State:         attempt.State,
+				Reason:        attempt.Reason,
+				Error:         attempt.Error,
+				ReservedAt:    attempt.ReservedAt,
+				DispatchedAt:  attempt.DispatchedAt,
+				CompletedAt:   attempt.CompletedAt,
+				Verdict:       attempt.Verdict,
 			}
 			if attempt.ResultPath != "" {
 				attemptView.Result = &domain.WorkflowResultRef{
@@ -781,6 +802,8 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 			Iteration:     loop.Iteration,
 			MaxIterations: loopDef.MaxIterations,
 			State:         loop.State,
+			IterationPath: loopCurrentPath(snapshot, name),
+			Parent:        loopDef.Parent,
 			StopRequested: loop.StopRequested,
 		}
 		if loopDef.HasCondition() {

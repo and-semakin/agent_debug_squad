@@ -121,7 +121,7 @@ func TestWorkflowSnapshotRoundTrip(t *testing.T) {
 	st := testStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	snapshot := domain.WorkflowSnapshot{
-		SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
+		SchemaVersion:  domain.WorkflowSnapshotNonNestedSchemaVersion,
 		ExecutionID:    "wf_000001",
 		Revision:       3,
 		Definition:     domain.WorkflowDefinition{Version: 1, Name: "chain", MaxParallel: 1, TaskTimeoutSeconds: 60, Tasks: map[string]domain.WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p"}}},
@@ -219,9 +219,9 @@ func TestLoadWorkflowSnapshotAcceptsSchema1(t *testing.T) {
 		t.Fatalf("legacy task must load loopless: %+v", loaded.Definition.Tasks["a"])
 	}
 
-	// Freshly written snapshots carry the current schema and keep loop state.
+	// Freshly written nonnested snapshots carry the current nonnested schema and keep loop state.
 	snapshot := domain.WorkflowSnapshot{
-		SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
+		SchemaVersion:  domain.WorkflowSnapshotNonNestedSchemaVersion,
 		ExecutionID:    "wf_000007",
 		Definition:     domain.WorkflowDefinition{Version: 1, Name: "loop", MaxParallel: 1, TaskTimeoutSeconds: 60, Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 3}}, Tasks: map[string]domain.WorkflowTaskDefinition{"a": {Agent: "x", Prompt: "p", Loop: "refine"}}},
 		State:          domain.WorkflowRunning,
@@ -237,8 +237,8 @@ func TestLoadWorkflowSnapshotAcceptsSchema1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if reloaded.SchemaVersion != domain.WorkflowSnapshotSchemaVersion {
-		t.Fatalf("new snapshots must persist the current schema, got %d", reloaded.SchemaVersion)
+	if reloaded.SchemaVersion != domain.WorkflowSnapshotNonNestedSchemaVersion {
+		t.Fatalf("new nonnested snapshots must persist the nonnested schema, got %d", reloaded.SchemaVersion)
 	}
 	if reloaded.Loops["refine"] == nil || reloaded.Loops["refine"].Iteration != 2 || reloaded.Loops["refine"].State != domain.WorkflowLoopRunning {
 		t.Fatalf("loop execution must round-trip: %+v", reloaded.Loops)

@@ -327,7 +327,7 @@ func TestRecoveryRefusesTwoNonterminalExecutions(t *testing.T) {
 	now := time.Now().UTC()
 	for i, id := range []string{"wf_000001", "wf_000002"} {
 		snapshot := &domain.WorkflowSnapshot{
-			SchemaVersion:  domain.WorkflowSnapshotSchemaVersion,
+			SchemaVersion:  domain.WorkflowSnapshotNonNestedSchemaVersion,
 			ExecutionID:    id,
 			Revision:       1,
 			Definition:     *def,

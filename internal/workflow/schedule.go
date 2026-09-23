@@ -153,6 +153,7 @@ func dependencyAcceptable(dep *domain.WorkflowTaskExecution, def domain.Workflow
 func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) bool {
 	changed := false
 	def := snapshot.Definition
+	nested := def.HasNesting()
 	for _, taskID := range topologicalOrder(def) {
 		task := snapshot.Tasks[taskID]
 		if task == nil {
@@ -166,15 +167,15 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 		if _, live := m.liveForTaskLocked(taskID); live {
 			continue
 		}
-		// For a loop body task "the last attempt" means the last attempt of
-		// the loop's current iteration; with none yet, the task re-evaluates
-		// from dependencies below. Loopless tasks keep whole-history scope.
+		// For a loop body task "the last attempt" means the last attempt of the
+		// loop's current invocation context (a complete iteration path when
+		// nested, the local iteration otherwise); with none yet, the task
+		// re-evaluates from dependencies below. Loopless tasks keep whole-history
+		// scope.
 		taskDef := def.Tasks[taskID]
 		var last *domain.WorkflowAttempt
 		if taskDef.Loop != "" {
-			if loop := snapshot.Loops[taskDef.Loop]; loop != nil {
-				last = lastAttemptInIteration(task, loop.Iteration)
-			}
+			last = lastAttemptInLoopContext(task, snapshot.Loops[taskDef.Loop], nested)
 		} else {
 			last = task.LastAttempt()
 		}
@@ -227,22 +228,32 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 		blockedBy := ""
 		waitingLoop := ""
 		successes := 0
-		for _, depID := range depDef.Needs {
+		for _, depID := range sortedDependencyIDs(depDef.Needs) {
 			dep := snapshot.Tasks[depID]
 			if dep == nil {
 				continue
 			}
 			depTaskDef := def.Tasks[depID]
 			if depTaskDef.Loop != "" && depTaskDef.Loop != taskDef.Loop {
-				// The consumer sits outside the dependency's loop (v1
-				// rejects cross-loop combinations): it stays pending with an
-				// explicit loop-wait reason until the loop completes.
-				if loop := snapshot.Loops[depTaskDef.Loop]; loop != nil && loop.State != domain.WorkflowLoopDone {
-					allSettled = false
-					if waitingLoop == "" {
-						waitingLoop = fmt.Sprintf("waiting_loop:%s", depTaskDef.Loop)
+				// A cross-scope dependency where the producer sits in a
+				// descendant loop (or in any loop for a workflow-scope
+				// consumer) waits for the actual completion barrier to finish;
+				// an ancestor-loop producer is stable within the consumer's
+				// current invocation and needs no barrier wait. For a
+				// nonnested definition the barrier is the producer's own loop,
+				// reproducing the legacy loop-wait gate exactly.
+				barrier := depTaskDef.Loop
+				if nested {
+					barrier = barrierLoopFor(def, taskDef.Loop, depTaskDef.Loop)
+				}
+				if barrier != "" {
+					if loop := snapshot.Loops[barrier]; loop != nil && loop.State != domain.WorkflowLoopDone {
+						allSettled = false
+						if waitingLoop == "" {
+							waitingLoop = waitLoopReason(snapshot, barrier)
+						}
+						continue
 					}
-					continue
 				}
 			}
 			if dep.State == domain.WorkflowTaskInterrupted {
@@ -339,9 +350,14 @@ func (m *Manager) dispatchTaskLocked(snapshot *domain.WorkflowSnapshot, taskID s
 
 	// Verify every committed dependency and carry-over result before
 	// dispatch. The manifest is the authoritative input list, so artifact
-	// verification covers exactly what the attempt will read.
+	// verification covers exactly what the attempt will read, including every
+	// enclosing loop's ancestor carry-over section.
 	manifest := buildManifest(snapshot, taskID)
-	for _, entry := range append(append([]domain.WorkflowDependencyInput{}, manifest.Dependencies...), manifest.PreviousIteration...) {
+	inputs := append(append([]domain.WorkflowDependencyInput{}, manifest.Dependencies...), manifest.PreviousIteration...)
+	for _, section := range manifest.AncestorPreviousIterations {
+		inputs = append(inputs, section.Outcomes...)
+	}
+	for _, entry := range inputs {
 		if entry.Status != string(domain.WorkflowAttemptSucceeded) || entry.ResultPath == "" {
 			continue
 		}
@@ -358,10 +374,14 @@ func (m *Manager) dispatchTaskLocked(snapshot *domain.WorkflowSnapshot, taskID s
 	if last := task.LastAttempt(); last != nil && last.State == domain.WorkflowAttemptQueued {
 		attemptSlot = last
 	} else {
-		task.Attempts = append(task.Attempts, domain.WorkflowAttempt{
+		newAttempt := domain.WorkflowAttempt{
 			Attempt:   len(task.Attempts) + 1,
 			Iteration: currentIteration(snapshot, def),
-		})
+		}
+		if snapshot.Definition.HasNesting() && def.Loop != "" {
+			newAttempt.IterationPath = loopCurrentPath(snapshot, def.Loop)
+		}
+		task.Attempts = append(task.Attempts, newAttempt)
 		attemptSlot = &task.Attempts[len(task.Attempts)-1]
 	}
 	attemptNumber := attemptSlot.Attempt
@@ -747,11 +767,15 @@ func topologicalOrder(def domain.WorkflowDefinition) []string {
 // body-task outcomes.
 func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.WorkflowInputManifest {
 	def := snapshot.Definition.Tasks[taskID]
+	nested := snapshot.Definition.HasNesting()
 	manifest := domain.WorkflowInputManifest{
 		ExecutionID:  snapshot.ExecutionID,
 		TaskID:       taskID,
 		Iteration:    currentIteration(snapshot, def),
 		Dependencies: []domain.WorkflowDependencyInput{},
+	}
+	if nested && def.Loop != "" {
+		manifest.IterationPath = loopCurrentPath(snapshot, def.Loop)
 	}
 	for _, depID := range sortedDependencyIDs(def.Needs) {
 		dep := snapshot.Tasks[depID]
@@ -772,6 +796,9 @@ func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.Work
 			Error:     attempt.Error,
 			Verdict:   attempt.Verdict,
 		}
+		if nested {
+			entry.IterationPath = attempt.IterationPath
+		}
 		if attempt.State == domain.WorkflowAttemptSucceeded {
 			entry.ResultPath = attempt.ResultPath
 			entry.ResultSize = attempt.ResultSize
@@ -780,8 +807,22 @@ func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.Work
 		manifest.Dependencies = append(manifest.Dependencies, entry)
 	}
 	if def.Loop != "" {
-		if loop := snapshot.Loops[def.Loop]; loop != nil && loop.Iteration > 1 {
-			manifest.PreviousIteration = previousIterationInputs(snapshot, def.Loop, loop.Iteration-1)
+		loop := snapshot.Loops[def.Loop]
+		if loop != nil {
+			if nested {
+				// The owner's own previous-iteration section exists only past
+				// its first local iteration, but ancestor sections are computed
+				// independently: an inner task at inner=1 under outer=2 still
+				// receives the previous outer iteration's whole-subtree feedback.
+				if loop.Iteration > 1 {
+					summarized := decrementPath(loop.IterationPath)
+					manifest.PreviousIterationPath = summarized
+					manifest.PreviousIteration = nestedPreviousIterationOutcomes(snapshot, def.Loop, summarized)
+				}
+				manifest.AncestorPreviousIterations = nestedAncestorPreviousIterations(snapshot, def.Loop)
+			} else if loop.Iteration > 1 {
+				manifest.PreviousIteration = previousIterationInputs(snapshot, def.Loop, loop.Iteration-1)
+			}
 		}
 	}
 	return manifest
@@ -801,7 +842,7 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 	prompt := strings.TrimSpace(snapshot.Definition.Tasks[taskID].Prompt)
 	var builder strings.Builder
 	builder.WriteString(prompt)
-	if len(manifest.Dependencies) == 0 && len(manifest.PreviousIteration) == 0 {
+	if len(manifest.Dependencies) == 0 && len(manifest.PreviousIteration) == 0 && len(manifest.AncestorPreviousIterations) == 0 {
 		return builder.String()
 	}
 	if len(manifest.Dependencies) > 0 {
@@ -824,33 +865,76 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 		}
 	}
 	if len(manifest.PreviousIteration) > 0 {
+		nested := snapshot.Definition.HasNesting()
 		builder.WriteString("\n--- Previous iteration outcomes ---\n")
-		fmt.Fprintf(&builder, "Loop iteration %d; the loop body settled in iteration %d as follows. Read each referenced local response file for the complete result; do not rely on this summary alone.\n",
-			manifest.Iteration, manifest.Iteration-1)
+		if nested {
+			fmt.Fprintf(&builder, "Loop iteration %s; the loop body settled in the previous invocation %s as follows. Read each referenced local response file for the complete result; do not rely on this summary alone.\n",
+				domain.RenderIterationPath(manifest.IterationPath), domain.RenderIterationPath(manifest.PreviousIterationPath))
+		} else {
+			fmt.Fprintf(&builder, "Loop iteration %d; the loop body settled in iteration %d as follows. Read each referenced local response file for the complete result; do not rely on this summary alone.\n",
+				manifest.Iteration, manifest.Iteration-1)
+		}
 		for _, entry := range manifest.PreviousIteration {
 			switch entry.Status {
 			case string(domain.WorkflowAttemptSucceeded):
 				ref := joinWorkflowPath(execDir, entry.ResultPath)
 				if entry.Verdict != nil {
-					fmt.Fprintf(&builder, "- %s: succeeded, verdict %s (agent %s, attempt %d, iteration %d, run %s). Full response: %s\n",
-						entry.TaskID, entry.Verdict.Value, entry.Agent, entry.Attempt, entry.Iteration, entry.RunID, ref)
+					fmt.Fprintf(&builder, "- %s: succeeded, verdict %s (agent %s, attempt %d, %s, run %s). Full response: %s\n",
+						entry.TaskID, entry.Verdict.Value, entry.Agent, entry.Attempt, carryOverContextLabel(entry), entry.RunID, ref)
 				} else {
-					fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, iteration %d, run %s). Full response: %s\n",
-						entry.TaskID, entry.Agent, entry.Attempt, entry.Iteration, entry.RunID, ref)
+					fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, %s, run %s). Full response: %s\n",
+						entry.TaskID, entry.Agent, entry.Attempt, carryOverContextLabel(entry), entry.RunID, ref)
 				}
 			default:
 				errorText := entry.Error
 				if errorText == "" {
 					errorText = "no error detail recorded"
 				}
-				fmt.Fprintf(&builder, "- %s: %s (agent %s, attempt %d, iteration %d, run %s). Error: %s\n",
-					entry.TaskID, entry.Status, entry.Agent, entry.Attempt, entry.Iteration, entry.RunID, errorText)
+				fmt.Fprintf(&builder, "- %s: %s (agent %s, attempt %d, %s, run %s). Error: %s\n",
+					entry.TaskID, entry.Status, entry.Agent, entry.Attempt, carryOverContextLabel(entry), entry.RunID, errorText)
+			}
+		}
+	}
+	if len(manifest.AncestorPreviousIterations) > 0 {
+		builder.WriteString("\n--- Enclosing loop previous-iteration outcomes ---\n")
+		builder.WriteString("Each section below summarizes an enclosing loop's previous iteration over its whole subtree. Read each referenced local response file for the complete result; do not rely on this summary alone.\n")
+		for _, section := range manifest.AncestorPreviousIterations {
+			fmt.Fprintf(&builder, "\n[enclosing context %s]\n", domain.RenderIterationPath(section.IterationPath))
+			for _, entry := range section.Outcomes {
+				switch entry.Status {
+				case string(domain.WorkflowAttemptSucceeded):
+					ref := joinWorkflowPath(execDir, entry.ResultPath)
+					if entry.Verdict != nil {
+						fmt.Fprintf(&builder, "- %s: succeeded, verdict %s (agent %s, attempt %d, %s, run %s). Full response: %s\n",
+							entry.TaskID, entry.Verdict.Value, entry.Agent, entry.Attempt, carryOverContextLabel(entry), entry.RunID, ref)
+					} else {
+						fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, %s, run %s). Full response: %s\n",
+							entry.TaskID, entry.Agent, entry.Attempt, carryOverContextLabel(entry), entry.RunID, ref)
+					}
+				default:
+					errorText := entry.Error
+					if errorText == "" {
+						errorText = "no error detail recorded"
+					}
+					fmt.Fprintf(&builder, "- %s: %s (agent %s, attempt %d, %s, run %s). Error: %s\n",
+						entry.TaskID, entry.Status, entry.Agent, entry.Attempt, carryOverContextLabel(entry), entry.RunID, errorText)
+				}
 			}
 		}
 	}
 	manifestPath := manifestRelativePath(taskID, manifest.Attempt)
 	fmt.Fprintf(&builder, "Input manifest: %s\n", joinWorkflowPath(execDir, manifestPath))
 	return builder.String()
+}
+
+// carryOverContextLabel names the context a carry-over entry was sourced from:
+// the complete iteration path in a nested execution, otherwise the local
+// iteration number, so an agent can tell repeated local counters apart.
+func carryOverContextLabel(entry domain.WorkflowDependencyInput) string {
+	if len(entry.IterationPath) > 0 {
+		return "context " + domain.RenderIterationPath(entry.IterationPath)
+	}
+	return fmt.Sprintf("iteration %d", entry.Iteration)
 }
 
 // manifestRelativePath mirrors the store layout for attempt input artifacts.

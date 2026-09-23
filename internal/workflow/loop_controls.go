@@ -122,6 +122,12 @@ func (m *Manager) ExtendLoop(executionID, loopName string, req ExtendRequest) (d
 		Type: "loop_extend", At: now, RequestID: req.RequestID,
 		Loop: loopName, Detail: amount,
 	}
+	if snapshot.Definition.HasNesting() {
+		// Extensions belong to the invocation current at serialization; record
+		// its path so replay after an ancestor advance cannot be mistaken for an
+		// effect on the new invocation.
+		event.IterationPath = loopCurrentPath(updated, loopName)
+	}
 	updated.Controls = append(updated.Controls, event)
 	updated.AttentionReasons = collectAttentionReasons(updated)
 	if len(updated.AttentionReasons) == 0 && !updated.State.Terminal() {
@@ -197,7 +203,25 @@ func (m *Manager) StopLoop(executionID, loopName string, req StopRequest) (domai
 	event := domain.WorkflowControlEvent{
 		Type: "loop_stop", At: now, RequestID: req.RequestID, Loop: loopName,
 	}
+	if snapshot.Definition.HasNesting() {
+		// A nested stop binds to the invocation current at serialization and
+		// propagates to every currently unfinished descendant in the same saved
+		// transition: it never reaches ancestors or siblings, and it completes
+		// each affected iteration normally rather than cancelling workers. The
+		// accepted target path and affected descendant paths are recorded so the
+		// audit survives later ancestor advances and resets.
+		event.IterationPath = loopCurrentPath(updated, loopName)
+		for _, desc := range childLoopsUnderParentAdvance(snapshot.Definition, loopName) {
+			dl := updated.Loops[desc]
+			if dl == nil || dl.State == domain.WorkflowLoopDone {
+				continue
+			}
+			dl.StopRequested = true
+			event.AffectedPaths = append(event.AffectedPaths, loopCurrentPath(updated, desc))
+		}
+	}
 	updated.Controls = append(updated.Controls, event)
+
 	updated.AttentionReasons = collectAttentionReasons(updated)
 	if len(updated.AttentionReasons) == 0 && !updated.State.Terminal() {
 		updated.State = stateForMode(updated)

@@ -6,9 +6,16 @@ const (
 	// WorkflowDefinitionVersion is the version of a resolved workflow YAML
 	// definition. Loops are additive, so the definition version stays 1.
 	WorkflowDefinitionVersion = 1
-	// WorkflowSnapshotSchemaVersion is the current persisted snapshot layout.
-	// Version 2 adds loop execution state and per-attempt iteration numbers.
-	WorkflowSnapshotSchemaVersion = 2
+	// WorkflowSnapshotSchemaVersion is the newest persisted snapshot layout
+	// this binary writes. Version 3 adds nested-loop iteration paths; it is
+	// selected only for executions whose definition declares a loop parent.
+	WorkflowSnapshotSchemaVersion = 3
+	// WorkflowSnapshotNonNestedSchemaVersion is the layout written for newly
+	// saved executions without nesting, matching the pre-nesting wire format.
+	WorkflowSnapshotNonNestedSchemaVersion = 2
+	// WorkflowSnapshotNestedSchemaVersion is the layout required by nested
+	// executions, which older binaries reject via their max-version check.
+	WorkflowSnapshotNestedSchemaVersion = 3
 	// WorkflowSnapshotMinSchemaVersion is the oldest snapshot layout this
 	// binary can load. Schema 1 predates loops and recovers as a loopless
 	// execution; compatibility is upgrade-only, never downgrade.
@@ -81,6 +88,16 @@ const (
 
 // WorkflowLoopState is the observed lifecycle of one bounded loop's execution.
 type WorkflowLoopState string
+
+// IterationEntry is one root-to-owner step of a nested loop's iteration path:
+// the loop name and its positive local iteration counter. A complete
+// iteration_path orders these entries from the root loop to the object's
+// direct owner, uniquely identifying an invocation even when local counters
+// repeat across different ancestor contexts.
+type IterationEntry struct {
+	Loop      string `json:"loop"`
+	Iteration int    `json:"iteration"`
+}
 
 const (
 	WorkflowLoopRunning        WorkflowLoopState = "running"
@@ -198,10 +215,16 @@ type WorkflowTaskDefinition struct {
 // continue action at the effective cap. Unset condition fields must marshal
 // byte-identically to definitions parsed before conditions existed.
 type WorkflowLoopDefinition struct {
-	MaxIterations int               `json:"max_iterations" yaml:"max_iterations"`
-	UntilTask     string            `json:"until_task,omitempty" yaml:"until_task,omitempty"`
-	OnVerdict     map[string]string `json:"on_verdict,omitempty" yaml:"on_verdict,omitempty"`
-	OnExhaustion  string            `json:"on_exhaustion,omitempty" yaml:"on_exhaustion,omitempty"`
+	MaxIterations int `json:"max_iterations" yaml:"max_iterations"`
+	// Parent names the enclosing declared loop; it is parsed from YAML with a
+	// dedicated strict path (see internal/config) and must be a nonempty
+	// string when present. Omission declares a root loop; only omission
+	// preserves absent-parent hashing, so the field is omitted from JSON when
+	// empty to keep nonnested definition identities byte-identical.
+	Parent       string            `json:"parent,omitempty" yaml:"-"`
+	UntilTask    string            `json:"until_task,omitempty" yaml:"until_task,omitempty"`
+	OnVerdict    map[string]string `json:"on_verdict,omitempty" yaml:"on_verdict,omitempty"`
+	OnExhaustion string            `json:"on_exhaustion,omitempty" yaml:"on_exhaustion,omitempty"`
 }
 
 // HasCondition reports whether the loop declares a condition. A loop is
@@ -276,6 +299,12 @@ func (t *WorkflowTaskExecution) LastAttempt() *WorkflowAttempt {
 type WorkflowLoopExecution struct {
 	Iteration int               `json:"iteration"`
 	State     WorkflowLoopState `json:"state"`
+	// IterationPath is the complete root-to-owner path of this loop's current
+	// invocation in a nested (schema 3) execution, including a one-entry path
+	// for a root loop. It is omitted for nonnested executions, whose identity
+	// derives from Iteration. Its last entry's Iteration agrees with the local
+	// Iteration counter.
+	IterationPath []IterationEntry `json:"iteration_path,omitempty"`
 	// ExtendedIterations is the cumulative count granted by extend controls;
 	// the effective cap is the declared max plus this value.
 	ExtendedIterations int `json:"extended_iterations,omitempty"`
@@ -309,7 +338,14 @@ type WorkflowAttempt struct {
 	Attempt int `json:"attempt"`
 	// Iteration is the 1-based loop iteration this attempt belongs to. Zero
 	// means the task runs outside every loop.
-	Iteration          int                  `json:"iteration,omitempty"`
+	Iteration int `json:"iteration,omitempty"`
+	// IterationPath is the complete root-to-owner path of this attempt's
+	// invocation in a nested (schema 3) execution, including a one-entry path
+	// for a root-owned attempt. Its last entry's Iteration agrees with the
+	// local Iteration counter. It is omitted for workflow-scope attempts and
+	// for every attempt in a nonnested execution, whose identity derives from
+	// Iteration alone and must marshal byte-identically to pre-nesting forms.
+	IterationPath      []IterationEntry     `json:"iteration_path,omitempty"`
 	RunID              string               `json:"run_id"`
 	State              WorkflowAttemptState `json:"state"`
 	Reason             string               `json:"reason,omitempty"`
@@ -347,6 +383,14 @@ type WorkflowControlEvent struct {
 	// omitted for task-level and lifecycle events so their serialization is
 	// unchanged.
 	Loop string `json:"loop,omitempty"`
+	// IterationPath records the accepted target loop's complete invocation path
+	// in a nested execution so the audit survives later ancestor advances and
+	// resets. Omitted for nonnested executions and non-loop events.
+	IterationPath []IterationEntry `json:"iteration_path,omitempty"`
+	// AffectedPaths lists the complete paths of every descendant invocation a
+	// propagated stop reached, alongside the target's IterationPath. Omitted
+	// when empty and for nonnested executions.
+	AffectedPaths [][]IterationEntry `json:"affected_paths,omitempty"`
 }
 
 // WorkflowInputManifest describes every direct dependency of one attempt in
@@ -359,26 +403,54 @@ type WorkflowInputManifest struct {
 	// Iteration is the 1-based loop iteration of a body task's attempt; zero
 	// for tasks outside every loop.
 	Iteration int `json:"iteration,omitempty"`
+	// IterationPath is the complete root-to-owner path of this manifest's own
+	// attempt in a nested (schema 3) execution, including a one-entry path for
+	// a root-owned attempt. Omitted for workflow-scope and nonnested attempts.
+	IterationPath []IterationEntry `json:"iteration_path,omitempty"`
 	// PreviousIteration carries the prior iteration's settled body-task
 	// outcomes for a loop body task dispatching in iteration k > 1: the
 	// file-based carry-over channel. Omitted for the first iteration and for
 	// tasks outside loops.
 	Dependencies      []WorkflowDependencyInput `json:"dependencies"`
 	PreviousIteration []WorkflowDependencyInput `json:"previous_iteration,omitempty"`
+	// PreviousIterationPath names the exact summarized owner context of
+	// PreviousIteration in a nested execution (a one-entry path for a root
+	// owner). It is present exactly when PreviousIteration is, and omitted for
+	// nonnested executions so the manifest shape is unchanged.
+	PreviousIterationPath []IterationEntry `json:"previous_iteration_path,omitempty"`
+	// AncestorPreviousIterations holds, nearest ancestor first, the previous
+	// iteration's whole-subtree outcomes of each enclosing loop whose current
+	// local counter exceeds 1. Omitted when no ancestor has such a section and
+	// for nonnested executions.
+	AncestorPreviousIterations []WorkflowAncestorIteration `json:"ancestor_previous_iterations,omitempty"`
+}
+
+// WorkflowAncestorIteration is one enclosing loop's previous-iteration
+// whole-subtree carry-over section. Its IterationPath retains the unchanged
+// ancestor prefix and a decremented counter for the summarized level, so a
+// repeated local counter under a different ancestor context stays distinct.
+type WorkflowAncestorIteration struct {
+	IterationPath []IterationEntry          `json:"iteration_path"`
+	Outcomes      []WorkflowDependencyInput `json:"outcomes"`
 }
 
 type WorkflowDependencyInput struct {
-	TaskID       string          `json:"task_id"`
-	Agent        string          `json:"agent"`
-	Attempt      int             `json:"attempt"`
-	Iteration    int             `json:"iteration,omitempty"`
-	RunID        string          `json:"run_id"`
-	Status       string          `json:"status"`
-	Error        string          `json:"error,omitempty"`
-	Verdict      *AttemptVerdict `json:"verdict,omitempty"`
-	ResultPath   string          `json:"result_path,omitempty"`
-	ResultSize   int64           `json:"result_size,omitempty"`
-	ResultSHA256 string          `json:"result_sha256,omitempty"`
+	TaskID    string `json:"task_id"`
+	Agent     string `json:"agent"`
+	Attempt   int    `json:"attempt"`
+	Iteration int    `json:"iteration,omitempty"`
+	// IterationPath is the complete root-to-owner path of the referenced
+	// producer attempt in a nested (schema 3) execution, including a one-entry
+	// path for a root-owned producer. It is omitted for workflow-scope
+	// producers and for every entry in a nonnested execution.
+	IterationPath []IterationEntry `json:"iteration_path,omitempty"`
+	RunID         string           `json:"run_id"`
+	Status        string           `json:"status"`
+	Error         string           `json:"error,omitempty"`
+	Verdict       *AttemptVerdict  `json:"verdict,omitempty"`
+	ResultPath    string           `json:"result_path,omitempty"`
+	ResultSize    int64            `json:"result_size,omitempty"`
+	ResultSHA256  string           `json:"result_sha256,omitempty"`
 }
 
 // OwnedRunOptions asks the orchestrator to execute one workflow attempt on a
@@ -413,17 +485,21 @@ type WorkflowResultRef struct {
 }
 
 type WorkflowAttemptView struct {
-	Attempt      int                  `json:"attempt"`
-	Iteration    int                  `json:"iteration,omitempty"`
-	RunID        string               `json:"run_id"`
-	State        WorkflowAttemptState `json:"state"`
-	Reason       string               `json:"reason,omitempty"`
-	Error        string               `json:"error,omitempty"`
-	ReservedAt   *time.Time           `json:"reserved_at,omitempty"`
-	DispatchedAt *time.Time           `json:"dispatched_at,omitempty"`
-	CompletedAt  *time.Time           `json:"completed_at,omitempty"`
-	Result       *WorkflowResultRef   `json:"result,omitempty"`
-	Verdict      *AttemptVerdict      `json:"verdict,omitempty"`
+	Attempt   int `json:"attempt"`
+	Iteration int `json:"iteration,omitempty"`
+	// IterationPath mirrors the attempt's complete root-to-owner path in a
+	// nested (schema 3) execution; omitted for nonnested and workflow-scope
+	// attempts so views stay byte-identical.
+	IterationPath []IterationEntry     `json:"iteration_path,omitempty"`
+	RunID         string               `json:"run_id"`
+	State         WorkflowAttemptState `json:"state"`
+	Reason        string               `json:"reason,omitempty"`
+	Error         string               `json:"error,omitempty"`
+	ReservedAt    *time.Time           `json:"reserved_at,omitempty"`
+	DispatchedAt  *time.Time           `json:"dispatched_at,omitempty"`
+	CompletedAt   *time.Time           `json:"completed_at,omitempty"`
+	Result        *WorkflowResultRef   `json:"result,omitempty"`
+	Verdict       *AttemptVerdict      `json:"verdict,omitempty"`
 }
 
 type WorkflowTaskView struct {
@@ -461,6 +537,14 @@ type WorkflowLoopView struct {
 	Iteration     int               `json:"iteration"`
 	MaxIterations int               `json:"max_iterations"`
 	State         WorkflowLoopState `json:"state"`
+	// IterationPath is the loop execution's complete root-to-owner path in a
+	// nested (schema 3) execution, including a one-entry path for a root loop.
+	// It is omitted for nonnested executions so loop views stay byte-identical.
+	IterationPath []IterationEntry `json:"iteration_path,omitempty"`
+	// Parent names the enclosing declared loop in a nested execution; omitted
+	// for nonnested executions and for root loops so existing loop views are
+	// unchanged.
+	Parent string `json:"parent,omitempty"`
 	// UntilTask names the loop's condition task; omitted for static loops.
 	UntilTask string `json:"until_task,omitempty"`
 	// EffectiveMaxIterations is the declared maximum plus granted extensions;

@@ -776,7 +776,7 @@ func TestRecoveryRejectsSavedHoldPolicy(t *testing.T) {
 	def := cfg.Workflow
 	def.OnUncertain = "hold"
 	snapshot := domain.WorkflowSnapshot{
-		ExecutionID: "wf_000001", RequestID: "req-held", SchemaVersion: domain.WorkflowSnapshotSchemaVersion,
+		ExecutionID: "wf_000001", RequestID: "req-held", SchemaVersion: domain.WorkflowSnapshotNonNestedSchemaVersion,
 		Definition: *def, State: domain.WorkflowRunning, Mode: domain.WorkflowModeRunning,
 		Tasks: map[string]*domain.WorkflowTaskExecution{
 			"a": {TaskID: "a", State: domain.WorkflowTaskPending},

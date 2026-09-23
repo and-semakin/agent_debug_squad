@@ -9,10 +9,15 @@ import (
 
 // newLoopExecutions initializes one running loop execution per declared loop
 // at iteration 1. Loopless definitions keep a nil map so snapshots marshal
-// byte-identically to pre-loop executions.
+// byte-identically to pre-loop executions. Nested definitions additionally
+// stamp each execution with its complete root-to-owner iteration path so every
+// later advance/attempt can carry an unambiguous context identity.
 func newLoopExecutions(def domain.WorkflowDefinition) map[string]*domain.WorkflowLoopExecution {
 	if len(def.Loops) == 0 {
 		return nil
+	}
+	if def.HasNesting() {
+		return initNestedLoopExecutions(def)
 	}
 	loops := make(map[string]*domain.WorkflowLoopExecution, len(def.Loops))
 	for name := range def.Loops {
@@ -54,6 +59,20 @@ func currentIteration(snapshot *domain.WorkflowSnapshot, taskDef domain.Workflow
 	return 0
 }
 
+// attemptBelongsToLoopIteration reports whether one attempt belongs to a loop's
+// current invocation context. A nested execution identifies the context by the
+// complete root-to-owner iteration path; a nonnested execution keeps matching
+// the direct owner's local iteration counter so its selection is unchanged.
+func attemptBelongsToLoopIteration(attempt *domain.WorkflowAttempt, loop *domain.WorkflowLoopExecution, nested bool) bool {
+	if loop == nil || attempt == nil {
+		return false
+	}
+	if nested {
+		return domain.PathsEqual(attempt.IterationPath, loop.IterationPath)
+	}
+	return attempt.Iteration == loop.Iteration
+}
+
 // lastAttemptInIteration returns the newest attempt belonging to the given
 // iteration regardless of state, or nil when the task has no attempt in that
 // iteration.
@@ -67,10 +86,39 @@ func lastAttemptInIteration(task *domain.WorkflowTaskExecution, iteration int) *
 }
 
 // lastCommittedAttemptInIteration returns the newest committed (terminal,
-// non-interrupted) attempt of the given iteration.
+// non-interrupted) attempt of the given local iteration. It is used only by the
+// nonnested carry-over path, whose attempts are identified by iteration.
 func lastCommittedAttemptInIteration(task *domain.WorkflowTaskExecution, iteration int) *domain.WorkflowAttempt {
 	for i := len(task.Attempts) - 1; i >= 0; i-- {
 		if task.Attempts[i].Iteration == iteration && task.Attempts[i].State.Committed() {
+			return &task.Attempts[i]
+		}
+	}
+	return nil
+}
+
+// lastAttemptInLoopContext returns the newest attempt of the task belonging to
+// the loop's current invocation context, regardless of state.
+func lastAttemptInLoopContext(task *domain.WorkflowTaskExecution, loop *domain.WorkflowLoopExecution, nested bool) *domain.WorkflowAttempt {
+	if task == nil {
+		return nil
+	}
+	for i := len(task.Attempts) - 1; i >= 0; i-- {
+		if attemptBelongsToLoopIteration(&task.Attempts[i], loop, nested) {
+			return &task.Attempts[i]
+		}
+	}
+	return nil
+}
+
+// lastCommittedAttemptInLoopContext returns the newest committed (terminal,
+// non-interrupted) attempt of the loop's current invocation context.
+func lastCommittedAttemptInLoopContext(task *domain.WorkflowTaskExecution, loop *domain.WorkflowLoopExecution, nested bool) *domain.WorkflowAttempt {
+	if task == nil {
+		return nil
+	}
+	for i := len(task.Attempts) - 1; i >= 0; i-- {
+		if attemptBelongsToLoopIteration(&task.Attempts[i], loop, nested) && task.Attempts[i].State.Committed() {
 			return &task.Attempts[i]
 		}
 	}
@@ -94,11 +142,31 @@ func conditionVerdict(snapshot *domain.WorkflowSnapshot, loopName string) (strin
 	if task == nil {
 		return "", false
 	}
-	attempt := lastCommittedAttemptInIteration(task, loop.Iteration)
+	attempt := lastCommittedAttemptInLoopContext(task, loop, snapshot.Definition.HasNesting())
 	if attempt == nil || attempt.Verdict == nil {
 		return "", false
 	}
 	return attempt.Verdict.Value, true
+}
+
+// loopReasonContext renders the durable identity segment of a loop reason. A
+// nonnested execution keeps the legacy `name:iteration` spelling so its reason
+// strings are byte-identical; a nested execution renders the loop's complete
+// root-to-owner iteration path as a single canonical field.
+func loopReasonContext(snapshot *domain.WorkflowSnapshot, loopName string) string {
+	loop := snapshot.Loops[loopName]
+	if snapshot.Definition.HasNesting() {
+		var path []domain.IterationEntry
+		if loop != nil {
+			path = loop.IterationPath
+		}
+		return domain.RenderIterationPath(path)
+	}
+	iteration := 0
+	if loop != nil {
+		iteration = loop.Iteration
+	}
+	return fmt.Sprintf("%s:%d", loopName, iteration)
 }
 
 // loopHoldReasons derives the durable attention reasons of every unfinished
@@ -116,6 +184,7 @@ func loopHoldReasons(snapshot *domain.WorkflowSnapshot) []string {
 		if loop == nil || loop.State == domain.WorkflowLoopDone {
 			continue
 		}
+		ctx := loopReasonContext(snapshot, loopName)
 		held := false
 		for _, taskID := range loopBodyTasks(def, loopName) {
 			task := snapshot.Tasks[taskID]
@@ -125,11 +194,11 @@ func loopHoldReasons(snapshot *domain.WorkflowSnapshot) []string {
 			switch task.State {
 			case domain.WorkflowTaskFailed:
 				if !def.Tasks[taskID].AllowedToFail {
-					reasons = append(reasons, fmt.Sprintf("loop_failure:%s:%d:%s:retry_or_cancel", loopName, loop.Iteration, taskID))
+					reasons = append(reasons, fmt.Sprintf("loop_failure:%s:%s:retry_or_cancel", ctx, taskID))
 					held = true
 				}
 			case domain.WorkflowTaskBlocked:
-				reasons = append(reasons, fmt.Sprintf("loop_blocked:%s:%d:%s:retry_or_cancel", loopName, loop.Iteration, taskID))
+				reasons = append(reasons, fmt.Sprintf("loop_blocked:%s:%s:retry_or_cancel", ctx, taskID))
 				held = true
 			}
 		}
@@ -162,12 +231,13 @@ func conditionHoldReason(snapshot *domain.WorkflowSnapshot, loopName string) (st
 	if !ok {
 		return "", false
 	}
+	ctx := loopReasonContext(snapshot, loopName)
 	switch loopDef.OnVerdict[verdict] {
 	case domain.WorkflowLoopActionNeedsAttention:
-		return fmt.Sprintf("loop_attention:%s:%d:%s:%s:override_or_stop_or_cancel", loopName, loop.Iteration, loopDef.UntilTask, verdict), true
+		return fmt.Sprintf("loop_attention:%s:%s:%s:override_or_stop_or_cancel", ctx, loopDef.UntilTask, verdict), true
 	case domain.WorkflowLoopActionContinue:
 		if loop.Iteration >= loop.EffectiveCap(loopDef.MaxIterations) && loopDef.EffectiveOnExhaustion() != domain.WorkflowExhaustionSucceed {
-			return fmt.Sprintf("loop_exhausted:%s:%d:extend_or_stop_or_cancel", loopName, loop.Iteration), true
+			return fmt.Sprintf("loop_exhausted:%s:extend_or_stop_or_cancel", ctx), true
 		}
 	}
 	return "", false
@@ -184,6 +254,7 @@ func isLoadBearingConditionVerdict(snapshot *domain.WorkflowSnapshot, taskID str
 	if attempt.State != domain.WorkflowAttemptSucceeded || attempt.Verdict == nil {
 		return false
 	}
+	nested := snapshot.Definition.HasNesting()
 	for _, loopName := range sortedLoopNames(snapshot.Definition.Loops) {
 		loopDef := snapshot.Definition.Loops[loopName]
 		if !loopDef.HasCondition() || loopDef.UntilTask != taskID {
@@ -196,8 +267,8 @@ func isLoadBearingConditionVerdict(snapshot *domain.WorkflowSnapshot, taskID str
 		if loop == nil || loop.State == domain.WorkflowLoopDone {
 			continue
 		}
-		// History immutability: only the loop's current iteration is live.
-		if attempt.Iteration != loop.Iteration {
+		// History immutability: only the loop's current invocation is live.
+		if !attemptBelongsToLoopIteration(attempt, loop, nested) {
 			continue
 		}
 		if !iterationSettledAcceptably(snapshot, loopName) {
@@ -210,27 +281,37 @@ func isLoadBearingConditionVerdict(snapshot *domain.WorkflowSnapshot, taskID str
 	return false
 }
 
-// iterationSettledAcceptably reports whether every body task of the loop has
-// its newest current-iteration attempt committed acceptably (succeeded, or a
-// tolerated failure). In-flight, queued, judging, interrupted, and blocked
-// work all keep the iteration unsettled.
+// iterationSettledAcceptably reports whether the loop's current invocation has
+// settled acceptably. Every directly owned body task must have its newest
+// current-context attempt committed acceptably (succeeded, or a tolerated
+// failure), and — in a nested execution — every immediate child loop invocation
+// must already be done. In-flight, queued, judging, interrupted, and blocked
+// work, and unfinished children, all keep the invocation unsettled.
 func iterationSettledAcceptably(snapshot *domain.WorkflowSnapshot, loopName string) bool {
 	def := snapshot.Definition
 	loop := snapshot.Loops[loopName]
 	if loop == nil {
 		return false
 	}
+	nested := def.HasNesting()
 	for _, taskID := range loopBodyTasks(def, loopName) {
 		task := snapshot.Tasks[taskID]
 		if task == nil {
 			return false
 		}
-		last := lastAttemptInIteration(task, loop.Iteration)
+		last := lastAttemptInLoopContext(task, loop, nested)
 		if last == nil || !last.State.Committed() {
 			return false
 		}
 		if last.State == domain.WorkflowAttemptFailed && !def.Tasks[taskID].AllowedToFail {
 			return false
+		}
+	}
+	if nested {
+		for _, child := range def.ChildLoops(loopName) {
+			if childExec := snapshot.Loops[child]; childExec == nil || childExec.State != domain.WorkflowLoopDone {
+				return false
+			}
 		}
 	}
 	return true
@@ -247,7 +328,9 @@ func iterationSettledAcceptably(snapshot *domain.WorkflowSnapshot, loopName stri
 func resolveStopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 	changed := false
 	def := snapshot.Definition
-	for _, loopName := range sortedLoopNames(def.Loops) {
+	// Child-first so a stopped descendant reaches done before an ancestor stop
+	// is reconsidered; a parent only settles once its children are done.
+	for _, loopName := range loopPostorder(def) {
 		loop := snapshot.Loops[loopName]
 		if loop == nil || loop.State == domain.WorkflowLoopDone || !loop.StopRequested {
 			continue
@@ -275,7 +358,11 @@ func resolveStopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 func (m *Manager) advanceLoopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 	advanced := false
 	def := snapshot.Definition
-	for _, loopName := range sortedLoopNames(def.Loops) {
+	nested := def.HasNesting()
+	// Postorder (children before parents) lets a static parent advance in the
+	// same pass its final child completes, while a parent's own advance can
+	// reinitialize the descendants it just reset.
+	for _, loopName := range loopPostorder(def) {
 		loop := snapshot.Loops[loopName]
 		if loop == nil || loop.State == domain.WorkflowLoopDone {
 			continue
@@ -289,7 +376,7 @@ func (m *Manager) advanceLoopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 			// extension: the effective cap, not the original max_iterations,
 			// gates the last iteration.
 			if loop.Iteration < loop.EffectiveCap(loopDef.MaxIterations) {
-				loop.Iteration++
+				advanceLoopIterationLocked(snapshot, loop, loopName, nested)
 			} else {
 				loop.State = domain.WorkflowLoopDone
 			}
@@ -306,7 +393,7 @@ func (m *Manager) advanceLoopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 			advanced = true
 		case domain.WorkflowLoopActionContinue:
 			if loop.Iteration < loop.EffectiveCap(loopDef.MaxIterations) {
-				loop.Iteration++
+				advanceLoopIterationLocked(snapshot, loop, loopName, nested)
 				advanced = true
 			} else if loopDef.EffectiveOnExhaustion() == domain.WorkflowExhaustionSucceed {
 				loop.State = domain.WorkflowLoopDone
@@ -317,6 +404,36 @@ func (m *Manager) advanceLoopsLocked(snapshot *domain.WorkflowSnapshot) bool {
 	return advanced
 }
 
+// advanceLoopIterationLocked performs the Advance transition of one loop: it
+// increments the local counter and, for a nested execution, updates the loop's
+// current iteration path and reinitializes every descendant invocation fresh at
+// local iteration 1 — clearing each descendant's invocation-local extension and
+// stop intent while resetting its path. The advancing loop keeps its own
+// invocation-local extension. All attempt and control history is preserved;
+// reset descendants simply start new invocations under the advanced prefix. A
+// nonnested advance is the original single-counter increment.
+func advanceLoopIterationLocked(snapshot *domain.WorkflowSnapshot, loop *domain.WorkflowLoopExecution, loopName string, nested bool) {
+	loop.Iteration++
+	if !nested {
+		return
+	}
+	if n := len(loop.IterationPath); n > 0 {
+		loop.IterationPath[n-1].Iteration = loop.Iteration
+	}
+	def := snapshot.Definition
+	for _, desc := range childLoopsUnderParentAdvance(def, loopName) {
+		child := snapshot.Loops[desc]
+		if child == nil {
+			continue
+		}
+		child.Iteration = 1
+		child.ExtendedIterations = 0
+		child.StopRequested = false
+		child.State = domain.WorkflowLoopRunning
+		child.IterationPath = loopPathForIteration(snapshot.Loops, def, desc, 1)
+	}
+}
+
 // dependencyAttempt resolves the attempt a consumer's dependency
 // on depID references: same-loop body dependencies resolve to the loop's
 // current iteration, everything else keeps single-attempt resolution.
@@ -325,11 +442,15 @@ func dependencyAttempt(snapshot *domain.WorkflowSnapshot, consumerTaskID, depID 
 	if dep == nil {
 		return nil
 	}
-	consumerLoop := snapshot.Definition.Tasks[consumerTaskID].Loop
-	depLoop := snapshot.Definition.Tasks[depID].Loop
+	def := snapshot.Definition
+	if def.HasNesting() {
+		return nestedDependencyAttempt(snapshot, consumerTaskID, depID)
+	}
+	consumerLoop := def.Tasks[consumerTaskID].Loop
+	depLoop := def.Tasks[depID].Loop
 	if depLoop != "" && depLoop == consumerLoop {
 		if loop := snapshot.Loops[depLoop]; loop != nil {
-			return lastCommittedAttemptInIteration(dep, loop.Iteration)
+			return lastCommittedAttemptInLoopContext(dep, loop, false)
 		}
 		return nil
 	}

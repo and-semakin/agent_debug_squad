@@ -460,6 +460,7 @@ func TestLoadExistingExampleConfigsStillLoad(t *testing.T) {
 		"../../examples/workflow-review.yaml",
 		"../../examples/workflow-loop.yaml",
 		"../../examples/workflow-loop-conditions.yaml",
+		"../../examples/workflow-nested-loop.yaml",
 		"../../configs/code-review-squad.yaml",
 	} {
 		if _, err := Load(name); err != nil {
