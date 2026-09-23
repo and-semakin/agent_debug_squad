@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -356,4 +357,46 @@ func readTextLines(t *testing.T, path string) []string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func TestChildEnvAmbientWithoutEnvOptions(t *testing.T) {
+	spec := domain.AgentSpec{Name: "A", Backend: "kimi"}
+	if env := childEnv(spec, []string{"HOME=/home/a", "PATH=/bin"}); env != nil {
+		t.Fatalf("childEnv() = %v, want nil ambient environment", env)
+	}
+}
+
+func TestChildEnvConstrainedWhenEntriesPresent(t *testing.T) {
+	spec := domain.AgentSpec{
+		Name:          "A",
+		Backend:       "kimi",
+		StringOptions: map[string]string{},
+		ListOptions: map[string][]string{
+			"inherit_env": {"HOME"},
+			"env":         {"HTTPS_PROXY=http://proxy.example:8080"},
+		},
+	}
+	env := childEnv(spec, []string{"HOME=/home/a", "PATH=/bin", "HTTP_PROXY=http://ambient:1"})
+	want := []string{"HOME=/home/a", "HTTPS_PROXY=http://proxy.example:8080"}
+	if !reflect.DeepEqual(env, want) {
+		t.Fatalf("childEnv() = %v, want %v", env, want)
+	}
+}
+
+func TestChildEnvConstrainedFromInheritEnvAlone(t *testing.T) {
+	// Machine backend settings can contribute inherit_env without any env
+	// entries; that alone must select the constrained environment.
+	spec := domain.AgentSpec{
+		Name:          "A",
+		Backend:       "kimi",
+		StringOptions: map[string]string{},
+		ListOptions: map[string][]string{
+			"inherit_env": {"HOME", "PATH"},
+		},
+	}
+	env := childEnv(spec, []string{"HOME=/home/a", "PATH=/bin"})
+	want := []string{"HOME=/home/a", "PATH=/bin"}
+	if !reflect.DeepEqual(env, want) {
+		t.Fatalf("childEnv() = %v, want %v", env, want)
+	}
 }

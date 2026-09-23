@@ -123,7 +123,7 @@ judge:
   provider: openrouter           # the only provider in this version
   model: "~typesafe/jev-latest"  # routing alias; pin e.g. "typesafe/jev-1.13" for a fixed version
   api_key_file: ""               # default: ~/.agent-debug-squad/openrouter-api-key
-  proxy_url: ""                  # HTTP proxy for decision requests; empty uses environment proxy settings
+  proxy_url: ""                  # HTTP proxy for decision requests; empty falls back to the machine backend settings file, then environment proxy settings
   timeout_seconds: 30            # per-call timeout; transient failures are retried with backoff
 ```
 
@@ -159,6 +159,8 @@ The verdict must be one the task declares (`400` otherwise), and the request is 
 | `fake` | In process | Deterministic state | none |
 
 `defaults.yolo` is `true` when omitted. Codex maps YOLO to its approval/sandbox bypass flags, Cursor maps it to `--force`, and OpenCode automatically replies `once` to permission requests for the active run and its tracked descendant sessions. Reviewer roles should explicitly use `yolo: false`; Cursor reviewers should additionally use a read-only `mode` such as `ask` or `plan`.
+
+Executable and location options (`command`, `runtime_path`, `base_url`) and proxy/CA variables can default from the machine backend settings file below; explicit agent options always win.
 
 Cursor model IDs depend on the account and current catalog. Verify them before use:
 
@@ -206,11 +208,46 @@ CLI-backed agents receive a constrained environment rather than the server's com
 - `options.inherit_env` copies only the named variables from the server process;
 - later explicit entries override inherited values.
 
-Keep credentials out of committed YAML. Prefer environment variables, an OS credential store, or a private ignored launcher/config. The checked-in proxy URLs use the reserved `.example` domain and are non-functional placeholders.
+Kimi is the one exception: its child keeps the server's full ambient environment until the resolved spec carries `env` or `inherit_env` entries — agent options or machine backend settings — at which point kimi follows the same constrained rules as the other CLI backends. A machine file that sets a kimi proxy should also declare `kimi.inherit_env: [HOME, PATH]` so login and config keep working without touching squad YAML.
 
-Cursor browser authentication normally requires inheriting `HOME`; API-key authentication requires `CURSOR_API_KEY`. When Cursor uses `HTTP_PROXY` or `HTTPS_PROXY`, also set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if the proxy performs TLS inspection.
+Keep credentials out of committed YAML. Prefer the machine backend settings file (below), environment variables, an OS credential store, or a private ignored launcher/config. The checked-in proxy URLs use the reserved `.example` domain and are non-functional placeholders.
 
-ZCode model traffic uses `ZCODE_HTTP_PROXY`, with exclusions in `ZCODE_NO_PROXY` and a custom CA file in `ZCODE_AGENT_CA_CERT`. Explicitly inherit these variables (as in the example), or set non-secret values through `env`. Ordinary `HTTP_PROXY` / `HTTPS_PROXY` variables alone are not a substitute for `ZCODE_HTTP_PROXY`: the runtime treats model, web-fetch, and tool traffic differently. The bridge also honors `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` and `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` when explicitly passed; normally it derives these paths from the installation and HOME. Custom `ZCODE_STORAGE_DIR` / `ZCODE_SESSION_DB_PATH` isolate conversations from the desktop's default history.
+Cursor browser authentication normally requires inheriting `HOME`; API-key authentication requires `CURSOR_API_KEY`. When Cursor uses `HTTP_PROXY` or `HTTPS_PROXY`, also set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if the proxy performs TLS inspection. The machine backend settings file sets all of these from `cursor.proxy_url` / `cursor.ca_cert_file`.
+
+ZCode model traffic uses `ZCODE_HTTP_PROXY`, with exclusions in `ZCODE_NO_PROXY` and a custom CA file in `ZCODE_AGENT_CA_CERT`. Explicitly inherit these variables (as in the example), set non-secret values through `env`, or configure them once per machine via the `zcode` section of the machine backend settings file. Ordinary `HTTP_PROXY` / `HTTPS_PROXY` variables alone are not a substitute for `ZCODE_HTTP_PROXY`: the runtime treats model, web-fetch, and tool traffic differently. The bridge also honors `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` and `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` when explicitly passed; normally it derives these paths from the installation and HOME. Custom `ZCODE_STORAGE_DIR` / `ZCODE_SESSION_DB_PATH` isolate conversations from the desktop's default history.
+
+### Machine Backend Settings
+
+Machine-specific backend settings — proxies, CA files, executable, runtime, and server locations — live in an optional `~/.agent-debug-squad/backends.yaml` (resolved against the server user's home directory, outside any workspace), so squad YAML stays free of machine details and remains shareable. A missing or empty file changes nothing. The file is loaded once at server startup; later edits apply after a restart. Unknown sections, unsupported keys, and invalid values fail startup with an error naming the file, section, key, and supported values. Proxy URLs may embed credentials: values are never logged or persisted, and startup reports only which backends have machine settings.
+
+```yaml
+codex:
+  command: /opt/homebrew/bin/codex       # default executable when an agent sets none
+  proxy_url: http://proxy.example:3128   # HTTP_PROXY / HTTPS_PROXY for the CLI
+  no_proxy: localhost,127.0.0.1          # string or list; NO_PROXY, delivered verbatim
+  inherit_env: [HOME, PATH]              # ambient vars always copied to the CLI (list or comma string)
+cursor:
+  proxy_url: http://proxy.example:3128   # standard vars plus NODE_USE_ENV_PROXY=1
+  ca_cert_file: /etc/proxy-ca.pem        # NODE_EXTRA_CA_CERTS
+  inherit_env: [HOME, PATH]
+kimi:
+  proxy_url: http://proxy.example:3128   # standard vars plus NODE_USE_ENV_PROXY=1
+  inherit_env: [HOME, PATH]              # keeps login/config working under the constrained env
+zcode:
+  command: /opt/homebrew/bin/node        # Node executable default
+  runtime_path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+  proxy_url: http://proxy.example:3128   # ZCODE_HTTP_PROXY only — never plain HTTP_PROXY
+  no_proxy: localhost
+  ca_cert_file: /etc/proxy-ca.pem        # ZCODE_AGENT_CA_CERT
+opencode:
+  base_url: http://127.0.0.1:4096        # the only opencode key; the loopback connection is never proxied
+judge:
+  proxy_url: http://proxy.example:3128   # default for the OpenRouter judge; the session judge.proxy_url wins
+```
+
+`inherit_env` (CLI backends only; rejected for `opencode` and `judge`) names ambient variables copied from the server process into every child process of that backend — values come from the server environment at dispatch time, so the file itself never carries secrets. It unions with the agent's own `options.inherit_env` (machine entries first, duplicates removed), an explicit agent `options.env` entry still wins, and naming a variable there suppresses a machine-injected value for it. Declaring `inherit_env: [HOME, PATH]` alongside a proxy is the recommended baseline for CLI backends — for `kimi` in particular, whose child switches to the constrained environment model as soon as any machine network settings or `inherit_env` apply.
+
+Precedence is one rule everywhere: explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
 
 ## HTTP API
 

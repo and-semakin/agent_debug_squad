@@ -43,14 +43,19 @@ func LoadAPIKey(path string) (string, error) {
 // Setup resolves the judge for one server session. It returns nil — and
 // expects no key — when neither a judge section nor workflow verdict tasks
 // require one. The verdict-task rule keeps purely static workflows usable
-// without an OpenRouter key or network access.
-func Setup(cfg *domain.JudgeConfig, workflow *domain.WorkflowDefinition, homeDir string) (Judge, error) {
+// without an OpenRouter key or network access. The judge proxy resolves from
+// the session judge section first; machineProxyURL (the machine backend
+// settings file's judge.proxy_url) applies only as a default below it.
+func Setup(cfg *domain.JudgeConfig, workflow *domain.WorkflowDefinition, homeDir, machineProxyURL string) (Judge, error) {
 	if cfg == nil && !workflowDeclaresVerdicts(workflow) {
 		return nil, nil
 	}
 	resolved := domain.JudgeConfig{}
 	if cfg != nil {
 		resolved = *cfg
+	}
+	if resolved.ProxyURL == "" {
+		resolved.ProxyURL = strings.TrimSpace(machineProxyURL)
 	}
 	if resolved.Provider == "" {
 		resolved.Provider = domain.JudgeProviderOpenRouter

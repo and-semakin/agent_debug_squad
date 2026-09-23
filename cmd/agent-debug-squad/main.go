@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -99,6 +100,24 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The machine backend settings file and the default judge key path both
+	// resolve against the home directory; without it the loader would fall
+	// back to the process working directory — often the workspace — which
+	// the backend-config spec forbids.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	machineBackends, err := config.LoadMachineBackends(home)
+	if err != nil {
+		return err
+	}
+	cfg.MachineBackends = machineBackends
+	if names := machineBackends.Configured(); len(names) > 0 && cfg.LogLevel != domain.LogLevelQuiet {
+		// Names only: proxy URLs may embed credentials and never belong in
+		// logs.
+		log.Printf("machine backend config loaded for: %s", strings.Join(names, ", "))
+	}
 
 	st := store.New(cfg)
 	ownership, err := store.AcquireSessionOwnership(st.SessionDir())
@@ -115,7 +134,7 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	judgeClient, err := judge.Setup(cfg.Judge, cfg.Workflow, homeDir())
+	judgeClient, err := judge.Setup(cfg.Judge, cfg.Workflow, home, cfg.MachineBackends.JudgeProxyURL())
 	if err != nil {
 		return err
 	}
@@ -235,14 +254,4 @@ func usage(out *os.File) {
 	fmt.Fprintln(out, "  agent-debug-squad serve --config squad.yaml [--no-auto-update]")
 	fmt.Fprintln(out, "  agent-debug-squad version")
 	fmt.Fprintln(out, "  agent-debug-squad update")
-}
-
-// homeDir resolves the user's home directory for the default judge key
-// location.
-func homeDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return home
 }

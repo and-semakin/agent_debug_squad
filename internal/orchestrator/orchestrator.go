@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/adapters"
+	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
 )
@@ -159,7 +160,7 @@ func agentSpecWithDefaults(cfg domain.SessionConfig, spec domain.AgentSpec) doma
 		yolo := cfg.AgentYolo(spec)
 		spec.Yolo = &yolo
 	}
-	return spec
+	return config.MergeMachineDefaults(spec, cfg.MachineBackends)
 }
 
 func (o *Orchestrator) Agents() []domain.AgentState {

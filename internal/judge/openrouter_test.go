@@ -324,13 +324,13 @@ func TestSetupGating(t *testing.T) {
 	}}
 
 	// No judge section, no verdict tasks: no judge, no key required.
-	none, err := Setup(nil, &domain.WorkflowDefinition{Tasks: map[string]domain.WorkflowTaskDefinition{"a": {}}}, home)
+	none, err := Setup(nil, &domain.WorkflowDefinition{Tasks: map[string]domain.WorkflowTaskDefinition{"a": {}}}, home, "")
 	if err != nil || none != nil {
 		t.Fatalf("expected nil judge, got %v %v", none, err)
 	}
 
 	// Verdict tasks without a key file: actionable error naming the path.
-	if _, err := Setup(nil, workflow, home); err == nil || !strings.Contains(err.Error(), DefaultKeyPath(home)) {
+	if _, err := Setup(nil, workflow, home, ""); err == nil || !strings.Contains(err.Error(), DefaultKeyPath(home)) {
 		t.Fatalf("expected error naming key path: %v", err)
 	}
 
@@ -342,19 +342,19 @@ func TestSetupGating(t *testing.T) {
 	}
 
 	// Verdict tasks with a key: judge constructed with defaults.
-	j, err := Setup(nil, workflow, home)
+	j, err := Setup(nil, workflow, home, "")
 	if err != nil || j == nil {
 		t.Fatalf("expected judge, got %v %v", j, err)
 	}
 
 	// Empty workflow pointer behaves like no workflow.
-	none, err = Setup(nil, nil, home)
+	none, err = Setup(nil, nil, home, "")
 	if err != nil || none != nil {
 		t.Fatalf("expected nil judge for nil workflow, got %v %v", none, err)
 	}
 
 	// Unsupported provider is rejected.
-	if _, err := Setup(&domain.JudgeConfig{Provider: "other"}, nil, home); err == nil {
+	if _, err := Setup(&domain.JudgeConfig{Provider: "other"}, nil, home, ""); err == nil {
 		t.Fatal("expected unsupported provider error")
 	}
 
@@ -363,8 +363,40 @@ func TestSetupGating(t *testing.T) {
 	if err := os.WriteFile(custom, []byte("sk-or-custom"), 0o600); err != nil {
 		t.Fatalf("write custom key: %v", err)
 	}
-	j, err = Setup(&domain.JudgeConfig{APIKeyFile: custom}, nil, home)
+	j, err = Setup(&domain.JudgeConfig{APIKeyFile: custom}, nil, home, "")
 	if err != nil || j == nil {
 		t.Fatalf("expected judge from custom key file, got %v %v", j, err)
+	}
+}
+
+func TestSetupMachineProxyDefaultApplies(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".agent-debug-squad"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(DefaultKeyPath(home), []byte("sk-or-token\n"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	workflow := &domain.WorkflowDefinition{Tasks: map[string]domain.WorkflowTaskDefinition{
+		"review": {Verdicts: map[string]string{"ok": ""}},
+	}}
+
+	// The machine default must reach the OpenRouter transport: an unparseable
+	// URL makes construction fail, proving the fallback wired the proxy in.
+	if _, err := Setup(nil, workflow, home, "://bad-proxy"); err == nil || !strings.Contains(err.Error(), "proxy") {
+		t.Fatalf("expected machine proxy to reach transport construction, got %v", err)
+	}
+
+	// A valid machine default constructs fine.
+	if _, err := Setup(nil, workflow, home, "http://proxy.example:8080"); err != nil {
+		t.Fatalf("expected judge with machine proxy default, got %v", err)
+	}
+
+	// The session judge proxy wins over the machine default: the session
+	// value is valid while the machine value is not, so success proves the
+	// machine value was not applied.
+	session := &domain.JudgeConfig{ProxyURL: "http://session.example:3128"}
+	if _, err := Setup(session, nil, home, "://bad-proxy"); err != nil {
+		t.Fatalf("session proxy must win over machine default, got %v", err)
 	}
 }

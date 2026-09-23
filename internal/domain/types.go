@@ -105,6 +105,10 @@ type SessionConfig struct {
 	Agents       []AgentSpec         `json:"agents"`
 	Workflow     *WorkflowDefinition `json:"workflow,omitempty"`
 	Judge        *JudgeConfig        `json:"judge,omitempty"`
+	// MachineBackends carries the per-machine backend settings file. It is
+	// loaded separately from squad YAML and never serialized: proxy URLs may
+	// embed credentials.
+	MachineBackends MachineBackends `json:"-"`
 }
 
 func (cfg SessionConfig) AgentYolo(spec AgentSpec) bool {

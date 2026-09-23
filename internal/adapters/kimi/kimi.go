@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/cursor"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/promptfmt"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
@@ -89,6 +91,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir
+	cmd.Env = childEnv(a.spec, os.Environ())
 
 	tracker := newProgressTracker(sink)
 	streamSink := &progressTrackingSink{RunSink: sink, tracker: tracker}
@@ -115,6 +118,19 @@ func (a *Adapter) startupPrompt(state domain.AgentState) string {
 		return state.StartupPrompt
 	}
 	return a.spec.StartupPrompt
+}
+
+// childEnv keeps the kimi child on the server's full ambient environment
+// while the spec carries no environment entries, preserving long-standing
+// behavior for squads that never configured env options. As soon as the
+// resolved spec has env or inherit_env entries — agent options or machine
+// backend settings — kimi follows the same constrained environment rules as
+// the other CLI backends.
+func childEnv(spec domain.AgentSpec, environ []string) []string {
+	if len(spec.ListOptions["env"]) == 0 && len(spec.ListOptions["inherit_env"]) == 0 {
+		return nil
+	}
+	return cursor.BuildEnv(spec, environ)
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {

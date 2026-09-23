@@ -44,6 +44,10 @@ agents:
       command: codex
       model: gpt-5.5
       reasoning: high
+      # Proxy entries below are non-functional placeholders demonstrating
+      # per-agent env overrides. Machine-specific proxies are better kept in
+      # ~/.agent-debug-squad/backends.yaml (see README "Machine Backend
+      # Settings"), which fills them in for every codex agent at once.
       env:
         - HTTP_PROXY=http://proxy.example:3128
         - HTTPS_PROXY=http://proxy.example:3128
@@ -74,6 +78,8 @@ agents:
       command: codex
       model: gpt-5.3-codex
       reasoning: medium
+      # Same proxy placeholders as Facilitator; prefer the machine backend
+      # settings file over duplicating them per agent.
       env:
         - HTTP_PROXY=http://proxy.example:3128
         - HTTPS_PROXY=http://proxy.example:3128
