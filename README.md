@@ -129,10 +129,12 @@ judge:
 
 The API key lives in a one-line file containing the bare token (no `Bearer` prefix, no quoting). The default location is in the user's home directory — outside the workspace — so credentials never land in a git repository. Startup requires the key file only when the configured workflow declares verdict tasks or a `judge:` section is present; otherwise the server starts and operates with no judge dependency.
 
-Workflow-level settings: `confidence_threshold` (default `0.8`) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `needs_attention`):
+Workflow-level settings: `confidence_threshold` (default `0.7`) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `needs_attention`):
 
 - `needs_attention`: below-threshold confidence keeps the attempt in the `judging` state and moves the execution to `needs_attention`, exposing the full distribution (`uncertain_verdict:<task>:<n>` attention reason). Resolve it with a manual override or `resume` (which re-runs classification).
 - `error`: below-threshold confidence fails the attempt with reason `uncertain_verdict`; existing failure policy and retries apply.
+
+An explicit `confidence_threshold` takes precedence: setting `0.8` retains the previous gate. Omitted thresholds remain omitted in saved definitions, so definition hashes and replay identity are unchanged. After upgrading, future classifications of those executions (including recovery or resume of judging attempts) use `0.7`; already settled verdicts keep their recorded outcomes and thresholds. No snapshot migration is needed. Editing workflow YAML does not change an existing execution's saved definition.
 
 The former `hold` spelling of the waiting policy is no longer accepted: new YAML using `on_uncertain: hold` is rejected with guidance to use `needs_attention`, and a saved execution carrying `hold` fails to load with an actionable unsupported-policy error (no alias, fallback, or automatic migration).
 
@@ -397,7 +399,7 @@ Fields and defaults:
 - `task_timeout_seconds` defaults to `1800`; a task may override it with a positive `timeout_seconds`. The timeout counts wall time from dispatch, including permission and subagent waits, and `0` does not disable it.
 - Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
 - An agent definition may set `ephemeral: true` to declare a one-shot lifecycle: every invocation starts from a clean context. See [Configuration](#configuration); note the flag does not allow referencing one agent from multiple tasks in this version.
-- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.8`) and `on_uncertain` (`needs_attention` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
+- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.7`) and `on_uncertain` (`needs_attention` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
 - The workflow may declare a `loops` map of bounded loops and label tasks with `loop:`; see [Bounded Loops](#bounded-loops). Loops may exit early on a verdict (see [Loop Conditions](#loop-conditions)) and nest to arbitrary depth via `parent` (see [Nested Loops](#nested-loops)).
 
 Start, observe, and control an execution:

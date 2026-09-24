@@ -82,7 +82,7 @@ func TestVerdictSettingsDefaultWhenUnset(t *testing.T) {
 	if def.OnUncertain != "" {
 		t.Fatalf("unset on_uncertain must stay empty for hash stability, got %q", def.OnUncertain)
 	}
-	if def.EffectiveConfidenceThreshold() != domain.DefaultConfidenceThreshold {
+	if def.EffectiveConfidenceThreshold() != 0.7 {
 		t.Fatalf("effective threshold: %v", def.EffectiveConfidenceThreshold())
 	}
 	if def.EffectiveOnUncertain() != domain.WorkflowOnUncertainNeedsAttention {

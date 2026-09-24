@@ -24,7 +24,7 @@ const (
 	DefaultWorkflowTaskTimeoutSec = 1800
 	// DefaultConfidenceThreshold gates judge verdicts: the chosen verdict
 	// applies only when judge confidence meets it.
-	DefaultConfidenceThreshold = 0.8
+	DefaultConfidenceThreshold = 0.7
 	// ReservedVerdictName is the synthetic outcome for a judge answer below
 	// the confidence threshold; declaring it is a validation error.
 	ReservedVerdictName = "uncertain"

@@ -7,7 +7,7 @@ Execute declarative graphs of independent agent conversations with predictable d
 ## Requirements
 
 ### Requirement: Workflow definitions are validated before execution
-The system SHALL accept an optional YAML `workflow` with `version: 1`, nonempty `name`, positive integer `max_parallel`, and a nonempty task map. Tasks SHALL declare nonempty `agent` and `prompt`, optional `needs` defaulting to an empty list, boolean `allowed_to_fail` defaulting to false, and integer `min_successful_dependencies` defaulting to zero. Tasks SHALL also accept an optional `verdicts` map of verdict names to optional human descriptions and an optional `loop` naming a declared loop. The workflow SHALL accept optional `confidence_threshold` (a number greater than 0 and at most 1, defaulting to 0.8), `on_uncertain` (either `needs_attention` or `error`, defaulting to `needs_attention`), and a `loops` map of loop name to loop definition, where a loop definition declares exactly a required positive integer `max_iterations`, an optional `parent` naming an enclosing declared loop, and optional condition fields: `until_task` naming the loop's condition task, `on_verdict` mapping verdicts to actions, and `on_exhaustion` selecting an exhaustion policy.
+The system SHALL accept an optional YAML `workflow` with `version: 1`, nonempty `name`, positive integer `max_parallel`, and a nonempty task map. Tasks SHALL declare nonempty `agent` and `prompt`, optional `needs` defaulting to an empty list, boolean `allowed_to_fail` defaulting to false, and integer `min_successful_dependencies` defaulting to zero. Tasks SHALL also accept an optional `verdicts` map of verdict names to optional human descriptions and an optional `loop` naming a declared loop. The workflow SHALL accept optional `confidence_threshold` (a number greater than 0 and at most 1, defaulting to 0.7), `on_uncertain` (either `needs_attention` or `error`, defaulting to `needs_attention`), and a `loops` map of loop name to loop definition, where a loop definition declares exactly a required positive integer `max_iterations`, an optional `parent` naming an enclosing declared loop, and optional condition fields: `until_task` naming the loop's condition task, `on_verdict` mapping verdicts to actions, and `on_exhaustion` selecting an exhaustion policy.
 
 The system MUST reject unknown workflow/task fields, duplicate YAML keys, unsafe identifiers, unknown agents/dependencies, repeated dependency entries, self-dependencies, cycles, repeated agent references across tasks, and thresholds outside zero through the number of direct dependencies, before dispatching any task. It MUST also reject verdict maps that are empty, contain unsafe or duplicated verdict names, contain the reserved name `uncertain`, or declare fewer than two verdicts; `confidence_threshold` or `on_uncertain` values outside their allowed sets; loop definitions with a missing or non-positive `max_iterations`; `loop` references to undeclared loops; loops with empty subtrees; undeclared parents, self-parenting, or cycles in parent relationships; direct dependencies between tasks in unrelated loop branches; and dependency cycles through a loop boundary at any nesting level.
 
@@ -162,6 +162,14 @@ A present YAML `parent` SHALL be a nonempty string satisfying the loop identifie
 #### Scenario: Workflow exit from a grandchild
 - **WHEN** a workflow-scope task depends on a task in a grandchild loop
 - **THEN** workflow-scope boundary validation projects the producer to its root ancestor loop, retaining cycle detection at every nested scope
+
+#### Scenario: Omitted confidence threshold retains identity
+- **WHEN** a workflow omits `confidence_threshold`
+- **THEN** its effective threshold is 0.7, its serialized definition omits the threshold, and its definition hash remains identical to that produced before the default changed
+
+#### Scenario: Explicit confidence threshold is preserved
+- **WHEN** a workflow explicitly sets `confidence_threshold: 0.8`
+- **THEN** its effective threshold remains 0.8 and its definition identity differs from the omitted-threshold definition
 
 ### Requirement: Task conversations are isolated
 Every task attempt SHALL start a fresh backend conversation owned by its workflow execution, task, and attempt. It MUST NOT inherit another task's chat history, a manual agent conversation, or a previous execution's conversation. A retry SHALL also use a fresh conversation. Identical model/backend selections SHALL NOT imply a shared session. Dependency results SHALL be provided explicitly.

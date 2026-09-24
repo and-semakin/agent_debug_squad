@@ -279,21 +279,61 @@ func TestUncertainVerdictErrorFailsAttempt(t *testing.T) {
 	}
 }
 
-func TestConfidenceThresholdBoundaryEqualApplies(t *testing.T) {
-	fx := newJudgedFixture(t, verdictChainDefinition(), "a1", "a2", "a3")
-	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
-		return passedDecision(domain.DefaultConfidenceThreshold), nil
-	})
-	if _, _, err := fx.m.Create("req-boundary"); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	fx.pump()
-	fx.exec.releaseSuccess(fx.exec.liveRunIDs()[0], "boundary case")
-	if !fx.pumpUntil(3*time.Second, func() bool {
-		state, _ := attemptState(t, fx.managerFixture, "a")
-		return state == domain.WorkflowAttemptSucceeded
-	}) {
-		t.Fatal("confidence equal to the threshold must apply the verdict")
+func TestConfidenceThresholdGating(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		threshold, confidence float64
+		policy                string
+		want                  domain.WorkflowAttemptState
+	}{
+		{"default_equal", 0, 0.70, "", domain.WorkflowAttemptSucceeded},
+		{"default_072", 0, 0.72, "", domain.WorkflowAttemptSucceeded},
+		{"default_078", 0, 0.78, "", domain.WorkflowAttemptSucceeded},
+		{"default_079", 0, 0.79, "", domain.WorkflowAttemptSucceeded},
+		{"default_068_attention", 0, 0.68, "", domain.WorkflowAttemptJudging},
+		{"default_068_error", 0, 0.68, domain.WorkflowOnUncertainError, domain.WorkflowAttemptFailed},
+		{"explicit_08_holds", 0.8, 0.79, "", domain.WorkflowAttemptJudging},
+		{"explicit_08_equal", 0.8, 0.8, "", domain.WorkflowAttemptSucceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def := verdictChainDefinition()
+			def.ConfidenceThreshold = tc.threshold
+			def.OnUncertain = tc.policy
+			fx := newJudgedFixture(t, def, "a1", "a2", "a3")
+			fx.judge.setRespond(func(judge.Request) (judge.Decision, error) { return passedDecision(tc.confidence), nil })
+			if _, _, err := fx.m.Create("req-threshold"); err != nil {
+				t.Fatal(err)
+			}
+			fx.pump()
+			fx.exec.releaseSuccess(fx.exec.liveRunIDs()[0], "threshold case")
+			if !fx.pumpUntil(3*time.Second, func() bool {
+				state, attempt := attemptState(t, fx.managerFixture, "a")
+				return state == tc.want && attempt.Verdict != nil
+			}) {
+				t.Fatalf("expected classified state %s", tc.want)
+			}
+			_, attempt := attemptState(t, fx.managerFixture, "a")
+			threshold := tc.threshold
+			if threshold == 0 {
+				threshold = 0.7
+			}
+			if attempt.Verdict.Threshold != threshold {
+				t.Fatalf("recorded threshold: %+v", attempt.Verdict)
+			}
+			if tc.want != domain.WorkflowAttemptSucceeded {
+				if attempt.Verdict.Value != domain.ReservedVerdictName || attempt.Reason != "uncertain_verdict" {
+					t.Fatalf("uncertain outcome: %+v", attempt)
+				}
+				if tc.want == domain.WorkflowAttemptJudging {
+					view, err := fx.m.View("wf_000001")
+					if err != nil || view.State != domain.WorkflowNeedsAttention {
+						t.Fatalf("expected attention: %+v, %v", view, err)
+					}
+				}
+			} else if attempt.Verdict.Value != "passed" {
+				t.Fatalf("verdict: %+v", attempt.Verdict)
+			}
+		})
 	}
 }
 
@@ -518,7 +558,7 @@ func TestRecoveryReclassifiesJudgingAttempts(t *testing.T) {
 	// Crash: a fresh judged manager recovers over the same session state.
 	second := restartJudged(t, fx)
 	second.judge.setRespond(func(judge.Request) (judge.Decision, error) {
-		return passedDecision(0.91), nil
+		return passedDecision(0.72), nil
 	})
 	if err := second.m.Start(context.Background()); err != nil {
 		close(gate)
@@ -543,6 +583,12 @@ func TestRecoveryReclassifiesJudgingAttempts(t *testing.T) {
 	if state != domain.WorkflowAttemptSucceeded {
 		second.m.Stop(stopContext())
 		t.Fatalf("recovered attempt state: %s", state)
+	}
+
+	_, recovered := recoveryAttemptState(second)
+	if recovered.Verdict == nil || recovered.Verdict.Threshold != 0.7 {
+		second.m.Stop(stopContext())
+		t.Fatalf("recovered omitted threshold must use 0.7: %+v", recovered)
 	}
 
 	// The agent work never repeats: the recovered executor dispatches only

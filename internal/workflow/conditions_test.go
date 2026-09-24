@@ -262,7 +262,7 @@ func TestConditionUncertainAsErrorHoldsWithoutLookup(t *testing.T) {
 	def := conditionedLoopDefinition(3, "")
 	def.OnUncertain = domain.WorkflowOnUncertainError
 	fx := newJudgedFixture(t, def, "a1", "a2", "a3")
-	// A declared choice, but below the 0.8 default threshold: uncertain.
+	// A declared choice, but below the 0.7 default threshold: uncertain.
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return decisionFor("review_passed", 0.5), nil
 	})
