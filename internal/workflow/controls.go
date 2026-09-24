@@ -317,7 +317,7 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 	attempt.Error = ""
 	attempt.Verdict = &domain.AttemptVerdict{
 		Value:     req.Verdict,
-		Threshold: snapshot.Definition.EffectiveConfidenceThreshold(),
+		Threshold: m.effectiveConfidenceThreshold(snapshot.Definition),
 		Source:    verdictSourceManual,
 		JudgedAt:  now,
 	}

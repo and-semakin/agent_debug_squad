@@ -107,7 +107,7 @@ type SessionConfig struct {
 	Judge        *JudgeConfig        `json:"judge,omitempty"`
 	// MachineBackends carries the per-machine backend settings file. It is
 	// loaded separately from squad YAML and never serialized: proxy URLs may
-	// embed credentials.
+	// embed credentials, and machine defaults must not change workflow identity.
 	MachineBackends MachineBackends `json:"-"`
 }
 

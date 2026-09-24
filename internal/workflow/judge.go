@@ -145,7 +145,7 @@ func (m *Manager) handleJudgement(j *judgement) {
 		return
 	}
 	taskDef := snapshot.Definition.Tasks[j.taskID]
-	threshold := snapshot.Definition.EffectiveConfidenceThreshold()
+	threshold := m.effectiveConfidenceThreshold(snapshot.Definition)
 
 	if j.err != nil {
 		// Transport failure after the client's bounded retries: hold for

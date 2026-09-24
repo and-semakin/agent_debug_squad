@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 // MachineBackendsFileName is the machine-level backend settings file, read
 // from the user's home directory next to the OpenRouter key file. It holds
 // machine-specific settings (proxies, CA files, executable and runtime
-// locations) so squad YAML stays free of machine details.
+// locations, and the judge confidence default) so squad YAML stays shareable.
 const MachineBackendsFileName = "backends.yaml"
 
 // MachineBackendsPath returns the default settings file location for a home
@@ -34,7 +35,7 @@ var supportedMachineKeys = map[string][]string{
 	domain.MachineBackendKimi:     {"command", "inherit_env", "no_proxy", "proxy_url"},
 	domain.MachineBackendOpenCode: {"base_url"},
 	domain.MachineBackendZCode:    {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url", "runtime_path"},
-	domain.MachineBackendJudge:    {"proxy_url"},
+	domain.MachineBackendJudge:    {"confidence_threshold", "proxy_url"},
 }
 
 // stringMachineKeys are the keys decoded as plain strings.
@@ -173,6 +174,15 @@ func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBac
 				}
 			}
 			settings.ProxyURL = decoded
+		case key == "confidence_threshold":
+			if value.Kind != yaml.ScalarNode || (value.Tag != "!!int" && value.Tag != "!!float") {
+				return nil, fmt.Errorf("backends config %s: section %q: key %q must be a finite number greater than 0 and at most 1", path, name, key)
+			}
+			var threshold float64
+			if err := value.Decode(&threshold); err != nil || math.IsNaN(threshold) || math.IsInf(threshold, 0) || threshold <= 0 || threshold > 1 {
+				return nil, fmt.Errorf("backends config %s: section %q: key %q must be a finite number greater than 0 and at most 1", path, name, key)
+			}
+			settings.ConfidenceThreshold = &threshold
 		case key == "no_proxy":
 			noProxy, err := decodeNoProxy(path, name, &value)
 			if err != nil {
@@ -245,7 +255,7 @@ func decodeNoProxy(path, name string, node *yaml.Node) (string, error) {
 func machineSectionEmpty(settings *domain.MachineBackendSettings) bool {
 	return settings.Command == "" && settings.RuntimePath == "" && settings.BaseURL == "" &&
 		settings.ProxyURL == "" && settings.NoProxy == "" && settings.CACertFile == "" &&
-		len(settings.InheritEnv) == 0
+		len(settings.InheritEnv) == 0 && settings.ConfidenceThreshold == nil
 }
 
 // decodeInheritEnv accepts a list of strings or a comma-separated string of

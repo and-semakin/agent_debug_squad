@@ -150,6 +150,18 @@ func NewManager(cfg domain.SessionConfig, st Store, exec Executor) *Manager {
 	}
 }
 
+// effectiveConfidenceThreshold keeps machine defaults outside the persisted
+// workflow definition and its idempotency hash.
+func (m *Manager) effectiveConfidenceThreshold(def domain.WorkflowDefinition) float64 {
+	if def.ConfidenceThreshold > 0 {
+		return def.ConfidenceThreshold
+	}
+	if threshold := m.cfg.MachineBackends.JudgeConfidenceThreshold(); threshold > 0 {
+		return threshold
+	}
+	return domain.DefaultConfidenceThreshold
+}
+
 // SetJudge wires the verdict judge. It must be called before Start; the
 // startup gating in the server wiring guarantees a judge whenever the
 // configured workflow declares verdicts.

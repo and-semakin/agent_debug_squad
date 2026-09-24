@@ -129,12 +129,12 @@ judge:
 
 The API key lives in a one-line file containing the bare token (no `Bearer` prefix, no quoting). The default location is in the user's home directory — outside the workspace — so credentials never land in a git repository. Startup requires the key file only when the configured workflow declares verdict tasks or a `judge:` section is present; otherwise the server starts and operates with no judge dependency.
 
-Workflow-level settings: `confidence_threshold` (default `0.7`) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `needs_attention`):
+Workflow-level settings: `confidence_threshold` (built-in default `0.7`, overridable by the machine judge setting below) — a judge verdict applies only when its confidence meets the threshold — and `on_uncertain` (default `needs_attention`):
 
 - `needs_attention`: below-threshold confidence keeps the attempt in the `judging` state and moves the execution to `needs_attention`, exposing the full distribution (`uncertain_verdict:<task>:<n>` attention reason). Resolve it with a manual override or `resume` (which re-runs classification).
 - `error`: below-threshold confidence fails the attempt with reason `uncertain_verdict`; existing failure policy and retries apply.
 
-An explicit `confidence_threshold` takes precedence: setting `0.8` retains the previous gate. Omitted thresholds remain omitted in saved definitions, so definition hashes and replay identity are unchanged. After upgrading, future classifications of those executions (including recovery or resume of judging attempts) use `0.7`; already settled verdicts keep their recorded outcomes and thresholds. No snapshot migration is needed. Editing workflow YAML does not change an existing execution's saved definition.
+An explicit workflow `confidence_threshold` takes precedence over the machine judge default, which takes precedence over the built-in `0.7`. Omitted thresholds remain omitted in saved definitions, so definition hashes and replay identity are unchanged. Future classifications of those executions, including recovery or resume of judging attempts, use the machine value loaded at server startup when present; already settled verdicts keep their recorded outcomes and thresholds. Editing workflow YAML does not change an existing execution's saved definition.
 
 The former `hold` spelling of the waiting policy is no longer accepted: new YAML using `on_uncertain: hold` is rejected with guidance to use `needs_attention`, and a saved execution carrying `hold` fails to load with an actionable unsupported-policy error (no alias, fallback, or automatic migration).
 
@@ -220,7 +220,7 @@ ZCode model traffic uses `ZCODE_HTTP_PROXY`, with exclusions in `ZCODE_NO_PROXY`
 
 ### Machine Backend Settings
 
-Machine-specific backend settings — proxies, CA files, executable, runtime, and server locations — live in an optional `~/.agent-debug-squad/backends.yaml` (resolved against the server user's home directory, outside any workspace), so squad YAML stays free of machine details and remains shareable. A missing or empty file changes nothing. The file is loaded once at server startup; later edits apply after a restart. Unknown sections, unsupported keys, and invalid values fail startup with an error naming the file, section, key, and supported values. Proxy URLs may embed credentials: values are never logged or persisted, and startup reports only which backends have machine settings.
+Machine-specific backend settings — proxies, CA files, executable, runtime, and server locations — and the judge confidence default live in an optional `~/.agent-debug-squad/backends.yaml` (resolved against the server user's home directory, outside any workspace), so squad YAML stays free of machine details and remains shareable. A missing or empty file changes nothing. The file is loaded once at server startup; later edits apply after a restart. Unknown sections, unsupported keys, and invalid values fail startup with an error naming the file, section, key, and supported values. Proxy URLs may embed credentials: values are never logged or persisted, and startup reports only which backends have machine settings.
 
 ```yaml
 codex:
@@ -245,9 +245,12 @@ opencode:
   base_url: http://127.0.0.1:4096        # the only opencode key; the loopback connection is never proxied
 judge:
   proxy_url: http://proxy.example:3128   # default for the OpenRouter judge; the session judge.proxy_url wins
+  confidence_threshold: 0.6             # default for workflows without their own threshold; number in (0, 1]
 ```
 
 `inherit_env` (CLI backends only; rejected for `opencode` and `judge`) names ambient variables copied from the server process into every child process of that backend — values come from the server environment at dispatch time, so the file itself never carries secrets. It unions with the agent's own `options.inherit_env` (machine entries first, duplicates removed), an explicit agent `options.env` entry still wins, and naming a variable there suppresses a machine-injected value for it. Declaring `inherit_env: [HOME, PATH]` alongside a proxy is the recommended baseline for CLI backends — for `kimi` in particular, whose child switches to the constrained environment model as soon as any machine network settings or `inherit_env` apply.
+
+`judge.confidence_threshold` must be an unquoted, finite number greater than 0 and at most 1. An explicit workflow threshold still wins. The machine default applies to future classifications of saved executions whose workflow omitted the field, including after recovery; it does not rewrite completed verdicts or enter the workflow hash. Restart the server after changing this file.
 
 Precedence is one rule everywhere: explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
 
@@ -399,7 +402,7 @@ Fields and defaults:
 - `task_timeout_seconds` defaults to `1800`; a task may override it with a positive `timeout_seconds`. The timeout counts wall time from dispatch, including permission and subagent waits, and `0` does not disable it.
 - Each agent may be referenced by at most one task; different tasks may reuse the same backend and model by declaring distinct agents. Unknown fields, duplicate YAML keys, cycles, self- or repeated dependencies, unsafe identifiers, and out-of-range thresholds are rejected before any task runs.
 - An agent definition may set `ephemeral: true` to declare a one-shot lifecycle: every invocation starts from a clean context. See [Configuration](#configuration); note the flag does not allow referencing one agent from multiple tasks in this version.
-- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (default `0.7`) and `on_uncertain` (`needs_attention` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
+- A task may declare `verdicts` (at least two names, the reserved name `uncertain` is rejected); the workflow may set `confidence_threshold` (built-in default `0.7`, subject to the machine judge default) and `on_uncertain` (`needs_attention` default, or `error`). Verdict tasks run an extra judging phase after their response is saved; see [Verdict Judge](#verdict-judge).
 - The workflow may declare a `loops` map of bounded loops and label tasks with `loop:`; see [Bounded Loops](#bounded-loops). Loops may exit early on a verdict (see [Loop Conditions](#loop-conditions)) and nest to arbitrary depth via `parent` (see [Nested Loops](#nested-loops)).
 
 Start, observe, and control an execution:

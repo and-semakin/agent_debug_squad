@@ -281,25 +281,33 @@ func TestUncertainVerdictErrorFailsAttempt(t *testing.T) {
 
 func TestConfidenceThresholdGating(t *testing.T) {
 	for _, tc := range []struct {
-		name                  string
-		threshold, confidence float64
-		policy                string
-		want                  domain.WorkflowAttemptState
+		name                           string
+		threshold, machine, confidence float64
+		policy                         string
+		want                           domain.WorkflowAttemptState
 	}{
-		{"default_equal", 0, 0.70, "", domain.WorkflowAttemptSucceeded},
-		{"default_072", 0, 0.72, "", domain.WorkflowAttemptSucceeded},
-		{"default_078", 0, 0.78, "", domain.WorkflowAttemptSucceeded},
-		{"default_079", 0, 0.79, "", domain.WorkflowAttemptSucceeded},
-		{"default_068_attention", 0, 0.68, "", domain.WorkflowAttemptJudging},
-		{"default_068_error", 0, 0.68, domain.WorkflowOnUncertainError, domain.WorkflowAttemptFailed},
-		{"explicit_08_holds", 0.8, 0.79, "", domain.WorkflowAttemptJudging},
-		{"explicit_08_equal", 0.8, 0.8, "", domain.WorkflowAttemptSucceeded},
+		{"default_equal", 0, 0, 0.70, "", domain.WorkflowAttemptSucceeded},
+		{"default_072", 0, 0, 0.72, "", domain.WorkflowAttemptSucceeded},
+		{"default_078", 0, 0, 0.78, "", domain.WorkflowAttemptSucceeded},
+		{"default_079", 0, 0, 0.79, "", domain.WorkflowAttemptSucceeded},
+		{"default_068_attention", 0, 0, 0.68, "", domain.WorkflowAttemptJudging},
+		{"default_068_error", 0, 0, 0.68, domain.WorkflowOnUncertainError, domain.WorkflowAttemptFailed},
+		{"explicit_08_holds", 0.8, 0, 0.79, "", domain.WorkflowAttemptJudging},
+		{"explicit_08_equal", 0.8, 0, 0.8, "", domain.WorkflowAttemptSucceeded},
+		{"machine_065_applies", 0, 0.6, 0.65, "", domain.WorkflowAttemptSucceeded},
+		{"machine_equal", 0, 0.6, 0.6, "", domain.WorkflowAttemptSucceeded},
+		{"machine_059_attention", 0, 0.6, 0.59, "", domain.WorkflowAttemptJudging},
+		{"machine_059_error", 0, 0.6, 0.59, domain.WorkflowOnUncertainError, domain.WorkflowAttemptFailed},
+		{"workflow_wins_machine", 0.8, 0.6, 0.7, "", domain.WorkflowAttemptJudging},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			def := verdictChainDefinition()
 			def.ConfidenceThreshold = tc.threshold
 			def.OnUncertain = tc.policy
 			fx := newJudgedFixture(t, def, "a1", "a2", "a3")
+			if tc.machine > 0 {
+				fx.m.cfg.MachineBackends.Judge = &domain.MachineBackendSettings{ConfidenceThreshold: &tc.machine}
+			}
 			fx.judge.setRespond(func(judge.Request) (judge.Decision, error) { return passedDecision(tc.confidence), nil })
 			if _, _, err := fx.m.Create("req-threshold"); err != nil {
 				t.Fatal(err)
@@ -315,7 +323,10 @@ func TestConfidenceThresholdGating(t *testing.T) {
 			_, attempt := attemptState(t, fx.managerFixture, "a")
 			threshold := tc.threshold
 			if threshold == 0 {
-				threshold = 0.7
+				threshold = tc.machine
+			}
+			if threshold == 0 {
+				threshold = domain.DefaultConfidenceThreshold
 			}
 			if attempt.Verdict.Threshold != threshold {
 				t.Fatalf("recorded threshold: %+v", attempt.Verdict)
@@ -334,6 +345,32 @@ func TestConfidenceThresholdGating(t *testing.T) {
 				t.Fatalf("verdict: %+v", attempt.Verdict)
 			}
 		})
+	}
+}
+
+func TestMachineConfidenceThresholdDoesNotChangeSavedDefinition(t *testing.T) {
+	fx := newJudgedFixture(t, verdictChainDefinition(), "a1", "a2", "a3")
+	machineThreshold := 0.6
+	fx.m.cfg.MachineBackends.Judge = &domain.MachineBackendSettings{ConfidenceThreshold: &machineThreshold}
+	if _, _, err := fx.m.Create("req-machine-default-identity"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fx.st.LoadWorkflowSnapshot("wf_000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Definition.ConfidenceThreshold != 0 {
+		t.Fatalf("machine default was copied into saved workflow definition: %+v", snapshot.Definition)
+	}
+	encoded, err := json.Marshal(snapshot.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "confidence_threshold") {
+		t.Fatalf("machine threshold leaked into saved definition: %s", encoded)
+	}
+	if got := HashWorkflowDefinition(snapshot.Definition, snapshot.Agents); got != snapshot.DefinitionHash {
+		t.Fatalf("machine default changed definition hash: got %s, saved %s", got, snapshot.DefinitionHash)
 	}
 }
 
@@ -437,6 +474,8 @@ func mustHash(t *testing.T, content string) string {
 
 func TestManualOverrideResolvesHold(t *testing.T) {
 	fx := newJudgedFixture(t, verdictChainDefinition(), "a1", "a2", "a3")
+	machineThreshold := 0.6
+	fx.m.cfg.MachineBackends.Judge = &domain.MachineBackendSettings{ConfidenceThreshold: &machineThreshold}
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return passedDecision(0.3), nil
 	})
@@ -473,7 +512,7 @@ func TestManualOverrideResolvesHold(t *testing.T) {
 	}
 	_, attempt := attemptState(t, fx.managerFixture, "a")
 	if attempt.State != domain.WorkflowAttemptSucceeded || attempt.Verdict == nil ||
-		attempt.Verdict.Source != "manual" || attempt.Verdict.Value != "passed" {
+		attempt.Verdict.Source != "manual" || attempt.Verdict.Value != "passed" || attempt.Verdict.Threshold != 0.6 {
 		t.Fatalf("overridden attempt: %+v", attempt)
 	}
 
@@ -557,8 +596,10 @@ func TestRecoveryReclassifiesJudgingAttempts(t *testing.T) {
 
 	// Crash: a fresh judged manager recovers over the same session state.
 	second := restartJudged(t, fx)
+	machineThreshold := 0.6
+	second.m.cfg.MachineBackends.Judge = &domain.MachineBackendSettings{ConfidenceThreshold: &machineThreshold}
 	second.judge.setRespond(func(judge.Request) (judge.Decision, error) {
-		return passedDecision(0.72), nil
+		return passedDecision(0.65), nil
 	})
 	if err := second.m.Start(context.Background()); err != nil {
 		close(gate)
@@ -586,9 +627,9 @@ func TestRecoveryReclassifiesJudgingAttempts(t *testing.T) {
 	}
 
 	_, recovered := recoveryAttemptState(second)
-	if recovered.Verdict == nil || recovered.Verdict.Threshold != 0.7 {
+	if recovered.Verdict == nil || recovered.Verdict.Threshold != 0.6 {
 		second.m.Stop(stopContext())
-		t.Fatalf("recovered omitted threshold must use 0.7: %+v", recovered)
+		t.Fatalf("recovered omitted threshold must use current machine 0.6: %+v", recovered)
 	}
 
 	// The agent work never repeats: the recovered executor dispatches only

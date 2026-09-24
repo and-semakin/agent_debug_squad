@@ -2,10 +2,9 @@ package domain
 
 import "sort"
 
-// MachineBackendSettings holds machine-level defaults for one backend. The
-// values describe the machine — proxy locations, CA files, executable and
-// runtime paths — not squad semantics, so they live in a per-machine file
-// outside any workspace instead of squad YAML.
+// MachineBackendSettings holds machine-level defaults for one backend. Most
+// values describe local backend locations and network settings; the judge can
+// also set a local confidence default without changing shared workflow YAML.
 type MachineBackendSettings struct {
 	Command     string
 	RuntimePath string
@@ -13,6 +12,9 @@ type MachineBackendSettings struct {
 	ProxyURL    string
 	NoProxy     string
 	CACertFile  string
+	// ConfidenceThreshold is the judge's machine default when a workflow
+	// definition omits its own threshold. Nil means use the built-in default.
+	ConfidenceThreshold *float64
 	// InheritEnv names ambient variables to copy from the server process
 	// into every child process of the backend as a default below agent
 	// options. Values come from the server environment at dispatch time, so
@@ -96,4 +98,14 @@ func (m MachineBackends) JudgeProxyURL() string {
 		return ""
 	}
 	return m.Judge.ProxyURL
+}
+
+// JudgeConfidenceThreshold returns the configured machine default, or zero
+// when none is configured. Machine-file validation guarantees a present value
+// is greater than zero and at most one.
+func (m MachineBackends) JudgeConfidenceThreshold() float64 {
+	if m.Judge == nil || m.Judge.ConfidenceThreshold == nil {
+		return 0
+	}
+	return *m.Judge.ConfidenceThreshold
 }

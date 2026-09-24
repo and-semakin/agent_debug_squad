@@ -116,6 +116,54 @@ func TestLoadMachineBackendsEmptySectionIsNotConfigured(t *testing.T) {
 	}
 }
 
+func TestLoadMachineJudgeConfidenceThreshold(t *testing.T) {
+	home := writeMachineBackends(t, "judge:\n  proxy_url: http://proxy.example:8080\n  confidence_threshold: 0.6\n")
+	backends, err := LoadMachineBackends(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := backends.JudgeConfidenceThreshold(); got != 0.6 {
+		t.Fatalf("judge confidence threshold = %v, want 0.6", got)
+	}
+	if got := backends.Configured(); !reflect.DeepEqual(got, []string{"judge"}) {
+		t.Fatalf("configured sections = %v", got)
+	}
+	if backends.JudgeProxyURL() != "http://proxy.example:8080" {
+		t.Fatalf("judge proxy setting was not preserved")
+	}
+}
+
+func TestLoadMachineJudgeConfidenceThresholdRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{"0", "-0.1", "1.1", "null", "true", "\"0.6\"", ".nan", ".inf", "[]"} {
+		t.Run(value, func(t *testing.T) {
+			home := writeMachineBackends(t, "judge:\n  confidence_threshold: "+value+"\n")
+			_, err := LoadMachineBackends(home)
+			if err == nil || !strings.Contains(err.Error(), MachineBackendsPath(home)) ||
+				!strings.Contains(err.Error(), "judge") || !strings.Contains(err.Error(), "confidence_threshold") ||
+				!strings.Contains(err.Error(), "greater than 0 and at most 1") {
+				t.Fatalf("invalid threshold %q: %v", value, err)
+			}
+		})
+	}
+	for _, value := range []string{"0.6", "1"} {
+		t.Run("valid_"+value, func(t *testing.T) {
+			home := writeMachineBackends(t, "judge:\n  confidence_threshold: "+value+"\n")
+			if _, err := LoadMachineBackends(home); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, section := range []string{"codex", "cursor", "kimi", "opencode", "zcode"} {
+		t.Run("unsupported_"+section, func(t *testing.T) {
+			home := writeMachineBackends(t, section+":\n  confidence_threshold: 0.6\n")
+			_, err := LoadMachineBackends(home)
+			if err == nil || !strings.Contains(err.Error(), "unsupported key") || !strings.Contains(err.Error(), "confidence_threshold") {
+				t.Fatalf("section %s: %v", section, err)
+			}
+		})
+	}
+}
+
 func TestLoadMachineBackendsUnknownSectionFails(t *testing.T) {
 	home := writeMachineBackends(t, "claude:\n  command: /opt/claude\n")
 	_, err := LoadMachineBackends(home)
