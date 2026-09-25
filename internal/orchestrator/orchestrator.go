@@ -82,14 +82,28 @@ type agentRuntime struct {
 }
 
 func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orchestrator, error) {
+	return newOrchestrator(ctx, cfg, s, false)
+}
+
+// NewWorkflowOnly initializes the orchestrator for a one-shot run: it keeps
+// config persistence and run-ID bookkeeping but never initializes, resets, or
+// rewrites manual agent sessions or unrelated run records. Manual runtimes
+// are absent; workflow-owned runtimes are allocated per attempt as usual.
+func NewWorkflowOnly(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orchestrator, error) {
+	return newOrchestrator(ctx, cfg, s, true)
+}
+
+func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Store, workflowOnly bool) (*Orchestrator, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := s.SaveConfig(cfg); err != nil {
 		return nil, err
 	}
-	if err := s.MarkActiveRunsInterrupted(); err != nil {
-		return nil, err
+	if !workflowOnly {
+		if err := s.MarkActiveRunsInterrupted(); err != nil {
+			return nil, err
+		}
 	}
 
 	o := &Orchestrator{
@@ -110,6 +124,10 @@ func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orches
 		if n, ok := parseRunNumber(run.RunID); ok && n >= o.nextRun {
 			o.nextRun = n + 1
 		}
+	}
+
+	if workflowOnly {
+		return o, nil
 	}
 
 	for _, spec := range cfg.Agents {

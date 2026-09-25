@@ -25,6 +25,8 @@ type Server struct {
 	workflows    WorkflowManager
 	cfg          domain.SessionConfig
 	mux          *http.ServeMux
+	// oneShot, when set, scopes admission to the selected execution.
+	oneShot *OneShotAdmission
 }
 
 // New builds the HTTP server. workflows may be nil when no workflow layer is
@@ -242,6 +244,9 @@ func (s *Server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotMutation(w, "manual runs") {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRunRequestBody)
 	var body createRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -300,6 +305,9 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleResetAgent(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotMutation(w, "manual agent resets") {
+		return
+	}
 	force := r.URL.Query().Get("force") == "true"
 
 	result, err := s.orchestrator.ResetAgent(r.Context(), r.PathValue("name"), force)

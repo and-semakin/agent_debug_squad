@@ -11,6 +11,9 @@ import (
 )
 
 func (s *Server) handlePermissionReply(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeignRun(w, r.PathValue("run_id")) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRunRequestBody)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()

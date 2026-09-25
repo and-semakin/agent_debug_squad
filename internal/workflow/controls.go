@@ -289,6 +289,12 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request id already used", ErrVerdictConflict)
 	}
 
+	// Idempotent replays were checked above; a new request may not reopen
+	// the sealed one-shot execution.
+	if err := m.oneShotReopenGuardLocked(executionID); err != nil {
+		return domain.WorkflowExecutionView{}, false, err
+	}
+
 	task := snapshot.Tasks[taskID]
 	if task == nil {
 		return domain.WorkflowExecutionView{}, false, ErrTaskNotFound
@@ -369,6 +375,12 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 			return m.buildViewLocked(snapshot), false, nil
 		}
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request id already used", ErrRetryConflict)
+	}
+
+	// Idempotent replays of accepted retries were checked above; a new
+	// request may not reopen the sealed one-shot execution.
+	if err := m.oneShotReopenGuardLocked(executionID); err != nil {
+		return domain.WorkflowExecutionView{}, false, err
 	}
 
 	if snapshot.Mode == domain.WorkflowModeCancelling || snapshot.State == domain.WorkflowCancelled {

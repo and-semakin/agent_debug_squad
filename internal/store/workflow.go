@@ -562,3 +562,27 @@ func appendJSONLLine(path string, event any) error {
 	}
 	return file.Sync()
 }
+
+// WorkflowDecisionPath returns the execution-relative path where the verdict
+// decision of one attempt is stored, without writing anything.
+func (s *Store) WorkflowDecisionPath(executionID, taskID string, attempt int) (string, error) {
+	dir, err := s.workflowAttemptDir(executionID, taskID, attempt)
+	if err != nil {
+		return "", err
+	}
+	return s.toExecutionRelative(executionID, filepath.Join(dir, "decision.json"))
+}
+
+// WriteRunSummary atomically persists the derived one-shot CLI summary next
+// to the authoritative snapshot. It is a latest-invocation report: the store
+// never reads it back for scheduling or recovery.
+func (s *Store) WriteRunSummary(executionID string, content []byte) error {
+	dir, err := s.WorkflowDir(executionID)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(dir, "run-summary.json"), content); err != nil {
+		return fmt.Errorf("write run summary: %w", err)
+	}
+	return nil
+}

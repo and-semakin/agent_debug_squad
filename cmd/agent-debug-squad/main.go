@@ -18,6 +18,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/judge"
+	"github.com/and-semakin/agent_debug_squad/internal/oneshot"
 	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 	"github.com/and-semakin/agent_debug_squad/internal/selfupdate"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
@@ -39,8 +40,38 @@ var (
 	buildDate = "unknown"
 )
 
+// usageError reports an argument error: the message is printed with CLI
+// usage before exiting.
+type usageError struct {
+	code int
+	err  error
+}
+
+func (e *usageError) Error() string { return e.err.Error() }
+
+// exitError carries a final process exit code whose diagnostics were already
+// printed by the command itself.
+type exitError struct {
+	code int
+}
+
+func (e *exitError) Error() string { return fmt.Sprintf("exit code %d", e.code) }
+
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	if err == nil {
+		return
+	}
+	var ue *usageError
+	var ee *exitError
+	switch {
+	case errors.As(err, &ue):
+		fmt.Fprintln(os.Stderr, ue.err)
+		usage(os.Stderr)
+		os.Exit(ue.code)
+	case errors.As(err, &ee):
+		os.Exit(ee.code)
+	default:
 		fmt.Fprintln(os.Stderr, err)
 		usage(os.Stderr)
 		os.Exit(2)
@@ -69,6 +100,12 @@ func run(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return serve(ctx, args[1:])
+	case "run":
+		code, argErr := oneshot.Main(args[1:], os.Stdout, os.Stderr)
+		if argErr != nil {
+			return &usageError{code: code, err: argErr}
+		}
+		return &exitError{code: code}
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -252,6 +289,7 @@ func restart() error {
 func usage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  agent-debug-squad serve --config squad.yaml [--no-auto-update]")
+	fmt.Fprintln(out, "  agent-debug-squad run --config squad.yaml --request-id <id>")
 	fmt.Fprintln(out, "  agent-debug-squad version")
 	fmt.Fprintln(out, "  agent-debug-squad update")
 }

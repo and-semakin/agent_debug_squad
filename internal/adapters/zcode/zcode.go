@@ -16,6 +16,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/cursor"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/promptfmt"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/procgroup"
 )
 
 //go:embed host.cjs
@@ -200,7 +201,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		select {
 		case <-c.exited:
 		case <-time.After(3 * time.Second):
-			killProcess(cmd)
+			procgroup.Kill(cmd)
 		}
 	})
 	defer watchdog()

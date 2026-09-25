@@ -133,6 +133,10 @@ type Manager struct {
 	stopping    bool
 	stop        context.CancelFunc
 	loopDone    chan struct{}
+	// one-shot fence: the selected execution cannot be reopened after its
+	// terminal state commits durably.
+	oneShotID     string
+	oneShotSealed bool
 }
 
 func NewManager(cfg domain.SessionConfig, st Store, exec Executor) *Manager {
@@ -391,6 +395,13 @@ func appendUniqueReason(reasons []string, add ...string) []string {
 	return reasons
 }
 
+// DefinitionFingerprint computes the resolved definition's replay identity
+// the same way Create does: the resolved definition hashed together with the
+// agent options it will execute with.
+func DefinitionFingerprint(cfg domain.SessionConfig, def domain.WorkflowDefinition) string {
+	return HashWorkflowDefinition(def, resolvedAgents(cfg, def))
+}
+
 // HashWorkflowDefinition fingerprints the resolved definition together with
 // the agent options it will execute with, so replayed submissions can be
 // compared byte-for-byte.
@@ -433,6 +444,10 @@ func resolvedAgents(cfg domain.SessionConfig, def domain.WorkflowDefinition) map
 // execution view and whether a new execution was created (versus an idempotent
 // replay).
 func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, error) {
+	return m.create(requestID, false)
+}
+
+func (m *Manager) create(requestID string, oneShot bool) (domain.WorkflowExecutionView, bool, error) {
 	if requestID == "" {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request_id is required", ErrInvalidRequest)
 	}
@@ -462,6 +477,9 @@ func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, 
 			continue
 		}
 		if snapshot.DefinitionHash == hash {
+			if oneShot && m.oneShotID == "" {
+				m.oneShotID = snapshot.ExecutionID
+			}
 			return m.buildViewLocked(&snapshot), false, nil
 		}
 		return domain.WorkflowExecutionView{}, false, ErrDefinitionChanged
@@ -513,6 +531,9 @@ func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, 
 		return domain.WorkflowExecutionView{}, false, err
 	}
 	_ = m.store.AppendWorkflowEvent(executionID, domain.WorkflowControlEvent{Type: "create", At: now, RequestID: requestID})
+	if oneShot && m.oneShotID == "" {
+		m.oneShotID = executionID
+	}
 	m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
 	m.notifyRevisionLocked()
 	m.Notify()

@@ -39,6 +39,9 @@ type WorkflowManager interface {
 }
 
 func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotMutation(w, "creating another workflow") {
+		return
+	}
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
 		return
@@ -107,18 +110,27 @@ func (s *Server) handleWorkflowGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkflowPause(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	s.controlWorkflow(w, func() (domain.WorkflowExecutionView, error) {
 		return s.workflows.Pause(r.PathValue("execution_id"))
 	})
 }
 
 func (s *Server) handleWorkflowResume(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	s.controlWorkflow(w, func() (domain.WorkflowExecutionView, error) {
 		return s.workflows.Resume(r.PathValue("execution_id"))
 	})
 }
 
 func (s *Server) handleWorkflowCancel(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	if r.Body != nil && r.ContentLength != 0 {
 		var body workflowCancelRequest
 		if err := decodeStrictJSON(w, r.Body, &body); err != nil {
@@ -138,6 +150,9 @@ func (s *Server) handleWorkflowCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkflowRetry(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
 		return
@@ -172,6 +187,9 @@ func (s *Server) handleWorkflowRetry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkflowVerdictOverride(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
 		return
@@ -210,6 +228,9 @@ func (s *Server) handleWorkflowVerdictOverride(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleWorkflowLoopExtend(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
 		return
@@ -239,6 +260,9 @@ func (s *Server) handleWorkflowLoopExtend(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleWorkflowLoopStop(w http.ResponseWriter, r *http.Request) {
+	if s.rejectOneShotForeign(w, r.PathValue("execution_id")) {
+		return
+	}
 	if s.workflows == nil {
 		writeError(w, http.StatusBadRequest, workflow.ErrNoDefinition)
 		return
@@ -369,6 +393,7 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 	case errors.Is(err, workflow.ErrDefinitionChanged),
 		errors.Is(err, workflow.ErrExecutionActive),
 		errors.Is(err, workflow.ErrInvalidTransition),
+		errors.Is(err, workflow.ErrExecutionSealed),
 		errors.Is(err, workflow.ErrRetryConflict),
 		errors.Is(err, workflow.ErrVerdictConflict),
 		errors.Is(err, workflow.ErrLoopControlConflict),

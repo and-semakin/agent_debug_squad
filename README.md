@@ -581,6 +581,45 @@ workflow:
 
 See [examples/workflow-chain.yaml](examples/workflow-chain.yaml), [examples/workflow-review.yaml](examples/workflow-review.yaml), [examples/workflow-loop.yaml](examples/workflow-loop.yaml), [examples/workflow-loop-conditions.yaml](examples/workflow-loop-conditions.yaml), and [examples/workflow-nested-loop.yaml](examples/workflow-nested-loop.yaml) for runnable fake-backend graphs.
 
+## One-Shot Workflow Runs
+
+`serve` is a long-lived service you submit work to explicitly. For batch use, the `run` command is the one-shot counterpart: one process owns exactly one workflow execution, preserves its results, and exits automatically when that execution settles.
+
+```sh
+agent-debug-squad run --config squad.yaml --request-id review-2026-09-25
+```
+
+Both `--config` and `--request-id` are required. The request ID is the durable identity of the execution:
+
+- a new request ID creates exactly one execution and runs it;
+- repeating the same request ID with the same resolved definition selects the original execution — recovery after a crash, or a replay of a finished one — without duplicating work;
+- reusing the ID with a changed definition or agent configuration fails before any backend activity;
+- another nonterminal execution in the same session state refuses startup, so two batch processes can never fight over one session.
+
+While a nonterminal execution is owned, the process announces its control URL on stderr (including in quiet logging mode) and serves the normal workflow API scoped to that execution: pause/resume/cancel, eligible retries, verdict and loop controls, and permission replies keep working; new submissions, manual runs/resets, and controls of other executions return `409`. Intervention states (paused, needs attention, pending permission) keep the process alive with no overall timeout — a notice is printed when the state or its reasons change, and nothing is auto-approved, retried, resumed, or confirmed.
+
+Once the execution durably reaches a terminal state the process seals it, drains the API, cancels and joins its owned workers under one shared 30-second budget, writes the summary, releases the session lock, and exits. Local child processes are killed through the process groups the run created; an externally managed OpenCode server is never stopped, and remote side effects are never claimed stopped. Safe replay of a terminal execution verifies its committed artifacts and exits without a listener, a judge, or new attempts.
+
+Exit codes:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | `succeeded` or `completed_with_errors` |
+| `1` | `failed`, or a fatal runtime/persistence/reporting/cleanup error |
+| `2` | invalid arguments or configuration, request/ownership conflict, port conflict, or other pre-execution startup failure |
+| `3` | `cancelled` (no triggering signal) |
+| `130` / `143` | SIGINT / SIGTERM accepted before terminal commitment initiated cancellation |
+
+The final report is one JSON summary on stdout, also saved as `workflows/<execution_id>/run-summary.json`. It carries the request/execution identity, the last durable state and revision, the exit code and reason, the triggering signal if any, task counts, failed/blocked task details, recorded verdicts with their task/attempt/iteration-path identity, attention reasons, artifact paths, and the cleanup status with any outstanding run IDs. It is a derived, latest-invocation report: recovery and scheduling never read it, replay may replace it, and all existing artifacts stay untouched. Shell status and stderr take precedence over the report's recorded exit code when the summary file could not be persisted or stdout failed.
+
+Batch users can replace the separate serve/submit/wait/stop sequence with `run` and keep their request ID for safe replay; `serve` behavior is unchanged, and recovery can also be done with an existing `serve` after a one-shot owner has exited.
+
+See [examples/workflow-chain.yaml](examples/workflow-chain.yaml) for a runnable fake-backend config:
+
+```sh
+agent-debug-squad run --config examples/workflow-chain.yaml --request-id chain-example
+```
+
 ## Artifacts
 
 Each session is stored below `<workspace_dir>/<state_dir_name>/sessions/<session_id>/`:
@@ -595,9 +634,10 @@ runs/<run_id>/<agent_name>.txt
 runs/<run_id>/<agent_name>.stderr.log
 runs/<run_id>/<agent_name>.diagnostics.jsonl
 workflows/<execution_id>/workflow.json
+workflows/<execution_id>/run-summary.json
 ```
 
-The diagnostic artifact records safe adapter invocation metadata. Cursor diagnostics include the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs. The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.
+The diagnostic artifact records safe adapter invocation metadata. Cursor diagnostics include the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs. `run-summary.json` is the derived one-shot CLI report described above and is written only by `run`. The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.
 
 ## Codex Skill
 

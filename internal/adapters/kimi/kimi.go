@@ -16,6 +16,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/cursor"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/promptfmt"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/procgroup"
 )
 
 const maxStreamJSONEventSize = 8 * 1024 * 1024
@@ -167,20 +168,47 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink
 	if sink == nil {
 		sink = domain.DiscardRunSink()
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Owned pipe pairs: the parent keeps the read ends and closes its write
+	// copies after Start, so EOF depends only on the child's side and Wait
+	// can be reaped concurrently without closing live readers.
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, nil, err
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		return nil, nil, err
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
+	procgroup.Prepare(cmd)
 	if err := cmd.Start(); err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		if observer != nil {
 			observer.abort()
 		}
 		return nil, nil, err
 	}
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+	defer stdoutR.Close()
+	defer stderrR.Close()
+	// Kill the owned group on cancellation: a descriptor-holding descendant
+	// would otherwise keep the pipes open after the direct child is killed.
+	cancelWatch := make(chan struct{})
+	defer close(cancelWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			procgroup.Kill(cmd)
+		case <-cancelWatch:
+		}
+	}()
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -205,25 +233,42 @@ func runCommandStreaming(ctx context.Context, cmd *exec.Cmd, sink domain.RunSink
 			mu.Lock()
 			if scanErr == nil {
 				scanErr = err
-				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
+				procgroup.Kill(cmd)
 			}
 			mu.Unlock()
 		}
 	}
 	wg.Add(2)
-	go scan(stdoutPipe, "stdout")
-	go scan(stderrPipe, "stderr")
+	go scan(stdoutR, "stdout")
+	go scan(stderrR, "stderr")
 	var stopObserver func()
 	if observer != nil {
 		stopObserver = observer.discoverAndWatch(ctx)
 	}
-	wg.Wait()
+	wgDone := make(chan struct{})
+	go func() { wg.Wait(); close(wgDone) }()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	var waitErr error
+	select {
+	case <-wgDone:
+		waitErr = <-waitDone
+	case waitErr = <-waitDone:
+		// The direct child exited while scanners are still reading: its
+		// descendants kept the inherited descriptors. Kill the owned group
+		// after a short drain grace so EOF reaches the scanners instead of
+		// waiting for those descendants.
+		select {
+		case <-wgDone:
+		case <-time.After(500 * time.Millisecond):
+			procgroup.Kill(cmd)
+		}
+		<-wgDone
+	}
 	if stopObserver != nil {
 		stopObserver()
 	}
-	waitErr := cmd.Wait()
 	if scanErr != nil {
 		return stdout.Bytes(), stderr.Bytes(), scanErr
 	}

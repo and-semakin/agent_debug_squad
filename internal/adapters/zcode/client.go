@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/and-semakin/agent_debug_squad/internal/procgroup"
 )
 
 const maxFrame = 8 * 1024 * 1024
@@ -56,7 +58,7 @@ func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
 		_ = out.Close()
 		return nil, err
 	}
-	prepareProcess(cmd)
+	procgroup.Prepare(cmd)
 	if err = cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -223,7 +225,7 @@ func (c *client) close() {
 	}
 	// Kill the owned group even if the group leader already exited: tool children
 	// can retain inherited descriptors and otherwise survive their parent.
-	killProcess(c.cmd)
+	procgroup.Kill(c.cmd)
 	select {
 	case <-c.exited:
 	case <-time.After(2 * time.Second):

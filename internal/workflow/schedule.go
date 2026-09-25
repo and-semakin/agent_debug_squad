@@ -698,6 +698,9 @@ func (m *Manager) persistLocked(snapshot *domain.WorkflowSnapshot) error {
 		m.setStorageErrorLocked(err)
 		return err
 	}
+	// The terminal state is now durable: seal the one-shot fence inside the
+	// same serialized commit so later controls cannot reopen the execution.
+	m.oneShotSealLocked(snapshot)
 	m.notifyRevisionLocked()
 	return nil
 }
