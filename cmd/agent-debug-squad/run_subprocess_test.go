@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -50,6 +49,7 @@ type subprocess struct {
 	controlURL chan string
 	execution  chan string
 	exited     chan error
+	childLog   string
 }
 
 func workflowConfig(t *testing.T, tasks string) (string, string, int) {
@@ -102,11 +102,14 @@ func startRun(t *testing.T, bin, cfgPath, requestID string) *subprocess {
 	var stdout bytes.Buffer
 	var stderrLog bytes.Buffer
 	cmd.Stdout = &stdout
-	stderrPipe, err := cmd.StderrPipe()
+	stderrPath := filepath.Join(t.TempDir(), "child-stderr.log")
+	stderrFile, err := os.Create(stderrPath)
 	if err != nil {
-		t.Fatalf("stderr pipe: %v", err)
+		t.Fatalf("stderr file: %v", err)
 	}
+	cmd.Stderr = stderrFile
 	sp := &subprocess{
+		childLog:   stderrPath,
 		bin:        bin,
 		cfgPath:    cfgPath,
 		stdout:     &stdout,
@@ -120,29 +123,31 @@ func startRun(t *testing.T, bin, cfgPath, requestID string) *subprocess {
 		t.Fatalf("start run: %v", err)
 	}
 	go func() { sp.exited <- cmd.Wait() }()
-	// A single consumer reads stderr line by line: it records the log and
-	// detects the one-shot announcement without racing on the buffer.
+	// Tail the child's stderr file for the announcement and keep a copy for
+	// failure reports; a file cannot lose buffered output at Wait time.
 	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
 		url := ""
 		id := ""
-		for scanner.Scan() {
-			line := scanner.Text()
-			sp.stderrLog.WriteString(line + "\n")
-			if strings.HasPrefix(line, "control URL: ") {
-				url = strings.TrimPrefix(line, "control URL: ")
-			}
-			if strings.HasPrefix(line, "one-shot run: execution ") {
-				rest := strings.TrimPrefix(line, "one-shot run: execution ")
-				if idx := strings.Index(rest, " "); idx > 0 {
-					id = rest[:idx]
+		for {
+			data, _ := os.ReadFile(sp.childLog)
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "control URL: ") {
+					url = strings.TrimPrefix(line, "control URL: ")
+				}
+				if strings.HasPrefix(line, "one-shot run: execution ") {
+					rest := strings.TrimPrefix(line, "one-shot run: execution ")
+					if idx := strings.Index(rest, " "); idx > 0 {
+						id = rest[:idx]
+					}
 				}
 			}
 			if url != "" && id != "" {
+				sp.stderrLog.Write(data)
 				sp.controlURL <- url
 				sp.execution <- id
 				return
 			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 	return sp
@@ -223,7 +228,8 @@ a:
 	sp := startRun(t, bin, cfgPath, "req-sub")
 	code := waitExit(t, sp, 60*time.Second)
 	if code != 0 {
-		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, sp.stderrLog.String())
+		time.Sleep(500 * time.Millisecond)
+		t.Fatalf("exit = %d, want 0; stderr:\n%s\nstdout:\n%s", code, sp.stderrLog.String(), sp.stdout.String())
 	}
 	summary := decodeSummary(t, sp.stdout.String())
 	if summary["workflow_state"] != "succeeded" || summary["exit_code"].(float64) != 0 {
@@ -307,6 +313,9 @@ a:
 	}
 	code := waitExit(t, sp, 60*time.Second)
 	if code != 3 {
+		if data, err := os.ReadFile(sp.childLog); err == nil {
+			t.Logf("child stderr file:\n%s", string(data))
+		}
 		t.Fatalf("exit = %d, want 3; stderr:\n%s", code, sp.stderrLog.String())
 	}
 	if summaryState(t, sp.stdout.String()) != "cancelled" {
@@ -335,7 +344,8 @@ a:
 	}
 	code := waitExit(t, sp, 60*time.Second)
 	if code != 130 {
-		t.Fatalf("exit = %d, want 130; stderr:\n%s", code, sp.stderrLog.String())
+		time.Sleep(500 * time.Millisecond)
+		t.Fatalf("exit = %d, want 130; stderr:\n%s\nstdout:\n%s", code, sp.stderrLog.String(), sp.stdout.String())
 	}
 	summary := decodeSummary(t, sp.stdout.String())
 	if summary["workflow_state"] != "cancelled" {

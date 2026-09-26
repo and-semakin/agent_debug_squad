@@ -7,7 +7,7 @@ Make declarative workflow executions durable, inspectable, and controllable whil
 ## Requirements
 
 ### Requirement: Workflow submission is explicit and idempotent
-Serving a configuration SHALL NOT automatically start a new workflow. `POST /workflows` with a nonempty `request_id` SHALL create an execution of the configured definition and return 202. Repeating the same request ID with the same resolved definition SHALL return the original execution with 200 without new work, including after restart. Reusing an ID with a changed resolved definition SHALL return 409. Only one nonterminal workflow execution per server session SHALL be admitted in v1; competing submissions SHALL return 409. New executions SHALL retain an immutable copy of their resolved definition and agent configuration. Invalid submissions SHALL return 400 without dispatch.
+Serving a configuration SHALL NOT automatically start a new workflow. `POST /workflows` with a nonempty `request_id` SHALL create an execution of the configured definition and return 202 only after the backend-installation preflight succeeds for every agent referenced by its task graph. This includes downstream, loop and allowed-to-fail tasks, but excludes unreferenced agent definitions and machine backend sections. Preflight failure SHALL return 503 with an aggregate report before persisting an execution, accepting its request ID, reserving an attempt or dispatching any task. Structural invalidity and existing idempotency/conflict checks SHALL be resolved before preflight. An identical accepted replay SHALL return the existing execution without rechecking installations. Repeating the same request ID with the same resolved definition SHALL return the original execution with 200 without new work, including after restart. Reusing an ID with a changed resolved definition SHALL return 409. Only one nonterminal workflow execution per server session SHALL be admitted in v1; competing submissions SHALL return 409. New executions SHALL retain an immutable copy of their resolved definition and agent configuration. Invalid submissions SHALL return 400 without dispatch.
 
 #### Scenario: Lost creation response
 - **WHEN** a client retries a submission after losing its HTTP response
@@ -20,6 +20,22 @@ Serving a configuration SHALL NOT automatically start a new workflow. `POST /wor
 #### Scenario: Definition changes
 - **WHEN** configuration is edited after an execution was created
 - **THEN** that execution retains its original definition and the changed definition requires a new request ID
+
+#### Scenario: A downstream installation is missing
+- **WHEN** the first task is runnable but a downstream or allowed-to-fail task references an unavailable backend
+- **THEN** submission returns 503 naming every failed installation and affected agent, and even the first task remains unstarted
+
+#### Scenario: Repair and resubmit rejected admission
+- **WHEN** local installation preflight rejects a request ID before managed startup and the missing installation is repaired
+- **THEN** resubmitting that request ID performs fresh checks and can create the execution because the rejection did not consume the ID
+
+#### Scenario: Replay after installation disappears
+- **WHEN** an already accepted request ID is replayed after an executable is removed
+- **THEN** the original execution is returned with 200 without new checks or attempts
+
+#### Scenario: Concurrent admissions
+- **WHEN** two submissions race while preflight is in flight
+- **THEN** no more than one execution is committed; an identical request waits for that admission and then replays success or receives its rejection, while competing requests retain 409 behavior
 
 ### Requirement: Dispatch and completion are durable decisions
 The system SHALL durably reserve an attempt identity and its exact inputs before sending work to a backend, SHALL never dispatch that identity more than once in a live owner, and SHALL publish successful completion durably before releasing dependent tasks. Duplicate or lost completion notifications SHALL NOT cause duplicate or missing scheduling. Persistence failures SHALL stop new dispatch and surface an error rather than claim successful completion. A second server owner for the same session state SHALL be rejected before it mutates state or starts work.
@@ -41,7 +57,7 @@ The system SHALL durably reserve an attempt identity and its exact inputs before
 - **THEN** it fails before modifying execution records or calling backends
 
 ### Requirement: Recovery never silently repeats uncertain work
-Saved definitions containing `on_uncertain: hold` SHALL be rejected with an actionable unsupported-policy error before scheduling. The system SHALL NOT alias this value to `needs_attention`, silently fall back to the default, or automatically migrate the definition. On restart, the system SHALL preserve committed completed tasks and their artifacts, recompute readiness, and automatically continue an otherwise running execution with no uncertain attempts. Paused executions SHALL stay paused. Attempts reserved or running without a committed terminal outcome SHALL become interrupted and put the execution in needs_attention with new dispatch stopped. No such attempt SHALL be automatically resent or treated as an allowed failure. Attempts in the `judging` phase are an exception: their backend work is complete and their response artifact is committed, so recovery SHALL NOT interrupt them and SHALL re-run their verdict classification. For executions with loops, the persisted loop iteration counters SHALL survive restart: committed iterations and their artifacts are preserved, an interrupted body attempt recovers as any interrupted attempt, and retrying it continues the same iteration — the loop neither advances to the next iteration nor restarts from the first.
+Saved definitions containing `on_uncertain: hold` SHALL be rejected with an actionable unsupported-policy error before scheduling. The system SHALL NOT alias this value to `needs_attention`, silently fall back to the default, or automatically migrate the definition. On restart, the system SHALL preserve committed completed tasks and their artifacts, recompute readiness, and automatically continue an otherwise running execution with no uncertain attempts only after a fresh backend-installation preflight passes for agents that can still execute. Preflight failure SHALL preserve committed results and pause intent, set needs_attention with backend_preflight_failed and sanitized issue details, and keep the API available without dispatching new agent work. Structural recovery SHALL reject more than one nonterminal saved execution before environment checks; terminal history SHALL not be checked. The listener SHALL serve observation/control before asynchronous recovery preflight begins, with dispatch gated until success and backend_preflight.status=checking exposed while it is in flight. Slow checks SHALL NOT delay listener availability; shutdown SHALL cancel them. Paused executions SHALL defer preflight to resume; terminal and cancelling executions SHALL require no installation check. Existing judging-only recovery remains outside installation preflight. Paused executions SHALL stay paused. Attempts reserved or running without a committed terminal outcome SHALL become interrupted and put the execution in needs_attention with new dispatch stopped. No such attempt SHALL be automatically resent or treated as an allowed failure. Attempts in the `judging` phase are an exception: their backend work is complete and their response artifact is committed, so recovery SHALL NOT interrupt them and SHALL re-run their verdict classification. For executions with loops, the persisted loop iteration counters SHALL survive restart: committed iterations and their artifacts are preserved, an interrupted body attempt recovers as any interrupted attempt, and retrying it continues the same iteration — the loop neither advances to the next iteration nor restarts from the first.
 
 The new binary SHALL load supported nonnested snapshots of schema 1 or 2, and nested snapshots of schema 3. Newly saved nonnested executions SHALL use schema 2; executions with any parent declaration SHALL use schema 3. Schema-1/2 definitions containing nesting, schema-3 definitions without nesting, unknown schema versions, and damaged authoritative state SHALL fail closed before scheduling with an actionable error. Nested state MUST NOT be relabeled, flattened, or silently interpreted as nonnested state. Downgrade conversion SHALL NOT be supported; existing readers that support only schemas 1 and 2 SHALL reject schema 3.
 
@@ -141,12 +157,20 @@ The authoritative snapshot SHALL contain exactly one current loop-state record f
 - **WHEN** a schema-3 execution includes a workflow-scope task whose attempt omits iteration_path
 - **THEN** recovery accepts that omission while still requiring paths on root-owned and nested loop-owned attempts
 
+#### Scenario: Recovery installation hold
+- **WHEN** an otherwise runnable recovered execution needs a backend whose executable is now absent
+- **THEN** no new task starts, completed artifacts are preserved, and the API exposes needs_attention with the aggregate report
+
+#### Scenario: Recovery ignores permanently completed agents
+- **WHEN** a completed workflow-scope task uses an absent backend and all remaining tasks use installed backends
+- **THEN** the completed agent is excluded from recovery preflight, whereas agents that can re-arm inside unfinished loops remain included
+
 ### Requirement: Execution observation includes outcomes and intervention
 `GET /workflows` SHALL list historical and active execution summaries. `GET /workflows/{id}` SHALL expose execution state/revision, task and attempt identities/states, dependency-blocking reasons, active/ready counts, errors, output paths, and current run progress including pending permissions. Attempt states SHALL include the `judging` phase, and views SHALL expose per-attempt verdict data — verdict name, confidence, probability distribution, model, and source — together with judge-related attention reasons for uncertain verdicts and judge unavailability. Attempt views SHALL expose the iteration number for loop body attempts and the complete `iteration_path` for every loop-owned attempt in executions with nesting, and the execution view SHALL expose per-loop state: loop name, current iteration, and `max_iterations`. In executions with nesting, every loop view SHALL expose iteration_path, including root-only paths; child loop views SHALL additionally expose parent. For loops with conditions, loop views SHALL additionally expose the `until_task` name, the effective iteration cap (declared plus extensions), and the latest settled condition verdict. Unknown IDs SHALL return 404. Task states SHALL include pending, ready, dispatching, running, succeeded, failed, interrupted, blocked, and cancelled. Execution states SHALL include running, paused, needs_attention, cancelling, cancelled, succeeded, completed_with_errors, and failed.
 
 An unresolved loop failure/blocking hold SHALL take precedence over final-state derivation and keep the execution in `needs_attention`, even when all tasks are settled. Loop views SHALL expose state `running`, `needs_attention`, or `done`; execution attention reasons SHALL identify the loop, iteration, and failed or blocked task, expose the underlying error or blocking reason, and indicate retry or cancellation as intervention options. Condition-related holds are observable the same way: `loop_exhausted` reasons SHALL name the loop and indicate extend, stop, or cancel; a `needs_attention` verdict action SHALL name the loop, iteration, task, and verdict and indicate override, stop, or cancel. When work settles and no loop hold or other attention reason remains, any blocked task or non-tolerated failed task SHALL make the execution failed; otherwise any tolerated failed task SHALL make it completed_with_errors; otherwise it SHALL succeed; for executions with loops these verdicts SHALL use the final task states in the final subtree iteration of each root; exhaustion itself introduces no terminal-failure outcome, and `on_exhaustion: succeed` completes the loop without overriding ordinary workflow outcome derivation. Uncertain attempts SHALL require attention rather than produce a final success. Workflow long-polling SHALL return on a terminal outcome, intervention, or wait expiry; expiry SHALL NOT cancel the execution. Waits SHALL accept integer `timeout_seconds` from 1 to 600, default 30, and return 400 otherwise. Permission intervention SHALL be exposed within one second of local publication under normal operation.
 
-Task counts SHALL count tasks, not iterations or invocations. For executions with nesting, loop-related attention details SHALL identify the complete current path together with the existing cause, task, and intervention options; a loop name plus its local counter alone SHALL NOT represent the context. Control audit records in executions with nesting SHALL retain the accepted target path and, for propagated stops, every affected descendant path. Root control targets in such executions SHALL record their root-only path. Historical paths and contexts SHALL remain observable after resets. Existing nonnested response and audit shapes SHALL remain unchanged.
+Task counts SHALL count tasks, not iterations or invocations. For executions with nesting, loop-related attention details SHALL identify the complete current path together with the existing cause, task, and intervention options; a loop name plus its local counter alone SHALL NOT represent the context. Control audit records in executions with nesting SHALL retain the accepted target path and, for propagated stops, every affected descendant path. Root control targets in such executions SHALL record their root-only path. Historical paths and contexts SHALL remain observable after resets. Existing nonnested response and audit shapes SHALL remain unchanged except for the additive optional backend_preflight diagnostics defined below.
 
 For executions with nesting, loop-related reason strings SHALL use a canonical path token: root-to-owner `name=iteration` entries separated by `/`, with positive base-10 counters, no leading zeroes, and no spaces. Loop identifiers SHALL follow the existing safe identifier grammar, which excludes `=`, `/`, and `:`. A path SHALL occupy exactly one colon-delimited field. The reason templates SHALL be:
 
@@ -157,6 +181,9 @@ For executions with nesting, loop-related reason strings SHALL use a canonical p
 - `waiting_loop:<barrier-path>`
 
 Underlying task errors and blocking details SHALL remain exposed in the task view. Existing non-loop reason families SHALL retain their formats and link to attempts through the existing unique task/attempt identities. For loop exit waits, the barrier SHALL be the immediate child loop of the consumer's scope containing the producer; for workflow-scope consumers it SHALL be the producer's root ancestor loop. The reason SHALL show that barrier's current path while awaiting invocation completion, not promise release when the innermost producer first completes. Multiple eligible loop-wait barriers SHALL select deterministically by lexicographic direct dependency task ID. Executions without nesting SHALL retain their existing reason strings.
+
+
+Execution views SHALL expose optional backend_preflight diagnostics with status checking or failed and sanitized structured issues, including phase, affected agents and restart_required. Failed checks SHALL add backend_preflight_failed to attention reasons and wake intervention waiters. Ordinary installation/service repair SHALL indicate resume (or an eligible target retry) as the next action; latched managed failures SHALL indicate explicit Squad restart after repair, followed by normal recovery/resume. A target-only retry check SHALL NOT erase unrelated diagnostics. Checking status SHALL be transient and SHALL NOT introduce a new persisted execution state or reusable admission success.
 
 #### Scenario: Degraded review completes
 - **WHEN** one optional reviewer fails and the verifier succeeds using the remaining results, with no blocked tasks
@@ -210,6 +237,14 @@ Underlying task errors and blocking details SHALL remain exposed in the task vie
 - **WHEN** a nonnested workflow enters loop failure, blocking, condition attention, exhaustion, or an outside loop wait
 - **THEN** its reason strings retain their existing formats without path tokens
 
+#### Scenario: Preflight intervention is visible
+- **WHEN** a recovered execution is held because a managed runtime start failed and latched
+- **THEN** its view and waiting observers expose backend_preflight_failed, the safe issues and restart_required:true with restart guidance rather than promising that resume alone will repair it
+
+#### Scenario: Recovery listener stays responsive
+- **WHEN** the single eligible recovered execution has a slow preflight
+- **THEN** GET observation remains available with checking diagnostics, cancellation is accepted, and no backend task dispatches before success
+
 ### Requirement: Pause and cancellation have distinct effects
 `POST /workflows/{id}/pause` SHALL durably prevent new dispatch reservations while allowing already dispatched tasks to finish. Repeated pause while paused SHALL be idempotent. `POST /workflows/{id}/resume` SHALL revalidate state and artifacts and resume paused or needs_attention work only when no recovery/artifact uncertainty remains. `POST /workflows/{id}/cancel` SHALL durably prevent new scheduling, cancel active owned runs, and mark remaining unstarted tasks cancelled. It SHALL reach cancelled only after owned workers stop or, for interrupted attempts whose cleanup cannot be checked after restart, the caller explicitly supplies `confirm_previous_stopped: true`. The system SHALL record that assertion and MUST NOT allow it to override known active workers in the current process. Unconfirmed cleanup SHALL remain observable and MUST NOT be reported as completed cancellation. Cancellation SHALL override allowed_to_fail and success thresholds. For a paused or needs_attention execution with loops, a valid resume request SHALL be accepted with HTTP 200 and the current execution view even if loop failure/blocking reasons remain. It SHALL request running mode and independently revalidate artifacts, clear only reasons proven resolved, and re-attempt held verdict classifications whose own response artifacts are verified and whose state can be durably persisted. An unrelated loop failure or interruption MUST NOT prevent these safe recovery actions. Pending classification recovery SHALL retain its attention hold until its committed outcome resolves it, and repeated resume MUST NOT create concurrent duplicate judge calls for the same attempt. Resume MUST NOT waive failed dependencies, unmet thresholds, or unresolved uncertainty, and MUST NOT repeat agent work. While any attention reason remains, the execution SHALL remain needs_attention with no ordinary task dispatch or loop advance. A successful HTTP response acknowledges the recovery request, not that execution has resumed. Actual storage failures SHALL remain errors. Existing loopless control behavior SHALL remain unchanged. Cancellation SHALL be accepted from that hold and take precedence over failure attention while following the same cleanup requirements. Invalid state transitions SHALL return 409; repeated cancellation while cancelling/cancelled SHALL be idempotent.
 
@@ -250,6 +285,7 @@ Underlying task errors and blocking details SHALL remain exposed in the task vie
 #### Scenario: Repeated recovery does not duplicate judging
 - **WHEN** resume is repeated while a recovery classification is already in flight and a loop failure remains unresolved
 - **THEN** only one classification call for that attempt runs concurrently, attention continues to block ordinary dispatch, and remaining reasons stay observable
+
 ### Requirement: Explicit retries preserve history and input consistency
 `POST /workflows/{id}/tasks/{task}/retry` SHALL accept a nonempty `request_id` and `expected_attempt`, creating a new queued attempt identity only for a failed/interrupted task that passes the descendant-reservation guard. For a task outside all loops, every transitive dependency descendant through `needs` MUST have no attempt reservations, as before. For a loop task, a new retry MUST target its latest failed/interrupted attempt at the exact current complete iteration path, with all ancestor iterations still current. A historical target SHALL return 409 even if its local counter equals the current one. The retry SHALL retain that path and receive the next monotonically increasing per-task attempt number.
 
@@ -686,3 +722,52 @@ The report SHALL NOT replace authoritative snapshots, invent a single workflow v
 #### Scenario: Terminal replay replaces only the derived report
 - **WHEN** the same terminal request is reported again
 - **THEN** the latest-invocation summary can be replaced, while the workflow snapshot, attempts, artifacts, and unrelated histories remain unchanged
+
+### Requirement: Preflight gates every release of new backend work
+Resume SHALL perform fresh preflight for all agents that can still execute, including agents in unfinished loops that can re-arm. An otherwise eligible new retry admission SHALL check only its target agent, including that agent's service readiness; an unrelated agent's installation failure SHALL NOT reject the retry. The queued retry SHALL still wait for every existing attention/dispatch gate. Failed checks SHALL return 503 without releasing work or accepting a new retry record, retain pending execution state and publish backend_preflight_failed with sanitized issue details. Accepted idempotent retry replays SHALL remain successful without rechecking. A full successful pass SHALL clear only backend preflight diagnostics/attention causes; a target-only success SHALL clear at most independently attributable target issues and SHALL preserve the aggregate cause while unrelated issues remain and SHALL NOT waive pause, uncertain work, cleanup, artifact, verdict or loop requirements.
+
+Before each later scheduling batch the system SHALL check all ready candidates before reserving new attempts or initializing sessions. Failed checks SHALL hold the execution in needs_attention without new attempt reservations; already running work SHALL be allowed to settle. Every owned-run entry SHALL enforce a check for its effective selected backend before external initialization. Check results SHALL be revalidated against the current execution revision and lifecycle gates before dispatch; cancellation, pause or stale state SHALL prevent dispatch. Preflight SHALL NOT alter definition identity, schema numbering, manual session continuity or fresh workflow conversation rules. Persisted preflight data SHALL be optional sanitized diagnostics, never reusable success authority.
+
+#### Scenario: Repair then resume
+- **WHEN** an installation hold is repaired and resume is requested
+- **THEN** fresh checks clear only the installation hold, and execution continues only if no other cause blocks it
+
+#### Scenario: Failed retry is not accepted
+- **WHEN** a new retry request targets a missing installation
+- **THEN** the request returns 503 without committing its retry ID or creating an attempt, allowing the same ID after repair
+
+#### Scenario: Removal before a later batch
+- **WHEN** a backend disappears after initial workflow admission but before its task becomes ready
+- **THEN** the later batch creates no new attempts, exposes the installation hold, and preserves outcomes of previously running tasks
+
+#### Scenario: Cancel or pause wins a preflight race
+- **WHEN** cancellation or pause is committed while a dispatch preflight is running
+- **THEN** its stale successful result cannot reserve or launch a task
+
+#### Scenario: Old snapshots have no cached evidence
+- **WHEN** a supported saved execution has no preflight diagnostic field
+- **THEN** it loads without migration and undergoes fresh required checks instead of treating absence as prior success
+
+
+#### Scenario: Unrelated installation cannot reject retry acceptance
+- **WHEN** an eligible retry targets healthy agent Y while agent X has an installation hold
+- **THEN** Y's retry is accepted after its own checks but remains queued behind X's unresolved execution hold, and X's diagnostics remain visible
+
+#### Scenario: Managed latch survives request ID reuse
+- **WHEN** initial readiness fails or is cancelled during managed startup before an execution is committed
+- **THEN** the request ID remains unconsumed, but a subsequent request cannot restart that runtime and reports restart_required until Squad is explicitly restarted
+
+### Requirement: One-shot execution uses backend preflight
+The existing run command SHALL use the same installation/readiness gates as workflow admission and recovery. A pre-selection preflight failure SHALL create no execution, consume no request ID, print the concise aggregate with official links and restart guidance to stderr without CLI usage, and exit 2 after successful cleanup. It SHALL emit the existing version-1 JSON summary with null execution identity/state and SHALL NOT create a workflow summary file. Existing summary/output/cleanup failures SHALL override that result with exit 1. Once an existing execution is selected, an installation hold SHALL remain needs_attention with the process/API alive for repair/resume or cancellation. Terminal request replay SHALL perform no installation checks. Existing one-shot terminal, signal, reporting and resource-ownership rules SHALL remain in force; this requirement adds no new summary schema or exit-code family.
+
+#### Scenario: One-shot rejects missing installation before selection
+- **WHEN** run requests a new execution and a referenced backend is missing
+- **THEN** it prints the aggregate on stderr, emits the pre-selection JSON summary, exits 2 after cleanup and leaves no execution or workflow summary file
+
+#### Scenario: One-shot recovers an installation hold
+- **WHEN** run selects a nonterminal execution whose remaining backend is missing
+- **THEN** the listener is available during preflight, the process stays alive on needs_attention after failure, and repair/resume or ordinary cancellation remains possible
+
+#### Scenario: One-shot terminal replay needs no tools
+- **WHEN** run selects an already terminal request on a host without its former backend installations
+- **THEN** it reports the committed outcome with the existing exit mapping without checking installations or changing workflow history

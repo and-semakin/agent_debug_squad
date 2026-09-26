@@ -53,7 +53,7 @@ func TestOneShotStartScopedRecoversOnlySelected(t *testing.T) {
 	t.Run("recovers selected execution", func(t *testing.T) {
 		cfg := e2eConfig(t, def, fakeAgent("alpha", "delay_ms", "50"))
 		m, _, cleanup := startStack(t, cfg)
-		view, created, err := m.Create("req-scoped")
+		view, created, err := m.Create(context.Background(), "req-scoped")
 		if err != nil || !created {
 			t.Fatalf("create: created=%v err=%v", created, err)
 		}
@@ -84,7 +84,7 @@ func TestOneShotStartScopedRecoversOnlySelected(t *testing.T) {
 	t.Run("refuses foreign nonterminal execution", func(t *testing.T) {
 		cfg := e2eConfig(t, def, fakeAgent("alpha", "delay_ms", "50"))
 		m, _, cleanup := startStack(t, cfg)
-		view, _, err := m.Create("req-foreign")
+		view, _, err := m.Create(context.Background(), "req-foreign")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -110,7 +110,7 @@ func TestOneShotStartScopedRecoversOnlySelected(t *testing.T) {
 	t.Run("empty selection starts with only terminal history", func(t *testing.T) {
 		cfg := e2eConfig(t, def, fakeAgent("alpha"))
 		m, _, cleanup := startStack(t, cfg)
-		view, _, err := m.Create("req-done")
+		view, _, err := m.Create(context.Background(), "req-done")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -140,7 +140,7 @@ func TestOneShotObserveTerminalIsTerminalOnly(t *testing.T) {
 		cfg := e2eConfig(t, def, fakeAgent("alpha", "delay_ms", "30"))
 		m, _, cleanup := startStack(t, cfg)
 		defer cleanup()
-		view, _, err := m.Create("req-observe")
+		view, _, err := m.Create(context.Background(), "req-observe")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -163,7 +163,7 @@ func TestOneShotObserveTerminalIsTerminalOnly(t *testing.T) {
 		cfg := e2eConfig(t, def, fakeAgent("alpha", "delay_ms", "5000"))
 		m, _, cleanup := startStack(t, cfg)
 		defer cleanup()
-		view, _, err := m.Create("req-cancel")
+		view, _, err := m.Create(context.Background(), "req-cancel")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -185,7 +185,7 @@ func TestOneShotObserveTerminalIsTerminalOnly(t *testing.T) {
 		cfg := e2eConfig(t, def, fakeAgent("alpha", "delay_ms", "200"))
 		m, _, cleanup := startStack(t, cfg)
 		defer cleanup()
-		view, _, err := m.Create("req-pause")
+		view, _, err := m.Create(context.Background(), "req-pause")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -217,7 +217,7 @@ func TestOneShotTerminalFence(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, _, err := m.Create("req-fence")
+	view, _, err := m.Create(context.Background(), "req-fence")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestOneShotTerminalFence(t *testing.T) {
 
 	// Before completion the ordinary rules reject a retry of an unfinished
 	// task; the fence is not involved yet.
-	if _, _, err := m.RetryTask(executionID, "a", RetryRequest{RequestID: "req-retry", ExpectedAttempt: 1}); err == nil || errors.Is(err, ErrExecutionSealed) {
+	if _, _, err := m.RetryTask(context.Background(), executionID, "a", RetryRequest{RequestID: "req-retry", ExpectedAttempt: 1}); err == nil || errors.Is(err, ErrExecutionSealed) {
 		t.Fatalf("pre-terminal retry must fail under ordinary rules, got %v", err)
 	}
 
@@ -237,7 +237,7 @@ func TestOneShotTerminalFence(t *testing.T) {
 		t.Fatalf("state = %s", final.State)
 	}
 
-	_, _, err = m.RetryTask(executionID, "a", RetryRequest{RequestID: "req-retry2", ExpectedAttempt: 1})
+	_, _, err = m.RetryTask(context.Background(), executionID, "a", RetryRequest{RequestID: "req-retry2", ExpectedAttempt: 1})
 	if !errors.Is(err, ErrExecutionSealed) {
 		t.Fatalf("retry after terminal commitment: err = %v, want ErrExecutionSealed", err)
 	}
@@ -256,7 +256,7 @@ func TestOneShotOwnsRun(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, _, err := m.Create("req-owns")
+	view, _, err := m.Create(context.Background(), "req-owns")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

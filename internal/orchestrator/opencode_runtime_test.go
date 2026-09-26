@@ -175,6 +175,9 @@ func TestManagedOpenCodeSharedAcrossManualAndOwnedRuns(t *testing.T) {
 	}
 	owned, err := o.Wait(ctx, "wrun_000001_000001", time.Second)
 	if err != nil || owned.Status != domain.RunCompleted {
+		if owned.Error != nil {
+			t.Fatalf("owned: %+v err=%q %v", owned, *owned.Error, err)
+		}
 		t.Fatalf("owned: %+v %v", owned, err)
 	}
 	launches, _ := os.ReadFile(filepath.Join(cfg.WorkspaceDir, "launches"))

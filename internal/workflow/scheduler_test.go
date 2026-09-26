@@ -14,13 +14,15 @@ import (
 // fakeExecutor records dispatches and lets tests release worker-stopped
 // outcomes deterministically.
 type fakeExecutor struct {
-	mu        sync.Mutex
-	opts      map[string]domain.OwnedRunOptions
-	order     []string
-	cancels   []string
-	submitErr map[string]error
-	completed map[string]bool
-	runs      map[string]domain.RunRecord
+	mu          sync.Mutex
+	opts        map[string]domain.OwnedRunOptions
+	order       []string
+	cancels     []string
+	submitErr   map[string]error
+	completed   map[string]bool
+	runs        map[string]domain.RunRecord
+	preflights  [][]string
+	brokenAgent string
 }
 
 func newFakeExecutor() *fakeExecutor {
@@ -41,6 +43,30 @@ func (f *fakeExecutor) SubmitOwnedRun(_ context.Context, opts domain.OwnedRunOpt
 	f.opts[opts.RunID] = opts
 	f.order = append(f.order, opts.RunID)
 	return nil
+}
+
+// PreflightAgents records the gated agent sets; fake installations always
+// pass unless a test pins a broken agent.
+func (f *fakeExecutor) PreflightAgents(_ context.Context, names []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.preflights = append(f.preflights, append([]string(nil), names...))
+	for _, name := range names {
+		if name == f.brokenAgent {
+			return &fakePreflightFailure{agent: name}
+		}
+	}
+	return nil
+}
+
+// fakePreflightFailure is the typed rejection the manager publishes as
+// backend_preflight diagnostics.
+type fakePreflightFailure struct {
+	agent string
+}
+
+func (e *fakePreflightFailure) Error() string {
+	return "installation for " + e.agent + " is missing"
 }
 
 func (f *fakeExecutor) CancelOwnedRun(runID string) bool {
@@ -241,7 +267,24 @@ func (fx *managerFixture) restart() *managerFixture {
 
 // pump drains pending completions and runs one deterministic reconciliation
 // pass, replacing the asynchronous loop.
+// awaitRecoveryPreflight waits for the asynchronous recovery installation
+// pass to settle so the deterministic pump observes its outcome.
+func (fx *managerFixture) awaitRecoveryPreflight() {
+	for i := 0; i < 5000; i++ {
+		fx.m.mu.Lock()
+		checking := fx.m.recoveryChecking
+		fx.m.mu.Unlock()
+		if !checking {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (fx *managerFixture) pump() {
+	// The asynchronous recovery installation pass must settle before the
+	// deterministic reconciliation pass observes its outcome.
+	fx.awaitRecoveryPreflight()
 	for {
 		select {
 		case c := <-fx.m.completions:
@@ -276,7 +319,7 @@ func chainDefinition() domain.WorkflowDefinition {
 
 func TestChainExecutesWithoutCoordinatorTurns(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-chain"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-chain"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -319,7 +362,7 @@ func TestDiamondFanOutFanInAndManifestOrder(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2", "a3", "a4")
-	if _, _, err := fx.m.Create("req-diamond"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-diamond"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -422,7 +465,7 @@ func TestMaxParallelSlotsCountPermissionWaits(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-slots"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-slots"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -454,7 +497,7 @@ func TestReadyTieBreakIsLexicographic(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-ties"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-ties"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -473,7 +516,7 @@ func TestReadyTieBreakIsLexicographic(t *testing.T) {
 
 func TestDuplicateAndLostWakeUpsAreHarmless(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-wake"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-wake"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.m.Notify()

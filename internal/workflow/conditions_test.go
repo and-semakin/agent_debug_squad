@@ -87,7 +87,7 @@ func runIteration(t *testing.T, fx *judgedFixture, queue chan<- string, verdict 
 
 func TestConditionedLoopBreaksEarlyOnVerdict(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-break"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-break"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "review_passed")
@@ -116,7 +116,7 @@ func TestConditionedLoopBreaksEarlyOnVerdict(t *testing.T) {
 
 func TestConditionedLoopRepeatsUntilClean(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-repeat"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-repeat"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "issues_found")
@@ -139,7 +139,7 @@ func TestConditionedLoopRepeatsUntilClean(t *testing.T) {
 
 func TestStaticLoopViewCarriesNoConditionFields(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(1), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-static-parity"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-static-parity"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -156,7 +156,7 @@ func TestStaticLoopViewCarriesNoConditionFields(t *testing.T) {
 
 func TestConditionNeedsAttentionHoldsAndOverrideRedirectsToBreak(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-attention"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-attention"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "needs_human")
@@ -199,7 +199,7 @@ func TestConditionNeedsAttentionHoldsAndOverrideRedirectsToBreak(t *testing.T) {
 
 func TestOverrideRedirectsHeldConditionToContinueBelowCap(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-attention-continue"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-attention-continue"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "needs_human")
@@ -223,7 +223,7 @@ func TestOverrideRedirectsHeldConditionToContinueBelowCap(t *testing.T) {
 // iteration.
 func TestConditionFailureHoldsForRetryWithoutAdvancing(t *testing.T) {
 	fx, _ := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-cond-fail"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-cond-fail"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -248,7 +248,7 @@ func TestConditionFailureHoldsForRetryWithoutAdvancing(t *testing.T) {
 	}
 	// The failure is retry-repairable, so an explicit retry of the same iteration
 	// is accepted.
-	if _, created, err := fx.m.RetryTask("wf_000001", "review", RetryRequest{RequestID: "cfr-1", ExpectedAttempt: 1}); err != nil || !created {
+	if _, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "review", RetryRequest{RequestID: "cfr-1", ExpectedAttempt: 1}); err != nil || !created {
 		t.Fatalf("a failed condition task must be retryable: created=%v err=%v", created, err)
 	}
 }
@@ -266,7 +266,7 @@ func TestConditionUncertainAsErrorHoldsWithoutLookup(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return decisionFor("review_passed", 0.5), nil
 	})
-	if _, _, err := fx.m.Create("req-cond-uncertain"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-cond-uncertain"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -305,7 +305,7 @@ func TestConditionUncertainAsErrorHoldsWithoutLookup(t *testing.T) {
 
 func TestExhaustionNeedsAttentionHoldsAtCapWithExtendGuidance(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(1, ""))
-	if _, _, err := fx.m.Create("req-exhaust-attention"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-exhaust-attention"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "issues_found")
@@ -322,7 +322,7 @@ func TestExhaustionNeedsAttentionHoldsAtCapWithExtendGuidance(t *testing.T) {
 
 func TestNeedsAttentionActionWinsOverExhaustionAtCap(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(1, domain.WorkflowExhaustionSucceed))
-	if _, _, err := fx.m.Create("req-precedence"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-precedence"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// needs_attention at the cap under a succeed exhaustion policy still holds:
@@ -337,7 +337,7 @@ func TestNeedsAttentionActionWinsOverExhaustionAtCap(t *testing.T) {
 
 func TestExhaustionSucceedCompletesAtCapPreservingVerdict(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(1, domain.WorkflowExhaustionSucceed))
-	if _, _, err := fx.m.Create("req-exhaust-succeed"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-exhaust-succeed"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "issues_found")
@@ -359,7 +359,7 @@ func TestExhaustionSucceedCompletesAtCapPreservingVerdict(t *testing.T) {
 
 func TestExtendReleasesExhaustionHoldAndIsIdempotent(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(1, ""))
-	if _, _, err := fx.m.Create("req-extend"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-extend"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "issues_found")
@@ -401,7 +401,7 @@ func TestExtendReleasesExhaustionHoldAndIsIdempotent(t *testing.T) {
 
 func TestExtendValidationAndLifecycleErrors(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(1, ""))
-	if _, _, err := fx.m.Create("req-extend-errors"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-extend-errors"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if _, _, err := fx.m.ExtendLoop("wf_000001", "refine", ExtendRequest{RequestID: "", AddIterations: 1}); !errors.Is(err, ErrInvalidRequest) {
@@ -433,7 +433,7 @@ func TestExtendValidationAndLifecycleErrors(t *testing.T) {
 // effective_max_iterations to 2.
 func TestExtendRaisesStaticLoopCap(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(1), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-extend-static"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-extend-static"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -484,7 +484,7 @@ func TestExtendRaisesStaticLoopCap(t *testing.T) {
 // save.
 func TestExtendSaveFailureLeavesNoPhantomEffect(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(1), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-extend-fail"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-extend-fail"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	req := ExtendRequest{RequestID: "ext-fail", AddIterations: 1}
@@ -522,7 +522,7 @@ func TestExtendSaveFailureLeavesNoPhantomEffect(t *testing.T) {
 // so a replayed request re-applies and durably persists.
 func TestStopSaveFailureLeavesNoPhantomEffect(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(3), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-stop-fail"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-stop-fail"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	req := StopRequest{RequestID: "stop-fail"}
@@ -560,7 +560,7 @@ func TestStopSaveFailureLeavesNoPhantomEffect(t *testing.T) {
 
 func TestStopFinishesCurrentIterationWithoutAnother(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-stop"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-stop"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -606,7 +606,7 @@ func TestStopResolvesOwnExhaustionHoldDespiteSiblingHold(t *testing.T) {
 	fx := newJudgedFixture(t, def, "a1", "a2", "a3")
 	queue := make(chan string, 8)
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) { return decisionFor(<-queue, 0.95), nil })
-	if _, _, err := fx.m.Create("req-sibling"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-sibling"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -677,7 +677,7 @@ func TestRetryPermittedUnderConditionHolds(t *testing.T) {
 	fx := newJudgedFixture(t, def, "a1", "a2", "a3")
 	queue := make(chan string, 8)
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) { return decisionFor(<-queue, 0.95), nil })
-	if _, _, err := fx.m.Create("req-retry-hold"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-retry-hold"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -703,7 +703,7 @@ func TestRetryPermittedUnderConditionHolds(t *testing.T) {
 	}
 	// Every remaining reason is retry-repairable, so retrying the failed body
 	// task is accepted while the exhausted sibling holds.
-	if _, created, err := fx.m.RetryTask("wf_000001", "failer", RetryRequest{RequestID: "r1", ExpectedAttempt: 1}); err != nil || !created {
+	if _, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "failer", RetryRequest{RequestID: "r1", ExpectedAttempt: 1}); err != nil || !created {
 		t.Fatalf("retry under condition/exhaustion holds must be accepted: created=%v err=%v", created, err)
 	}
 }
@@ -712,7 +712,7 @@ func TestRetryPermittedUnderConditionHolds(t *testing.T) {
 
 func TestConditionedLoopViewsExposeConditionState(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(1, ""))
-	if _, _, err := fx.m.Create("req-views"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-views"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "issues_found")
@@ -736,7 +736,7 @@ func TestConditionedLoopViewsExposeConditionState(t *testing.T) {
 
 func TestRecoveryReDerivesConditionHoldWithoutDispatch(t *testing.T) {
 	fx, queue := newConditionedFixture(t, conditionedLoopDefinition(3, ""))
-	if _, _, err := fx.m.Create("req-recover"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-recover"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	runIteration(t, fx, queue, "needs_human")

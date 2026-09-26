@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -351,6 +352,28 @@ func (r *runner) execute(configPath string) int {
 		return r.startupSignalExit()
 	}
 
+	// Pre-selection installation/readiness gate: a rejection creates no
+	// execution, consumes no request ID, and exits 2 after cleanup with the
+	// concise aggregate on stderr and a null-execution summary.
+	gateOrch, orchErr := orchestrator.NewWorkflowOnly(startupCtx, cfg, r.st)
+	if orchErr != nil {
+		return r.startupFailure(fmt.Errorf("initialize orchestrator: %w", orchErr), CleanupNotStarted)
+	}
+	if err := gateOrch.PreflightAgents(startupCtx, referencedAgents(cfg)); err != nil {
+		gateOrch.Close()
+		if errors.Is(err, context.Canceled) {
+			return r.startupSignalExit()
+		}
+		r.logAlways("one-shot startup failure: %v", err)
+		var report *domain.PreflightError
+		if errors.As(err, &report) && report.Report != nil {
+			r.logAlways("%s", preflightAggregate(report.Report))
+		}
+		r.emitStartupSummary(exitStartupFailure, ReasonStartupFailure, CleanupNotStarted)
+		return exitStartupFailure
+	}
+	gateOrch.Close()
+
 	sel, err := preflight(r.st, cfg, r.requestID, fingerprint)
 	if err != nil {
 		return r.startupFailure(err, CleanupNotStarted)
@@ -535,7 +558,7 @@ func (r *runner) livePath(startupCtx context.Context, cfg domain.SessionConfig, 
 			orchCancel()
 			return r.startupFailure(fmt.Errorf("start workflow scheduler: %w", err), CleanupNotStarted)
 		}
-		view, _, err := manager.CreateSelected(r.requestID)
+		view, _, err := manager.CreateSelected(context.Background(), r.requestID)
 		if err != nil {
 			_ = listener.Close()
 			orchCancel()
@@ -795,6 +818,41 @@ func declaresVerdicts(def *domain.WorkflowDefinition) bool {
 		}
 	}
 	return false
+}
+
+// referencedAgents lists every agent referenced by the configured definition,
+// sorted and deduplicated: graph position never defers a prerequisite.
+func referencedAgents(cfg domain.SessionConfig) []string {
+	seen := map[string]bool{}
+	var agents []string
+	if cfg.Workflow != nil {
+		for _, task := range cfg.Workflow.Tasks {
+			if task.Agent != "" && !seen[task.Agent] {
+				seen[task.Agent] = true
+				agents = append(agents, task.Agent)
+			}
+		}
+	}
+	sort.Strings(agents)
+	return agents
+}
+
+// preflightAggregate renders the report for stderr: one concise line per
+// issue with its official links and restart guidance.
+func preflightAggregate(report *domain.PreflightReport) string {
+	var builder strings.Builder
+	for _, issue := range report.Issues {
+		builder.WriteString("- ")
+		builder.WriteString(fmt.Sprintf("%s [%s] (%s): %s", issue.Backend, issue.Code, issue.Component, issue.Message))
+		for _, link := range issue.InstallationLinks {
+			builder.WriteString(fmt.Sprintf("; see %s (%s)", link.URL, link.Label))
+		}
+		if issue.RestartRequired {
+			builder.WriteString("; restart Squad explicitly after correcting the cause")
+		}
+		builder.WriteString("\n")
+	}
+	return builder.String()
 }
 
 func sortedTaskIDs(tasks map[string]*domain.WorkflowTaskExecution) []string {

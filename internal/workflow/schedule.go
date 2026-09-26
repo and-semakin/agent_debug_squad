@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -13,11 +14,63 @@ import (
 )
 
 // reconcile is the serialized heart of the scheduler: every decision happens
-// under the manager lock, against the persisted snapshot.
+// under the manager lock, against the persisted snapshot. When a batch would
+// release new backend work, the ready candidates are checked outside the
+// mutex first; stale results cannot launch work.
 func (m *Manager) reconcile() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.active != nil && !m.stopping && !m.recoveryChecking && m.loopCtx != nil &&
+		m.storageErr == nil &&
+		m.active.snapshot.Mode == domain.WorkflowModeRunning &&
+		m.active.snapshot.State == domain.WorkflowRunning {
+		snapshot := m.active.snapshot
+		agents, revision := m.readyCandidateAgentsLocked(snapshot)
+		if len(agents) > 0 {
+			m.mu.Unlock()
+			err := m.runPreflight(m.loopCtx, agents)
+			m.mu.Lock()
+			if m.active == nil || m.active.snapshot != snapshot || m.stopping || snapshot.Revision != revision {
+				// Stale: cancellation, pause, retry or another control moved
+				// the execution while the preflight ran; discard the result.
+				m.mu.Unlock()
+				return
+			}
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					m.preflightFailureLocked(snapshot, err)
+					m.refreshExecutionStateLocked(snapshot)
+					_ = m.persistLocked(snapshot)
+					m.Notify()
+				}
+				m.mu.Unlock()
+				return
+			}
+			m.preflightSuccessLocked(snapshot, "")
+		}
+	}
 	m.reconcileLocked()
+	m.mu.Unlock()
+}
+
+// readyCandidateAgentsLocked lists the agents of currently ready tasks so
+// the batch gate can check them without holding the mutex.
+func (m *Manager) readyCandidateAgentsLocked(snapshot *domain.WorkflowSnapshot) ([]string, int64) {
+	seen := map[string]bool{}
+	var agents []string
+	for taskID := range snapshot.Tasks {
+		task := snapshot.Tasks[taskID]
+		if task == nil || task.State != domain.WorkflowTaskReady {
+			continue
+		}
+		taskDef, ok := snapshot.Definition.Tasks[taskID]
+		if !ok || taskDef.Agent == "" || seen[taskDef.Agent] {
+			continue
+		}
+		seen[taskDef.Agent] = true
+		agents = append(agents, taskDef.Agent)
+	}
+	sort.Strings(agents)
+	return agents, snapshot.Revision
 }
 
 // enforceTimeoutsLocked cancels attempts past their wall-clock budget. Cleanup
@@ -648,6 +701,11 @@ func (m *Manager) refreshExecutionStateLocked(snapshot *domain.WorkflowSnapshot)
 
 func collectAttentionReasons(snapshot *domain.WorkflowSnapshot) []string {
 	var reasons []string
+	// The durable backend-preflight hold derives from the persisted report,
+	// so a successful pass clearing the report also clears the reason.
+	if snapshot.BackendPreflight != nil {
+		reasons = append(reasons, preflightAttentionReason)
+	}
 	for _, task := range snapshot.Tasks {
 		for i := range task.Attempts {
 			attempt := &task.Attempts[i]

@@ -170,6 +170,51 @@ Cursor model IDs depend on the account and current catalog. Verify them before u
 cursor-agent --list-models
 ```
 
+### Backend Installation Preflight
+
+Before Squad admits work it verifies local backend prerequisites, so missing executables fail with one actionable report instead of failing mid-attempt after the workspace changed. The gate runs for manual turns (selected agent only), workflow submission (every agent referenced by the task graph, including downstream, loop and allowed-to-fail tasks), recovery and resume (agents that can still execute), retry acceptance (only the retry target), every dispatch batch, and the one-shot `run` command. It never installs or updates tools, probes CLI versions, reads credentials, tests authentication or model access, or creates backend sessions.
+
+Bare command names are resolved with the **effective child PATH**, not the server's PATH — an intentional fix over earlier behavior that looked the executable up in the server environment. Agents with no `env`/`inherit_env` options inherit the ambient environment; once environment options produce a nonempty child environment, PATH must be present in it (via `inherit_env: [PATH]` or an explicit entry) or an absolute `command` must be configured. PATH entries that are relative directories reject bare-name lookup (`invalid_search_path`); empty entries are ignored. Explicit paths never fall back to defaults or aliases, resolve without shell expansion, and relative paths resolve against the workspace. Symlinks are followed to regular executables with effective-user execute access, and known shebang interpreters are verified without executing wrapper contents.
+
+A failed admission returns `503` with a structured report before any run or execution is created:
+
+```json
+{
+  "error": "codex [not_found] (executable): the configured command was not found ...",
+  "code": "backend_preflight_failed",
+  "issues": [
+    {
+      "phase": "installation",
+      "backend": "codex",
+      "agents": ["reviewer"],
+      "component": "executable",
+      "code": "not_found",
+      "restart_required": false,
+      "message": "the configured command was not found in the effective child PATH; inspect the command and PATH settings and install the missing backend",
+      "installation_links": [{"label": "Codex CLI installation", "url": "https://learn.chatgpt.com/docs/codex/cli"}]
+    }
+  ]
+}
+```
+
+Messages never include command/path values, environment, proxy credentials or child output; reports name at most the built-in default command and the option source (agent, machine or built-in default). A rejected manual run or workflow submission consumes no run/execution identity and no request ID, so the same request can be resubmitted after repair.
+
+OpenCode readiness is a separate phase after every local check passes: managed mode starts (or reuses) the owned server, external mode probes `GET /global/health` with redirects disabled. If the first managed startup fails or is cancelled, that runtime stays failed until Squad is explicitly restarted; the report carries `restart_required: true` with guidance. Local installation failures and external service errors never latch anything, and a successfully started shared server survives unrelated admission failures.
+
+Official installation pages used in reports:
+
+| Product | Link |
+| --- | --- |
+| Codex CLI | https://learn.chatgpt.com/docs/codex/cli |
+| Cursor CLI | https://cursor.com/docs/cli/installation |
+| Kimi CLI | https://www.kimi.com/code/docs/en/ |
+| OpenCode | https://opencode.ai/docs/ |
+| OpenCode server | https://opencode.ai/docs/server/ |
+| ZCode desktop | https://zcode.z.ai/en/docs/install |
+| Node.js (ZCode interpreter) | https://nodejs.org/en/download |
+
+These pages document upstream OS availability; Squad releases target macOS and Linux (AMD64/ARM64). Native Windows source builds report `unsupported_platform` for local backend checks; WSL uses Linux semantics. ZCode's implicit runtime location stays macOS-specific; Linux users must configure `runtime_path` explicitly.
+
 ### ZCode App Server
 
 See [examples/zcode-squad.yaml](examples/zcode-squad.yaml). Start it with:

@@ -19,7 +19,7 @@ func TestRecoveryDispatchesConsumerWithoutRerunningPredecessors(t *testing.T) {
 		},
 	}
 	first := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := first.m.Create("req-crash"); err != nil {
+	if _, _, err := first.m.Create(context.Background(), "req-crash"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	first.pump()
@@ -60,7 +60,7 @@ func TestRecoveryMarksUncertainAttemptInterrupted(t *testing.T) {
 		},
 	}
 	first := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := first.m.Create("req-uncertain"); err != nil {
+	if _, _, err := first.m.Create(context.Background(), "req-uncertain"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	first.pump() // a reserved and dispatched; crash before any outcome
@@ -94,7 +94,7 @@ func TestRecoveryMarksUncertainAttemptInterrupted(t *testing.T) {
 	}
 
 	// Retry with cleanup confirmation resolves the uncertainty.
-	if _, _, err := second.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-after-crash", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil {
+	if _, _, err := second.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-after-crash", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	second.pump()
@@ -135,7 +135,7 @@ func TestRecoveryKeepsPausedPausedAndCancellingCancelling(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-modes"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-modes"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -167,7 +167,7 @@ func TestRecoveryKeepsPausedPausedAndCancellingCancelling(t *testing.T) {
 	}
 	defer finishLiveRuns(t, third)
 	third.pump()
-	if _, err := third.m.Resume("wf_000001"); err != nil {
+	if _, err := third.m.Resume(context.Background(), "wf_000001"); err != nil {
 		t.Fatalf("resume paused: %v", err)
 	}
 	third.pump()
@@ -221,7 +221,7 @@ func TestRecoveryRejectsDamagedSnapshot(t *testing.T) {
 
 func TestRestartNeverTreatsStartupAsSubmission(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-restart"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-restart"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -250,7 +250,7 @@ func TestRestartNeverTreatsStartupAsSubmission(t *testing.T) {
 	}
 
 	// The same request id still replays to the original execution.
-	view, created, err := second.m.Create("req-restart")
+	view, created, err := second.m.Create(context.Background(), "req-restart")
 	if err != nil || created {
 		t.Fatalf("replay after restart: created=%v err=%v", created, err)
 	}
@@ -272,7 +272,7 @@ func TestStopPreservesUncertaintyForUnjoinedWorkers(t *testing.T) {
 	if err := fx.m.Start(ctx); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if _, _, err := fx.m.Create("req-stop"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-stop"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	waitForDispatch(t, fx)

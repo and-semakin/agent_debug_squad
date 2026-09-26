@@ -207,15 +207,11 @@ func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.
 	return state, nil
 }
 
+// Reset clears the local session identity without contacting the server:
+// creation of the replacement external session is deferred to the next
+// checked turn, so resets never start a managed server or allocate sessions.
 func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
-	if err := a.checkReady(ctx); err != nil {
-		return state, err
-	}
 	if err := ctx.Err(); err != nil {
-		return state, err
-	}
-	id, err := a.createSession(ctx)
-	if err != nil {
 		return state, err
 	}
 	if state.CreatedAt.IsZero() {
@@ -225,7 +221,7 @@ func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain
 	state.Backend = spec.Backend
 	state.Model = spec.StringOptions["model"]
 	state.StartupPrompt = spec.StartupPrompt
-	state.BackendSessionID = id
+	state.BackendSessionID = ""
 	state.Status = domain.AgentIdle
 	state.LastRunID = ""
 	state.LastError = nil

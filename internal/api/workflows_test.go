@@ -59,7 +59,7 @@ type scriptedWorkflows struct {
 	stopCalls   []workflow.StopRequest
 }
 
-func (s *scriptedWorkflows) Create(requestID string) (domain.WorkflowExecutionView, bool, error) {
+func (s *scriptedWorkflows) Create(_ context.Context, requestID string) (domain.WorkflowExecutionView, bool, error) {
 	s.createRequestID = requestID
 	if s.createErr != nil {
 		return domain.WorkflowExecutionView{}, false, s.createErr
@@ -95,7 +95,7 @@ func (s *scriptedWorkflows) Pause(executionID string) (domain.WorkflowExecutionV
 	return s.view[executionID], nil
 }
 
-func (s *scriptedWorkflows) Resume(executionID string) (domain.WorkflowExecutionView, error) {
+func (s *scriptedWorkflows) Resume(_ context.Context, executionID string) (domain.WorkflowExecutionView, error) {
 	if s.resumeErr != nil {
 		return domain.WorkflowExecutionView{}, s.resumeErr
 	}
@@ -110,7 +110,7 @@ func (s *scriptedWorkflows) Cancel(executionID string, opts workflow.CancelOptio
 	return s.view[executionID], nil
 }
 
-func (s *scriptedWorkflows) RetryTask(executionID, taskID string, req workflow.RetryRequest) (domain.WorkflowExecutionView, bool, error) {
+func (s *scriptedWorkflows) RetryTask(_ context.Context, executionID, taskID string, req workflow.RetryRequest) (domain.WorkflowExecutionView, bool, error) {
 	s.retryCalls = append(s.retryCalls, req)
 	if s.retryErr != nil {
 		return domain.WorkflowExecutionView{}, false, s.retryErr

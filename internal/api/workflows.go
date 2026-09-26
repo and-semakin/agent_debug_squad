@@ -25,14 +25,14 @@ const (
 
 // WorkflowManager decouples the HTTP layer from the workflow scheduler.
 type WorkflowManager interface {
-	Create(requestID string) (domain.WorkflowExecutionView, bool, error)
+	Create(ctx context.Context, requestID string) (domain.WorkflowExecutionView, bool, error)
 	List() ([]domain.WorkflowExecutionSummary, error)
 	View(executionID string) (domain.WorkflowExecutionView, error)
 	Wait(ctx context.Context, executionID string, timeout time.Duration) (domain.WorkflowExecutionView, error)
 	Pause(executionID string) (domain.WorkflowExecutionView, error)
-	Resume(executionID string) (domain.WorkflowExecutionView, error)
+	Resume(ctx context.Context, executionID string) (domain.WorkflowExecutionView, error)
 	Cancel(executionID string, opts workflow.CancelOptions) (domain.WorkflowExecutionView, error)
-	RetryTask(executionID, taskID string, req workflow.RetryRequest) (domain.WorkflowExecutionView, bool, error)
+	RetryTask(ctx context.Context, executionID, taskID string, req workflow.RetryRequest) (domain.WorkflowExecutionView, bool, error)
 	OverrideVerdict(executionID, taskID string, attempt int, req workflow.OverrideVerdictRequest) (domain.WorkflowExecutionView, bool, error)
 	ExtendLoop(executionID, loopID string, req workflow.ExtendRequest) (domain.WorkflowExecutionView, bool, error)
 	StopLoop(executionID, loopID string, req workflow.StopRequest) (domain.WorkflowExecutionView, bool, error)
@@ -56,8 +56,11 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view, created, err := s.workflows.Create(body.RequestID)
+	view, created, err := s.workflows.Create(r.Context(), body.RequestID)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		writeJSONWorkflowError(w, err)
 		return
 	}
@@ -123,7 +126,7 @@ func (s *Server) handleWorkflowResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.controlWorkflow(w, func() (domain.WorkflowExecutionView, error) {
-		return s.workflows.Resume(r.PathValue("execution_id"))
+		return s.workflows.Resume(r.Context(), r.PathValue("execution_id"))
 	})
 }
 
@@ -170,7 +173,7 @@ func (s *Server) handleWorkflowRetry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("expected_attempt must be a positive integer"))
 		return
 	}
-	view, created, err := s.workflows.RetryTask(r.PathValue("execution_id"), r.PathValue("task_id"), workflow.RetryRequest{
+	view, created, err := s.workflows.RetryTask(r.Context(), r.PathValue("execution_id"), r.PathValue("task_id"), workflow.RetryRequest{
 		RequestID:              body.RequestID,
 		ExpectedAttempt:        body.ExpectedAttempt,
 		ConfirmPreviousStopped: body.ConfirmPreviousStopped,
@@ -390,6 +393,8 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 	case errors.Is(err, workflow.ErrInvalidRequest),
 		errors.Is(err, workflow.ErrNoDefinition):
 		writeError(w, http.StatusBadRequest, err)
+	case preflightFailure(err):
+		writePreflightOrError(w, err)
 	case errors.Is(err, workflow.ErrDefinitionChanged),
 		errors.Is(err, workflow.ErrExecutionActive),
 		errors.Is(err, workflow.ErrInvalidTransition),
@@ -403,6 +408,13 @@ func writeJSONWorkflowError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, err)
 	}
+}
+
+// preflightFailure reports a failed installation/readiness admission, which
+// the HTTP layer renders as structured 503 with sanitized issues.
+func preflightFailure(err error) bool {
+	var preflight *domain.PreflightError
+	return errors.As(err, &preflight)
 }
 
 func isJSONSyntaxError(err error) bool {

@@ -15,11 +15,11 @@ func TestCreateIsIdempotentPerRequestID(t *testing.T) {
 	def := chainDefinition()
 	fx := newManagerFixture(t, def, "a1", "a2", "a3")
 
-	first, created, err := fx.m.Create("req-once")
+	first, created, err := fx.m.Create(context.Background(), "req-once")
 	if err != nil || !created {
 		t.Fatalf("first create: created=%v err=%v", created, err)
 	}
-	second, createdAgain, err := fx.m.Create("req-once")
+	second, createdAgain, err := fx.m.Create(context.Background(), "req-once")
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestCreateIsIdempotentPerRequestID(t *testing.T) {
 
 func TestCreateRejectsRequestIDReuseWithChangedDefinition(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-1"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-1"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// Finish the first execution so the active check does not trigger.
@@ -50,21 +50,21 @@ func TestCreateRejectsRequestIDReuseWithChangedDefinition(t *testing.T) {
 	changed := chainDefinition()
 	changed.Name = "chain-v2"
 	fx.m.cfg.Workflow = &changed
-	_, _, err := fx.m.Create("req-1")
+	_, _, err := fx.m.Create(context.Background(), "req-1")
 	if !errors.Is(err, ErrDefinitionChanged) {
 		t.Fatalf("changed definition with the same request id must conflict, got %v", err)
 	}
-	if _, _, err := fx.m.Create("req-2"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-2"); err != nil {
 		t.Fatalf("a new request id with the new definition must work: %v", err)
 	}
 }
 
 func TestCreateRejectsSecondNonterminalExecution(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-a"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-a"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fx.m.Create("req-b"); !errors.Is(err, ErrExecutionActive) {
+	if _, _, err := fx.m.Create(context.Background(), "req-b"); !errors.Is(err, ErrExecutionActive) {
 		t.Fatalf("competing submission must conflict, got %v", err)
 	}
 }
@@ -80,7 +80,7 @@ func TestConcurrentCreateAdmitsOneExecution(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			view, wasCreated, err := fx.m.Create("shared-request")
+			view, wasCreated, err := fx.m.Create(context.Background(), "shared-request")
 			ids <- view.ExecutionID
 			created <- wasCreated
 			errs <- err
@@ -125,7 +125,7 @@ func TestPauseStopsReservationsAndPreservesFinishedWork(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-pause"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-pause"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -156,7 +156,7 @@ func TestPauseStopsReservationsAndPreservesFinishedWork(t *testing.T) {
 	}
 
 	// Resume continues with b.
-	if _, err := fx.m.Resume("wf_000001"); err != nil {
+	if _, err := fx.m.Resume(context.Background(), "wf_000001"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	fx.pump()
@@ -167,7 +167,7 @@ func TestPauseStopsReservationsAndPreservesFinishedWork(t *testing.T) {
 
 func TestPauseRacesWithCompletion(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-race"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-race"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -193,7 +193,7 @@ func TestPauseRacesWithCompletion(t *testing.T) {
 
 func TestPauseRejectsTerminalAndCancelling(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-409"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-409"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -217,7 +217,7 @@ func TestCancelPreventsDownstreamAndCompletesWhenWorkersStop(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-cancel"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-cancel"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -265,7 +265,7 @@ func TestCancelWithCleanupAssertionClosesInterruptedWork(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-confirm"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-confirm"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -297,7 +297,7 @@ func TestRetryFailedTaskReservesFreshAttempt(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-retry"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-retry"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -310,11 +310,11 @@ func TestRetryFailedTaskReservesFreshAttempt(t *testing.T) {
 	}
 
 	// Idempotent retry: same request replays the same new attempt.
-	first, created, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1})
+	first, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1})
 	if err != nil || !created {
 		t.Fatalf("retry: created=%v err=%v", created, err)
 	}
-	replay, createdAgain, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1})
+	replay, createdAgain, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1})
 	if err != nil || createdAgain {
 		t.Fatalf("replay: created=%v err=%v", createdAgain, err)
 	}
@@ -323,7 +323,7 @@ func TestRetryFailedTaskReservesFreshAttempt(t *testing.T) {
 	}
 
 	// Stale expected attempt conflicts.
-	if _, _, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-2", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-2", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("stale expected_attempt must conflict, got %v", err)
 	}
 
@@ -365,7 +365,7 @@ func TestRetryRejectedAfterDownstreamConsumption(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-consumed"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-consumed"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -378,7 +378,7 @@ func TestRetryRejectedAfterDownstreamConsumption(t *testing.T) {
 	if view := mustView(t, fx); view.State != domain.WorkflowCompletedWithError {
 		t.Fatalf("state: %v", view.State)
 	}
-	_, _, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-late", ExpectedAttempt: 1})
+	_, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-late", ExpectedAttempt: 1})
 	if !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("retry after consumption must conflict, got %v", err)
 	}
@@ -392,7 +392,7 @@ func TestRetryInterruptedRequiresCleanupConfirmation(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1")
-	if _, _, err := fx.m.Create("req-interrupted"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-interrupted"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -404,10 +404,10 @@ func TestRetryInterruptedRequiresCleanupConfirmation(t *testing.T) {
 	if view.State != domain.WorkflowNeedsAttention {
 		t.Fatalf("interruption must hold attention: %v", view.State)
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("unconfirmed retry must be rejected, got %v", err)
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil {
 		t.Fatalf("confirmed retry must be accepted: %v", err)
 	}
 	fx.pump()
@@ -425,7 +425,7 @@ func TestRetryKeepsPausedExecutionPaused(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1")
-	if _, _, err := fx.m.Create("req-paused-retry"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-paused-retry"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -438,7 +438,7 @@ func TestRetryKeepsPausedExecutionPaused(t *testing.T) {
 	fx.exec.releaseFailure(runA, "boom")
 	fx.pump()
 
-	if _, _, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1}); err != nil {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-1", ExpectedAttempt: 1}); err != nil {
 		t.Fatalf("retry while paused: %v", err)
 	}
 	fx.pump()
@@ -449,7 +449,7 @@ func TestRetryKeepsPausedExecutionPaused(t *testing.T) {
 	if len(fx.exec.dispatched()) != 1 {
 		t.Fatalf("paused retry must not dispatch: %v", fx.exec.dispatched())
 	}
-	if _, err := fx.m.Resume("wf_000001"); err != nil {
+	if _, err := fx.m.Resume(context.Background(), "wf_000001"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	fx.pump()
@@ -466,7 +466,7 @@ func TestConcurrentRetriesCreateOneAttempt(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1")
-	if _, _, err := fx.m.Create("req-race-retry"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-race-retry"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -481,7 +481,7 @@ func TestConcurrentRetriesCreateOneAttempt(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, created, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-shared", ExpectedAttempt: 1})
+			_, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-shared", ExpectedAttempt: 1})
 			if err != nil {
 				t.Errorf("retry: %v", err)
 				return
@@ -513,7 +513,7 @@ func TestStorageFailureStopsDispatchAndSurfacesError(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-storage"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-storage"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -542,7 +542,7 @@ func TestStorageFailureStopsDispatchAndSurfacesError(t *testing.T) {
 
 func TestDispatchReservationFailureNeverCallsExecutor(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-reserve"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-reserve"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.st.mu.Lock()
@@ -562,7 +562,7 @@ func TestDispatchReservationFailureNeverCallsExecutor(t *testing.T) {
 
 func TestWaitReturnsOnTerminalAndExpiryKeepsRunning(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-wait"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-wait"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -616,7 +616,7 @@ func TestWaitReturnsOnPendingPermission(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1")
-	if _, _, err := fx.m.Create("req-perm"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-perm"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -655,13 +655,13 @@ func TestUnknownExecutionAndTaskReturnNotFound(t *testing.T) {
 	if _, err := fx.m.Pause("wf_999999"); !errors.Is(err, ErrExecutionNotFound) {
 		t.Fatalf("unknown pause: %v", err)
 	}
-	if _, _, err := fx.m.RetryTask("wf_999999", "a", RetryRequest{RequestID: "r", ExpectedAttempt: 1}); !errors.Is(err, ErrExecutionNotFound) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_999999", "a", RetryRequest{RequestID: "r", ExpectedAttempt: 1}); !errors.Is(err, ErrExecutionNotFound) {
 		t.Fatalf("unknown retry: %v", err)
 	}
-	if _, _, err := fx.m.Create("req-x"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-x"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "ghost", RetryRequest{RequestID: "r", ExpectedAttempt: 1}); !errors.Is(err, ErrTaskNotFound) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "ghost", RetryRequest{RequestID: "r", ExpectedAttempt: 1}); !errors.Is(err, ErrTaskNotFound) {
 		t.Fatalf("unknown task: %v", err)
 	}
 }
@@ -672,7 +672,7 @@ func TestCreateWithoutConfiguredDefinitionFails(t *testing.T) {
 	st := newRecordingStore(t)
 	cfg.WorkspaceDir = t.TempDir()
 	m := NewManager(cfg, st, newFakeExecutor())
-	if _, _, err := m.Create("req-none"); !errors.Is(err, ErrNoDefinition) {
+	if _, _, err := m.Create(context.Background(), "req-none"); !errors.Is(err, ErrNoDefinition) {
 		t.Fatalf("expected ErrNoDefinition, got %v", err)
 	}
 }
@@ -690,7 +690,7 @@ func TestRetryParallelInterruptionsQueueWithoutDeadlock(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-dual"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-dual"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -705,7 +705,7 @@ func TestRetryParallelInterruptionsQueueWithoutDeadlock(t *testing.T) {
 
 	// The first confirmed retry is accepted even though task b is still
 	// uncertain, and it queues without dispatching.
-	if _, created, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-a", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil || !created {
+	if _, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-a", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil || !created {
 		t.Fatalf("retry of a with sibling uncertainty pending: created=%v err=%v", created, err)
 	}
 	fx.pump()
@@ -718,7 +718,7 @@ func TestRetryParallelInterruptionsQueueWithoutDeadlock(t *testing.T) {
 
 	// Confirming the second retry retires every uncertainty; both queued
 	// attempts then dispatch.
-	if _, created, err := fx.m.RetryTask("wf_000001", "b", RetryRequest{RequestID: "retry-b", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil || !created {
+	if _, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "b", RetryRequest{RequestID: "retry-b", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil || !created {
 		t.Fatalf("retry of b: created=%v err=%v", created, err)
 	}
 	fx.pump()
@@ -747,7 +747,7 @@ func TestResumeRevalidatesAndClearsTransientStorageError(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-transient"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-transient"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -773,7 +773,7 @@ func TestResumeRevalidatesAndClearsTransientStorageError(t *testing.T) {
 	fx.st.mu.Lock()
 	fx.st.verifyErr = nil
 	fx.st.mu.Unlock()
-	resumed, err := fx.m.Resume("wf_000001")
+	resumed, err := fx.m.Resume(context.Background(), "wf_000001")
 	if err != nil {
 		t.Fatalf("resume after the transient failure cleared: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestResumeRevalidatesAndClearsTransientStorageError(t *testing.T) {
 // between submission and (re)dispatch cannot change the role that runs.
 func TestDispatchUsesSavedAgentSpecInsteadOfCurrentConfig(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-saved-spec"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-saved-spec"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// Simulate the config edit that precedes a recovery dispatch.
@@ -821,7 +821,7 @@ func TestDispatchUsesSavedAgentSpecInsteadOfCurrentConfig(t *testing.T) {
 func TestSavedAgentSpecPinsGlobalYoloDefault(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
 	fx.m.cfg.Defaults.Yolo = false
-	if _, _, err := fx.m.Create("req-yolo-pin"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-yolo-pin"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	snapshot, err := fx.st.LoadWorkflowSnapshot("wf_000001")
@@ -851,7 +851,7 @@ func TestSavedAgentSpecPinsGlobalYoloDefault(t *testing.T) {
 // interrupted attempt whose cleanup was asserted must not block resume again.
 func TestResumeAcceptsConfirmedHistoricalInterruption(t *testing.T) {
 	fx := newManagerFixture(t, chainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-confirmed"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-confirmed"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -861,7 +861,7 @@ func TestResumeAcceptsConfirmedHistoricalInterruption(t *testing.T) {
 	if view := mustView(t, fx); view.State != domain.WorkflowNeedsAttention {
 		t.Fatalf("interruption must hold attention: %v", view.State)
 	}
-	if _, created, err := fx.m.RetryTask("wf_000001", "a", RetryRequest{RequestID: "retry-a", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil || !created {
+	if _, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "a", RetryRequest{RequestID: "retry-a", ExpectedAttempt: 1, ConfirmPreviousStopped: true}); err != nil || !created {
 		t.Fatalf("confirmed retry: created=%v err=%v", created, err)
 	}
 	fx.pump()
@@ -876,7 +876,7 @@ func TestResumeAcceptsConfirmedHistoricalInterruption(t *testing.T) {
 	if _, err := fx.m.Pause("wf_000001"); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	resumed, err := fx.m.Resume("wf_000001")
+	resumed, err := fx.m.Resume(context.Background(), "wf_000001")
 	if err != nil {
 		t.Fatalf("resume must accept the already-confirmed interruption: %v", err)
 	}

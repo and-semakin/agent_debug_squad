@@ -54,12 +54,13 @@ type Store interface {
 	WorkflowDir(executionID string) (string, error)
 }
 
-// Executor runs one workflow attempt on a fresh owned runtime.
-// *orchestrator.Orchestrator implements it.
+// Executor runs one workflow attempt on a fresh owned runtime and provides
+// the installation/readiness gate. *orchestrator.Orchestrator implements it.
 type Executor interface {
 	SubmitOwnedRun(ctx context.Context, opts domain.OwnedRunOptions) error
 	CancelOwnedRun(runID string) bool
 	OwnedRunActive(runID string) bool
+	PreflightAgents(ctx context.Context, names []string) error
 }
 
 // RunObserver optionally exposes live run projections (pending permissions).
@@ -133,6 +134,18 @@ type Manager struct {
 	stopping    bool
 	stop        context.CancelFunc
 	loopDone    chan struct{}
+	// loopCtx bounds asynchronous recovery preflights; set in Start.
+	loopCtx context.Context
+	// admission tracks in-flight admissions by request ID so identical
+	// concurrent submissions wait for the owner instead of racing.
+	admissions map[string]*admission
+	// admissionReserved blocks competing new submissions while one admission
+	// runs its preflight outside the lock.
+	admissionReserved bool
+	// recoveryChecking marks an in-flight asynchronous recovery preflight:
+	// dispatch stays gated and the view reports backend_preflight.status
+	// checking without persisting a new execution state.
+	recoveryChecking bool
 	// one-shot fence: the selected execution cannot be reopened after its
 	// terminal state commits durably.
 	oneShotID     string
@@ -151,6 +164,7 @@ func NewManager(cfg domain.SessionConfig, st Store, exec Executor) *Manager {
 		wake:              make(chan struct{}, 1),
 		revisionC:         make(chan struct{}),
 		loopDone:          make(chan struct{}),
+		admissions:        map[string]*admission{},
 	}
 }
 
@@ -176,12 +190,16 @@ func (m *Manager) SetJudge(j judge.Judge) {
 }
 
 // Start recovers persisted executions and begins scheduling. It never
-// creates a new execution: submission is explicit.
+// creates a new execution: submission is explicit. Structural recovery runs
+// synchronously; the installation preflight of remaining agents runs
+// asynchronously with dispatch gated until it completes, so slow checks never
+// delay listener availability.
 func (m *Manager) Start(ctx context.Context) error {
 	loopCtx, cancel := context.WithCancel(ctx)
 	m.stop = cancel
 	m.mu.Lock()
 	m.judgeCtx = loopCtx
+	m.loopCtx = loopCtx
 	m.mu.Unlock()
 
 	ids, err := m.store.ListWorkflowExecutions()
@@ -209,10 +227,56 @@ func (m *Manager) Start(ctx context.Context) error {
 			cancel()
 			return err
 		}
+		m.beginRecoveryPreflight()
 	}
 
 	go m.loop(loopCtx)
 	return nil
+}
+
+// beginRecoveryPreflight schedules the asynchronous recovery preflight for
+// the recovered execution's remaining agents. Paused and cancelling
+// executions need no installation check; dispatch stays gated while checking.
+func (m *Manager) beginRecoveryPreflight() {
+	m.mu.Lock()
+	if m.active == nil || m.stopping || m.loopCtx == nil {
+		m.mu.Unlock()
+		return
+	}
+	snapshot := m.active.snapshot
+	if snapshot.Mode == domain.WorkflowModeCancelling || snapshot.Mode == domain.WorkflowModePaused {
+		m.mu.Unlock()
+		return
+	}
+	agents := runnableAgents(snapshot)
+	if len(agents) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	m.recoveryChecking = true
+	m.mu.Unlock()
+
+	go func() {
+		err := m.runPreflight(m.loopCtx, agents)
+		m.mu.Lock()
+		m.recoveryChecking = false
+		defer m.mu.Unlock()
+		if m.active == nil || m.active.snapshot != snapshot || m.stopping {
+			return
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			m.preflightFailureLocked(snapshot, err)
+			m.refreshExecutionStateLocked(snapshot)
+			_ = m.persistLocked(snapshot)
+			m.Notify()
+			return
+		}
+		if m.preflightSuccessLocked(snapshot, "") {
+			m.refreshExecutionStateLocked(snapshot)
+			_ = m.persistLocked(snapshot)
+			m.Notify()
+		}
+	}()
 }
 
 func (m *Manager) recoverExecution(snapshot *domain.WorkflowSnapshot) error {
@@ -442,12 +506,14 @@ func resolvedAgents(cfg domain.SessionConfig, def domain.WorkflowDefinition) map
 
 // Create submits the configured definition under a request ID. It returns the
 // execution view and whether a new execution was created (versus an idempotent
-// replay).
-func (m *Manager) Create(requestID string) (domain.WorkflowExecutionView, bool, error) {
-	return m.create(requestID, false)
+// replay). Structural validation, idempotency and conflict checks resolve
+// before preflight; the preflight itself runs outside the manager mutex
+// against a reservation so competing submissions keep their 409 semantics.
+func (m *Manager) Create(ctx context.Context, requestID string) (domain.WorkflowExecutionView, bool, error) {
+	return m.create(ctx, requestID, false)
 }
 
-func (m *Manager) create(requestID string, oneShot bool) (domain.WorkflowExecutionView, bool, error) {
+func (m *Manager) create(ctx context.Context, requestID string, oneShot bool) (domain.WorkflowExecutionView, bool, error) {
 	if requestID == "" {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request_id is required", ErrInvalidRequest)
 	}
@@ -462,15 +528,15 @@ func (m *Manager) create(requestID string, oneShot bool) (domain.WorkflowExecuti
 	hash := HashWorkflowDefinition(def, agents)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	ids, err := m.store.ListWorkflowExecutions()
 	if err != nil {
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, false, err
 	}
 	for _, id := range ids {
 		snapshot, err := m.store.LoadWorkflowSnapshot(id)
 		if err != nil {
+			m.mu.Unlock()
 			return domain.WorkflowExecutionView{}, false, err
 		}
 		if snapshot.RequestID != requestID {
@@ -480,26 +546,82 @@ func (m *Manager) create(requestID string, oneShot bool) (domain.WorkflowExecuti
 			if oneShot && m.oneShotID == "" {
 				m.oneShotID = snapshot.ExecutionID
 			}
-			return m.buildViewLocked(&snapshot), false, nil
+			view := m.buildViewLocked(&snapshot)
+			m.mu.Unlock()
+			return view, false, nil
 		}
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, false, ErrDefinitionChanged
 	}
 
-	if m.active != nil {
+	// An identical in-flight request waits for the owner's admission and then
+	// replays the committed result or receives the failed report; cancelling
+	// a waiting duplicate does not cancel the owner.
+	if adm, ok := m.admissions[requestID]; ok {
+		m.mu.Unlock()
+		select {
+		case <-adm.done:
+		case <-ctx.Done():
+			return domain.WorkflowExecutionView{}, false, ctx.Err()
+		}
+		// A replay never reports itself as the creation, whether the owner
+		// succeeded or its admission failed.
+		return adm.view, false, adm.err
+	}
+
+	if m.active != nil || m.admissionReserved {
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, false, ErrExecutionActive
 	}
 	for _, id := range ids {
 		snapshot, err := m.store.LoadWorkflowSnapshot(id)
 		if err != nil {
+			m.mu.Unlock()
 			return domain.WorkflowExecutionView{}, false, err
 		}
 		if !snapshot.State.Terminal() {
+			m.mu.Unlock()
 			return domain.WorkflowExecutionView{}, false, ErrExecutionActive
 		}
 	}
 
+	adm := &admission{done: make(chan struct{})}
+	m.admissions[requestID] = adm
+	m.admissionReserved = true
+	m.mu.Unlock()
+
+	preflightErr := m.runPreflight(ctx, admissionAgents(def))
+
+	m.mu.Lock()
+	delete(m.admissions, requestID)
+	m.admissionReserved = false
+	if preflightErr != nil {
+		adm.err = preflightErr
+		close(adm.done)
+		m.mu.Unlock()
+		return domain.WorkflowExecutionView{}, false, preflightErr
+	}
+	// Revalidate the reservation and lifecycle state after the lock is
+	// reacquired: a competing control may have committed an execution while
+	// the preflight ran.
+	if m.active != nil {
+		adm.err = ErrExecutionActive
+		close(adm.done)
+		m.mu.Unlock()
+		return domain.WorkflowExecutionView{}, false, ErrExecutionActive
+	}
+	if ctx.Err() != nil {
+		adm.err = ctx.Err()
+		close(adm.done)
+		m.mu.Unlock()
+		return domain.WorkflowExecutionView{}, false, ctx.Err()
+	}
+
 	executionID, err := m.store.NextWorkflowExecutionID()
 	if err != nil {
+		adm.err = err
+		close(adm.done)
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, false, err
 	}
 	now := m.now()
@@ -528,6 +650,9 @@ func (m *Manager) create(requestID string, oneShot bool) (domain.WorkflowExecuti
 		UpdatedAt:      now,
 	}
 	if err := m.store.SaveWorkflowSnapshot(snapshot); err != nil {
+		adm.err = err
+		close(adm.done)
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, false, err
 	}
 	_ = m.store.AppendWorkflowEvent(executionID, domain.WorkflowControlEvent{Type: "create", At: now, RequestID: requestID})
@@ -535,9 +660,13 @@ func (m *Manager) create(requestID string, oneShot bool) (domain.WorkflowExecuti
 		m.oneShotID = executionID
 	}
 	m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
+	adm.view = m.buildViewLocked(snapshot)
+	adm.created = true
+	close(adm.done)
 	m.notifyRevisionLocked()
 	m.Notify()
-	return m.buildViewLocked(snapshot), true, nil
+	m.mu.Unlock()
+	return adm.view, true, nil
 }
 
 func (m *Manager) findSnapshotLocked(executionID string) (*domain.WorkflowSnapshot, bool) {

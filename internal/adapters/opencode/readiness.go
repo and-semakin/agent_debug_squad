@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -14,6 +15,89 @@ import (
 )
 
 var directTransport = func() *http.Transport { t := http.DefaultTransport.(*http.Transport).Clone(); t.Proxy = nil; return t }()
+
+// ReadinessCheck verifies service readiness for this adapter's effective
+// configuration without creating sessions or submitting prompts. Managed
+// runtimes go through the existing lifecycle hook (owned startup plus the
+// healthy:true health predicate); external services use one bounded
+// GET /global/health with redirects disabled. A latched runtime reports
+// restart_required without another launch.
+func (a *Adapter) ReadinessCheck(ctx context.Context) *domain.InstallationIssue {
+	links := []domain.InstallationLink{{Label: "OpenCode server documentation", URL: domain.DocOpenCodeServer}}
+	mode := a.settings.Mode
+	if mode == "" {
+		mode = "managed"
+	}
+	if mode == "managed" {
+		err := a.runtime.ensure(ctx)
+		if err == nil {
+			return nil
+		}
+		issue := domain.InstallationIssue{
+			Phase:             domain.InstallationPhaseReadiness,
+			Component:         domain.ComponentService,
+			Code:              domain.CodeStartFailed,
+			Message:           "the owned OpenCode server is not available; correct the cause and restart Squad explicitly",
+			InstallationLinks: links,
+		}
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			issue.Code = domain.CodeTimedOut
+		case errors.Is(err, context.Canceled):
+			issue.Code = domain.CodeCancelled
+		}
+		issue.RestartRequired = a.runtime.FailureLatched()
+		return &issue
+	}
+	return a.externalHealthCheck(ctx, links)
+}
+
+// externalHealthCheck requires a 2xx JSON response containing healthy:true.
+// Unreachable or non-2xx endpoints report service_unavailable; a malformed or
+// unsupported health shape reports service_incompatible. Raw response bodies
+// and credentials never enter diagnostics.
+func (a *Adapter) externalHealthCheck(ctx context.Context, links []domain.InstallationLink) *domain.InstallationIssue {
+	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := a.newRequest(healthCtx, http.MethodGet, "/global/health", nil)
+	if err != nil {
+		return a.healthIssue(domain.CodeServiceUnavailable, links)
+	}
+	resp, err := a.httpClient().Do(req)
+	if err != nil {
+		return a.healthIssue(domain.CodeServiceUnavailable, links)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return a.healthIssue(domain.CodeServiceUnavailable, links)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return a.healthIssue(domain.CodeServiceUnavailable, links)
+	}
+	var health struct {
+		Healthy bool   `json:"healthy"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &health); err != nil || !health.Healthy {
+		return a.healthIssue(domain.CodeServiceIncompatible, links)
+	}
+	return nil
+}
+
+func (a *Adapter) healthIssue(code string, links []domain.InstallationLink) *domain.InstallationIssue {
+	message := "the OpenCode service did not answer its health endpoint; verify the server is running and reachable at the configured endpoint"
+	if code == domain.CodeServiceIncompatible {
+		message = "the OpenCode service returned an incompatible health response; verify it runs a compatible server version"
+	}
+	return &domain.InstallationIssue{
+		Phase:             domain.InstallationPhaseReadiness,
+		Component:         domain.ComponentService,
+		Code:              code,
+		Message:           message,
+		InstallationLinks: links,
+	}
+}
 
 func (a *Adapter) checkReady(ctx context.Context) error {
 	if a.runtime == nil {

@@ -26,6 +26,8 @@ func permissionAPIServer(t *testing.T, yolo bool, failReply bool) (*Server, chan
 		switch r.URL.Path {
 		case "/config":
 			_, _ = w.Write([]byte(`{"snapshot":false}`))
+		case "/global/health":
+			_, _ = w.Write([]byte(`{"healthy":true,"version":"test"}`))
 		case "/session":
 			_, _ = w.Write([]byte(`{"id":"ses_test"}`))
 		case "/session/ses_test/prompt_async":

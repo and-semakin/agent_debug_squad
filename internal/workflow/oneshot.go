@@ -131,6 +131,7 @@ func (m *Manager) StartScoped(ctx context.Context, selectedID string) error {
 			cancel()
 			return err
 		}
+		m.beginRecoveryPreflight()
 	}
 
 	go m.loop(loopCtx)
@@ -140,8 +141,8 @@ func (m *Manager) StartScoped(ctx context.Context, selectedID string) error {
 // CreateSelected is the one-shot variant of Create: the created (or replayed)
 // execution becomes the fence target inside the same serialized step, so no
 // control can observe the execution before the fence is installed.
-func (m *Manager) CreateSelected(requestID string) (domain.WorkflowExecutionView, bool, error) {
-	return m.create(requestID, true)
+func (m *Manager) CreateSelected(ctx context.Context, requestID string) (domain.WorkflowExecutionView, bool, error) {
+	return m.create(ctx, requestID, true)
 }
 
 // ObserveTerminal waits for the selected execution's durable terminal state

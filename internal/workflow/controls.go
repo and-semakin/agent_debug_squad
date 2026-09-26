@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -43,19 +44,22 @@ func (m *Manager) Pause(executionID string) (domain.WorkflowExecutionView, error
 }
 
 // Resume revalidates storage and artifacts and continues a paused or
-// needs_attention execution once no uncertainty remains.
-func (m *Manager) Resume(executionID string) (domain.WorkflowExecutionView, error) {
+// needs_attention execution once no uncertainty remains. A fresh preflight of
+// the agents that can still execute runs outside the mutex before work is
+// released.
+func (m *Manager) Resume(ctx context.Context, executionID string) (domain.WorkflowExecutionView, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	snapshot, err := m.loadSnapshotLocked(executionID)
 	if err != nil {
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, err
 	}
 	if snapshot.State.Terminal() || snapshot.Mode == domain.WorkflowModeCancelling {
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: execution is %s", ErrInvalidTransition, snapshot.State)
 	}
 	if snapshot.State != domain.WorkflowPaused && snapshot.State != domain.WorkflowNeedsAttention {
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: execution is %s", ErrInvalidTransition, snapshot.State)
 	}
 	// Revalidate artifacts before consulting the recorded storage error: a
@@ -68,8 +72,64 @@ func (m *Manager) Resume(executionID string) (domain.WorkflowExecutionView, erro
 		snapshot.State = domain.WorkflowNeedsAttention
 		_ = m.persistLocked(snapshot)
 		m.Notify()
+		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: %v", ErrUncertaintyUnresolved, err)
 	}
+	if len(snapshot.Loops) == 0 && len(reasons) > 0 {
+		snapshot.AttentionReasons = appendUniqueReason(snapshot.AttentionReasons, reasons...)
+		snapshot.State = domain.WorkflowNeedsAttention
+		_ = m.persistLocked(snapshot)
+		m.Notify()
+		m.mu.Unlock()
+		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: %v", ErrUncertaintyUnresolved, reasons)
+	}
+	if m.storageErr != nil && len(reasons) == 0 {
+		// The recorded failure was resolvable: its cause is gone and every
+		// artifact verifies, so scheduling may resume without a restart.
+		m.storageErr = nil
+	}
+
+	// Fresh preflight for every agent that can still execute, outside the
+	// lock. Failure retains pending state, publishes the sanitized report,
+	// and returns 503 at the API boundary without releasing any work.
+	agents := runnableAgents(snapshot)
+	if len(agents) > 0 {
+		m.mu.Unlock()
+		preflightErr := m.runPreflight(ctx, agents)
+		m.mu.Lock()
+		// Revalidate identity and lifecycle gates: a stale successful result
+		// must not release work.
+		if m.active != nil && m.active.snapshot != snapshot {
+			m.mu.Unlock()
+			return domain.WorkflowExecutionView{}, fmt.Errorf("%w: execution changed during preflight", ErrInvalidTransition)
+		}
+		if snapshot.State != domain.WorkflowPaused && snapshot.State != domain.WorkflowNeedsAttention {
+			m.mu.Unlock()
+			return domain.WorkflowExecutionView{}, fmt.Errorf("%w: execution is %s", ErrInvalidTransition, snapshot.State)
+		}
+		if preflightErr != nil {
+			if !errors.Is(preflightErr, context.Canceled) {
+				m.preflightFailureLocked(snapshot, preflightErr)
+				m.refreshExecutionStateLocked(snapshot)
+				_ = m.persistLocked(snapshot)
+				m.Notify()
+			}
+			m.mu.Unlock()
+			return domain.WorkflowExecutionView{}, preflightErr
+		}
+		if m.preflightSuccessLocked(snapshot, "") {
+			m.mu.Unlock()
+			return m.resumeCommit(ctx, executionID, snapshot, reasons)
+		}
+	}
+
+	return m.resumeCommit(ctx, executionID, snapshot, reasons)
+}
+
+// resumeCommit applies the post-preflight resume transition that is shared by
+// loopless and loop executions.
+func (m *Manager) resumeCommit(ctx context.Context, executionID string, snapshot *domain.WorkflowSnapshot, reasons []string) (domain.WorkflowExecutionView, error) {
+	defer m.mu.Unlock()
 	if len(snapshot.Loops) > 0 {
 		// For a loop execution, resume is an accepted recovery request: it
 		// returns 200 with the current view even while loop failure/blocking
@@ -101,18 +161,6 @@ func (m *Manager) Resume(executionID string) (domain.WorkflowExecutionView, erro
 		m.resumeJudgingLocked(snapshot)
 		m.Notify()
 		return m.buildViewLocked(snapshot), nil
-	}
-	if len(reasons) > 0 {
-		snapshot.AttentionReasons = appendUniqueReason(snapshot.AttentionReasons, reasons...)
-		snapshot.State = domain.WorkflowNeedsAttention
-		_ = m.persistLocked(snapshot)
-		m.Notify()
-		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: %v", ErrUncertaintyUnresolved, reasons)
-	}
-	if m.storageErr != nil {
-		// The recorded failure was resolvable: its cause is gone and every
-		// artifact verifies, so scheduling may resume without a restart.
-		m.storageErr = nil
 	}
 
 	snapshot.Mode = domain.WorkflowModeRunning
@@ -347,7 +395,7 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 
 // RetryTask reserves a fresh queued attempt for a failed or interrupted task
 // before any descendant has consumed its outcome.
-func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domain.WorkflowExecutionView, bool, error) {
+func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req RetryRequest) (domain.WorkflowExecutionView, bool, error) {
 	if req.RequestID == "" {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request_id is required", ErrInvalidRequest)
 	}
@@ -445,6 +493,48 @@ func (m *Manager) RetryTask(executionID, taskID string, req RetryRequest) (domai
 			last.CleanupConfirmedAt = &at
 		}
 	}
+
+	// Target-only admission check: an unrelated agent's installation failure
+	// cannot reject an otherwise eligible retry, and unrelated holds remain
+	// dispatch gates. A rejected request commits no retry record, so the same
+	// request ID stays available after repair. The deferred Unlock above is
+	// balanced by the re-Lock below; no early return happens in between.
+	targetAgent := taskDef.Agent
+	m.mu.Unlock()
+	preflightErr := m.runPreflight(ctx, []string{targetAgent})
+	m.mu.Lock()
+	if m.active != nil && m.active.snapshot != snapshot {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: another execution became active during preflight", ErrRetryConflict)
+	}
+	// Essential preconditions must still hold after the unlock window; the
+	// revision itself may have moved for unrelated recompute churn.
+	if snapshot.Mode == domain.WorkflowModeCancelling || snapshot.State == domain.WorkflowCancelled {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: execution is %s", ErrRetryConflict, snapshot.State)
+	}
+	if task.State != domain.WorkflowTaskFailed && task.State != domain.WorkflowTaskInterrupted {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: task is %s after preflight", ErrRetryConflict, task.State)
+	}
+	if req.ExpectedAttempt != len(task.Attempts) {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: expected_attempt %d but last attempt is %d after preflight", ErrRetryConflict, req.ExpectedAttempt, len(task.Attempts))
+	}
+	if _, taken := snapshot.RetryRequests[req.RequestID]; taken {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: request id was consumed during preflight", ErrRetryConflict)
+	}
+	if preflightErr != nil {
+		if !errors.Is(preflightErr, context.Canceled) {
+			m.preflightTargetFailureLocked(snapshot, targetAgent, preflightErr)
+			// Only a live nonterminal execution publishes the hold; a
+			// terminal snapshot keeps its outcome and merely carries the
+			// in-memory diagnostics for this rejected request.
+			if !snapshot.State.Terminal() && m.active != nil && m.active.snapshot == snapshot {
+				m.refreshExecutionStateLocked(snapshot)
+				_ = m.persistLocked(snapshot)
+				m.Notify()
+			}
+		}
+		return domain.WorkflowExecutionView{}, false, preflightErr
+	}
+	m.preflightSuccessLocked(snapshot, targetAgent)
 
 	now := m.now()
 	attemptNumber := len(task.Attempts) + 1
@@ -622,7 +712,7 @@ func (m *Manager) reconcileLocked() {
 	// Refresh the execution state before dispatching so that attention
 	// conditions established above block new work in the same pass.
 	changed = m.refreshExecutionStateLocked(snapshot) || changed
-	if m.storageErr == nil && snapshot.Mode == domain.WorkflowModeRunning && snapshot.State == domain.WorkflowRunning {
+	if m.storageErr == nil && !m.recoveryChecking && snapshot.Mode == domain.WorkflowModeRunning && snapshot.State == domain.WorkflowRunning {
 		// An attention-free running execution may re-arm settled loops. The
 		// advance is committed before any next-iteration dispatch; a failed
 		// advance save stops scheduling instead of releasing unsaved work.
@@ -753,6 +843,14 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 		TaskCounts:       countTaskStates(snapshot),
 		CreatedAt:        snapshot.CreatedAt,
 		UpdatedAt:        snapshot.UpdatedAt,
+	}
+	// The checking status is transient observation, never a persisted state;
+	// a persisted report renders as failed with its sanitized issues.
+	switch {
+	case m.recoveryChecking:
+		view.BackendPreflight = &domain.BackendPreflightView{Status: "checking"}
+	case snapshot.BackendPreflight != nil:
+		view.BackendPreflight = &domain.BackendPreflightView{Status: "failed", Report: snapshot.BackendPreflight}
 	}
 	execDir, _ := m.store.WorkflowDir(snapshot.ExecutionID)
 

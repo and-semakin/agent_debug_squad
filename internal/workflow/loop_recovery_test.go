@@ -26,7 +26,7 @@ func pumpReason(t *testing.T, fx *managerFixture, substr string) domain.Workflow
 
 func TestRecoveryMidIterationInterruptedRetriesCurrentIteration(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(3), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-crash-loop"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-crash-loop"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// Iteration 1 completes fully; the crash lands while iteration 2's
@@ -61,7 +61,7 @@ func TestRecoveryMidIterationInterruptedRetriesCurrentIteration(t *testing.T) {
 
 	// The confirmed retry is accepted despite review's iteration-1 attempt:
 	// same-loop descendants only block within the retried iteration.
-	if _, _, err := second.m.RetryTask("wf_000001", "implement", RetryRequest{
+	if _, _, err := second.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{
 		RequestID: "r-recover", ExpectedAttempt: 2, ConfirmPreviousStopped: true,
 	}); err != nil {
 		t.Fatalf("confirmed retry after crash: %v", err)
@@ -86,7 +86,7 @@ func TestRecoveryMidIterationInterruptedRetriesCurrentIteration(t *testing.T) {
 
 	// Repeating the accepted retry request after the advance replays it
 	// without new work or counter changes.
-	replayed, created, err := second.m.RetryTask("wf_000001", "implement", RetryRequest{
+	replayed, created, err := second.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{
 		RequestID: "r-recover", ExpectedAttempt: 2, ConfirmPreviousStopped: true,
 	})
 	if err != nil || created {
@@ -102,7 +102,7 @@ func TestRecoveryMidIterationInterruptedRetriesCurrentIteration(t *testing.T) {
 
 func TestLoopFailureHoldSurvivesRestart(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-durable-hold"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-durable-hold"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -133,7 +133,7 @@ func TestLoopFailureHoldSurvivesRestart(t *testing.T) {
 		t.Fatalf("wait must surface the durable hold: %+v err=%v", held.AttentionReasons, err)
 	}
 
-	if _, _, err := second.m.RetryTask("wf_000001", "implement", RetryRequest{RequestID: "r1", ExpectedAttempt: 1}); err != nil {
+	if _, _, err := second.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r1", ExpectedAttempt: 1}); err != nil {
 		t.Fatalf("retry after restart: %v", err)
 	}
 	if got := iterationNumbersForTask(t, second, "implement"); len(got) != 2 || got[1] != 1 {
@@ -149,7 +149,7 @@ func TestSameIterationConsumptionBlocksRetry(t *testing.T) {
 	implement.AllowedToFail = true
 	def.Tasks["implement"] = implement
 	fx := newManagerFixture(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-consumed"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-consumed"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -160,7 +160,7 @@ func TestSameIterationConsumptionBlocksRetry(t *testing.T) {
 		t.Fatalf("review must have dispatched in iteration 1: %+v", review)
 	}
 
-	_, _, err := fx.m.RetryTask("wf_000001", "implement", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1})
+	_, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1})
 	if !errors.Is(err, ErrRetryConflict) ||
 		!strings.Contains(err.Error(), "descendant review already has an attempt in loop refine iteration 1") {
 		t.Fatalf("same-iteration consumption must block the retry, got %v", err)
@@ -181,7 +181,7 @@ func TestOutsideConsumptionBlocksRetry(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-outside"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-outside"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -193,7 +193,7 @@ func TestOutsideConsumptionBlocksRetry(t *testing.T) {
 		t.Fatalf("outside consumer must have dispatched: %+v", report)
 	}
 
-	_, _, err := fx.m.RetryTask("wf_000001", "solo", RetryRequest{RequestID: "r-outside", ExpectedAttempt: 1})
+	_, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "solo", RetryRequest{RequestID: "r-outside", ExpectedAttempt: 1})
 	if !errors.Is(err, ErrRetryConflict) ||
 		!strings.Contains(err.Error(), "descendant report already has attempts") {
 		t.Fatalf("outside consumption must block the retry, got %v", err)
@@ -207,7 +207,7 @@ func TestOutsideConsumptionBlocksRetry(t *testing.T) {
 	}
 
 	// Even after the outcome is terminal the consumed inputs stay frozen.
-	if _, _, err := fx.m.RetryTask("wf_000001", "solo", RetryRequest{RequestID: "r-late", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "solo", RetryRequest{RequestID: "r-late", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("consumed result must stay un-retryable: %v", err)
 	}
 	manifest := readAttemptManifest(t, fx, "report", 1)
@@ -222,7 +222,7 @@ func TestHistoricalFailureCannotBeRetriedAfterAdvance(t *testing.T) {
 	implement.AllowedToFail = true
 	def.Tasks["implement"] = implement
 	fx := newManagerFixture(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-history"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-history"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// Iteration 1: implement fails tolerably, review succeeds, the loop
@@ -239,10 +239,10 @@ func TestHistoricalFailureCannotBeRetriedAfterAdvance(t *testing.T) {
 	// Iteration 1's failure is immutable history: neither the failed task
 	// (now re-running) nor its downstream (re-armed, no iteration-2 attempt)
 	// may be retried against the past.
-	if _, _, err := fx.m.RetryTask("wf_000001", "implement", RetryRequest{RequestID: "r-old", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-old", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("stale expected_attempt must conflict, got %v", err)
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "review", RetryRequest{RequestID: "r-old-review", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "review", RetryRequest{RequestID: "r-old-review", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("retry targeting iteration-1 history must conflict, got %v", err)
 	}
 	snapshot := loopSnapshot(t, fx)
@@ -265,7 +265,7 @@ func TestFinalIterationRetryReopensDoneLoop(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-reopen"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-reopen"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -283,14 +283,14 @@ func TestFinalIterationRetryReopensDoneLoop(t *testing.T) {
 
 	// Both repairs queue before any further dispatch: the retry reopens the
 	// done loop at the same iteration without creating iteration 2.
-	if _, _, err := fx.m.RetryTask("wf_000001", "solo", RetryRequest{RequestID: "r-solo", ExpectedAttempt: 1}); err != nil {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "solo", RetryRequest{RequestID: "r-solo", ExpectedAttempt: 1}); err != nil {
 		t.Fatalf("eligible final-iteration retry: %v", err)
 	}
 	reopened := mustView2(t, fx)
 	if reopened.Loops[0].State != domain.WorkflowLoopRunning || reopened.Loops[0].Iteration != 1 {
 		t.Fatalf("done loop must reopen at the same iteration: %+v", reopened.Loops[0])
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "anchor", RetryRequest{RequestID: "r-anchor", ExpectedAttempt: 1}); err != nil {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "anchor", RetryRequest{RequestID: "r-anchor", ExpectedAttempt: 1}); err != nil {
 		t.Fatalf("outside predecessor repair: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestPausedLoopRepairStaysPausedUntilResume(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1")
-	if _, _, err := fx.m.Create("req-paused-repair"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-paused-repair"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -332,7 +332,7 @@ func TestPausedLoopRepairStaysPausedUntilResume(t *testing.T) {
 		t.Fatalf("pause under a loop hold: %v", err)
 	}
 
-	view, _, err := fx.m.RetryTask("wf_000001", "solo", RetryRequest{RequestID: "r-paused", ExpectedAttempt: 1})
+	view, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "solo", RetryRequest{RequestID: "r-paused", ExpectedAttempt: 1})
 	if err != nil {
 		t.Fatalf("retry under pause: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestPausedLoopRepairStaysPausedUntilResume(t *testing.T) {
 		t.Fatalf("no dispatch while paused: %v", fx.exec.dispatched())
 	}
 
-	resumed, err := fx.m.Resume("wf_000001")
+	resumed, err := fx.m.Resume(context.Background(), "wf_000001")
 	if err != nil {
 		t.Fatalf("resume after repair: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-artifact-hold"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-artifact-hold"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -385,7 +385,7 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 
 	// A transient verification failure coexists with the loop failure hold.
 	fx.st.verifyErr = errors.New("temporary read failure")
-	resumed, err := fx.m.Resume("wf_000001")
+	resumed, err := fx.m.Resume(context.Background(), "wf_000001")
 	if err != nil {
 		t.Fatalf("resume must be accepted for loop executions: %v", err)
 	}
@@ -393,14 +393,14 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 		!hasReason(resumed, "artifact:seed:1") || !hasReason(resumed, "loop_failure:refine:1:implement") {
 		t.Fatalf("resume must keep both unresolved causes visible: %v (%v)", resumed.State, resumed.AttentionReasons)
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "implement", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("artifact uncertainty must precede loop retry: %v", err)
 	}
 
 	// Once the artifact verifies again, resume clears only the artifact
 	// reason; the loop hold remains and now permits the eligible retry.
 	fx.st.verifyErr = nil
-	resumed, err = fx.m.Resume("wf_000001")
+	resumed, err = fx.m.Resume(context.Background(), "wf_000001")
 	if err != nil {
 		t.Fatalf("resume after restore: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 	if !hasReason(resumed, "loop_failure:refine:1:implement") {
 		t.Fatalf("loop failure must survive artifact recovery: %v", resumed.AttentionReasons)
 	}
-	if _, _, err := fx.m.RetryTask("wf_000001", "implement", RetryRequest{RequestID: "r-repair", ExpectedAttempt: 1}); err != nil {
+	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-repair", ExpectedAttempt: 1}); err != nil {
 		t.Fatalf("retry permitted after artifact recovery: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -435,7 +435,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 		},
 	}
 	jf := newJudgedFixture(t, def, "a1", "a2", "a3", "a4")
-	if _, _, err := jf.m.Create("req-judge-loop"); err != nil {
+	if _, _, err := jf.m.Create(context.Background(), "req-judge-loop"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	jf.pump()
@@ -452,7 +452,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	if !hasReason(view, "loop_failure:refine:1:fix:retry_or_cancel") {
 		t.Fatalf("both holds must be visible: %v", view.AttentionReasons)
 	}
-	if _, _, err := jf.m.RetryTask("wf_000001", "fix", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
+	if _, _, err := jf.m.RetryTask(context.Background(), "wf_000001", "fix", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
 		t.Fatalf("judge uncertainty must precede the loop retry: %v", err)
 	}
 
@@ -462,7 +462,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	jf.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return <-release, nil
 	})
-	resumed, err := jf.m.Resume("wf_000001")
+	resumed, err := jf.m.Resume(context.Background(), "wf_000001")
 	if err != nil {
 		t.Fatalf("resume during combined holds must be accepted: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	if !jf.pumpUntil(2*time.Second, func() bool { return jf.judge.requestCount() == 2 }) {
 		t.Fatalf("resume must start exactly one classification")
 	}
-	if _, err := jf.m.Resume("wf_000001"); err != nil {
+	if _, err := jf.m.Resume(context.Background(), "wf_000001"); err != nil {
 		t.Fatalf("repeated resume must stay accepted: %v", err)
 	}
 	jf.pumpUntil(100*time.Millisecond, func() bool { return false })
@@ -502,7 +502,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	if snapshot := loopSnapshot(t, jf.managerFixture); snapshot.Loops["refine"].Iteration != 1 {
 		t.Fatalf("classification settlement must not advance the held loop: %+v", snapshot.Loops["refine"])
 	}
-	if _, _, err := jf.m.RetryTask("wf_000001", "fix", RetryRequest{RequestID: "r-fix", ExpectedAttempt: 1}); err != nil {
+	if _, _, err := jf.m.RetryTask(context.Background(), "wf_000001", "fix", RetryRequest{RequestID: "r-fix", ExpectedAttempt: 1}); err != nil {
 		t.Fatalf("retry after judge recovery: %v", err)
 	}
 
@@ -529,7 +529,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 
 func TestCancelFromLoopFailureHold(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-cancel-hold"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-cancel-hold"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -566,7 +566,7 @@ func TestAdvanceCommitFaultAndBoundaryCrashes(t *testing.T) {
 		},
 	}
 	fx := newManagerFixture(t, def, "a1")
-	if _, _, err := fx.m.Create("req-advance-fault"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-advance-fault"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -627,7 +627,7 @@ func TestAdvanceCommitFaultAndBoundaryCrashes(t *testing.T) {
 	if view.Loops[0].Iteration != 2 {
 		t.Fatalf("post-advance crash keeps the counter: %+v", view.Loops[0])
 	}
-	if _, _, err := third.m.RetryTask("wf_000001", "solo", RetryRequest{
+	if _, _, err := third.m.RetryTask(context.Background(), "wf_000001", "solo", RetryRequest{
 		RequestID: "r-advance", ExpectedAttempt: 2, ConfirmPreviousStopped: true,
 	}); err != nil {
 		t.Fatalf("confirmed retry repairs iteration 2: %v", err)

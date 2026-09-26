@@ -92,7 +92,7 @@ func blockOnInterruptedExecution(t *testing.T, cfgPath, requestID string) {
 		_ = ownership.Release()
 		t.Fatalf("start: %v", err)
 	}
-	if _, _, err := m.CreateSelected(requestID); err != nil {
+	if _, _, err := m.CreateSelected(context.Background(), requestID); err != nil {
 		_ = ownership.Release()
 		t.Fatalf("create: %v", err)
 	}

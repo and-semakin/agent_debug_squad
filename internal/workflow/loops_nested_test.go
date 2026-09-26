@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -60,7 +61,7 @@ func loopIterationPath(t *testing.T, fx *managerFixture, loopName string) []doma
 
 func TestNestedStaticLoopsRunCartesianProduct(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-nested"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-nested"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	snapshot := loopSnapshot(t, fx)
@@ -108,7 +109,7 @@ func TestNestedStaticLoopsRunCartesianProduct(t *testing.T) {
 
 func TestNestedExitConsumesFinalInnerOutcome(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 1), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-nested-consume"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-nested-consume"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -138,7 +139,7 @@ func TestNestedCarryOverSummarizesWholeSubtree(t *testing.T) {
 	def := nestedStaticDefinition(2, 2)
 	def.Tasks["carry"] = domain.WorkflowTaskDefinition{Agent: "a4", Prompt: "Carry.", Loop: "outer", Needs: []string{"exit"}}
 	fx := newManagerFixture(t, def, "a1", "a2", "a3", "a4")
-	if _, _, err := fx.m.Create("req-nested-carry"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-nested-carry"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -167,7 +168,7 @@ func TestNestedCarryOverSummarizesWholeSubtree(t *testing.T) {
 
 func TestNestedFailureHoldReasonUsesIterationPath(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-nested-fail"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-nested-fail"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -185,7 +186,7 @@ func TestNestedFailureHoldReasonUsesIterationPath(t *testing.T) {
 	}
 
 	// A retry targets the failed attempt at the current path and stays in it.
-	if _, created, err := fx.m.RetryTask("wf_000001", "implement", RetryRequest{RequestID: "r1", ExpectedAttempt: 1}); err != nil || !created {
+	if _, created, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r1", ExpectedAttempt: 1}); err != nil || !created {
 		t.Fatalf("nested retry must be accepted: created=%v err=%v", created, err)
 	}
 	queued := loopSnapshot(t, fx).Tasks["implement"].Attempts[1]
@@ -275,7 +276,7 @@ func threeLevelDefinition() domain.WorkflowDefinition {
 
 func TestThreeLevelNestedInitializesCompletePaths(t *testing.T) {
 	fx := newManagerFixture(t, threeLevelDefinition(), "a1", "a2", "a3", "a4", "a5")
-	if _, _, err := fx.m.Create("req-three"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-three"); err != nil {
 		t.Fatalf("create must accept the three-level authoring model: %v", err)
 	}
 	snapshot := loopSnapshot(t, fx)
@@ -327,7 +328,7 @@ func readAttemptPrompt(t *testing.T, fx *managerFixture, taskID string, attemptN
 // stays absent, and that the prompt surfaces those ancestor references.
 func TestNestedAncestorCarryOverAtFirstInnerIteration(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-ancestor-carry"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-ancestor-carry"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -387,7 +388,7 @@ func TestNestedAncestorCarryOverAtFirstInnerIteration(t *testing.T) {
 
 func TestNestedAncestorCarryOverArtifactDamageHolds(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-ancestor-damage"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-ancestor-damage"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	defer finishLiveRuns(t, fx)
@@ -465,7 +466,7 @@ func TestLoopWaitBarrierIsLexicographicByDependencyID(t *testing.T) {
 	}
 	for _, needs := range [][]string{{"ztask", "atask"}, {"atask", "ztask"}} {
 		fx := newManagerFixture(t, build(needs), "a1", "a2", "a3")
-		if _, _, err := fx.m.Create("req-barrier"); err != nil {
+		if _, _, err := fx.m.Create(context.Background(), "req-barrier"); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		fx.pump()
@@ -524,7 +525,7 @@ func attemptNumberForPath(t *testing.T, fx *managerFixture, taskID, want string)
 // previous-iteration section stays absent.
 func TestNestedThreeLevelAncestorCarryOverAtFirstInnerIteration(t *testing.T) {
 	fx := newManagerFixture(t, nestedThreeStaticDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-three-ancestor"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-three-ancestor"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -591,7 +592,7 @@ func loopViewPath(view domain.WorkflowExecutionView, name string) []domain.Itera
 // path in place, but a view delivered earlier keeps the path it was given.
 func TestNestedViewLoopPathIsImmutableAcrossAdvance(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-view-immutable"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-view-immutable"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -623,7 +624,7 @@ func TestNestedViewLoopPathIsImmutableAcrossAdvance(t *testing.T) {
 // full path, clearly distinct from the ancestor outer=1 section.
 func TestNestedPromptDistinguishesOwnAndAncestorContexts(t *testing.T) {
 	fx := newManagerFixture(t, nestedStaticDefinition(2, 2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-prompt-context"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-prompt-context"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {
@@ -650,7 +651,7 @@ func TestNestedPromptDistinguishesOwnAndAncestorContexts(t *testing.T) {
 // TestNonnestedPromptKeepsIterationLabels locks the byte-identical flat format.
 func TestNonnestedPromptKeepsIterationLabels(t *testing.T) {
 	fx := newManagerFixture(t, loopReviewDefinition(2), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-flat-prompt"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-flat-prompt"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if final := driveToTerminal(t, fx); final.State != domain.WorkflowSucceeded {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/and-semakin/agent_debug_squad/internal/adapters"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
 )
@@ -543,7 +544,11 @@ func TestSubmitOwnedRunRejectsUnresolvableSavedSpec(t *testing.T) {
 // reservation so shutdown joins promptly.
 func TestWaitForWorkersJoinsAfterOwnedInitFailure(t *testing.T) {
 	o, _ := newOwnedTestOrchestrator(t, "Reviewer")
-	// The zcode adapter rejects an unknown reasoning level during Init.
+	// The installation gate passes (the seam stubs it), and the zcode
+	// adapter then rejects an unknown reasoning level during Init.
+	o.installationCheck = func(_ adapters.AgentAdapter, _ context.Context, _ domain.InstallationInput) domain.InstallationResult {
+		return domain.InstallationResult{Status: domain.InstallationStatusReady}
+	}
 	saved := domain.AgentSpec{
 		Name:          "Reviewer",
 		Backend:       "zcode",

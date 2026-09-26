@@ -272,8 +272,13 @@ type WorkflowSnapshot struct {
 	NextRunSeq    int                               `json:"next_run_seq"`
 	RetryRequests map[string]WorkflowRetryRecord    `json:"retry_requests,omitempty"`
 	Controls      []WorkflowControlEvent            `json:"controls,omitempty"`
-	CreatedAt     time.Time                         `json:"created_at"`
-	UpdatedAt     time.Time                         `json:"updated_at"`
+	// BackendPreflight carries optional sanitized diagnostics of the last
+	// failed installation/readiness pass. Absence means unchecked or cleared;
+	// success is never persisted as reusable evidence, and the additive field
+	// changes no schema version.
+	BackendPreflight *PreflightReport `json:"backend_preflight,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
 type WorkflowTaskExecution struct {
@@ -557,6 +562,14 @@ type WorkflowLoopView struct {
 	StopRequested bool `json:"stop_requested,omitempty"`
 }
 
+// BackendPreflightView renders the optional preflight diagnostics in the
+// execution view. Status "checking" is transient and never persisted; status
+// "failed" mirrors the persisted sanitized report.
+type BackendPreflightView struct {
+	Status string           `json:"status"`
+	Report *PreflightReport `json:"report,omitempty"`
+}
+
 type WorkflowExecutionView struct {
 	ExecutionID        string                      `json:"execution_id"`
 	Definition         WorkflowDefinition          `json:"definition"`
@@ -567,6 +580,7 @@ type WorkflowExecutionView struct {
 	Mode               WorkflowMode                `json:"mode"`
 	AttentionReasons   []string                    `json:"attention_reasons,omitempty"`
 	LastError          *string                     `json:"last_error,omitempty"`
+	BackendPreflight   *BackendPreflightView       `json:"backend_preflight,omitempty"`
 	TaskCounts         WorkflowTaskCounts          `json:"task_counts"`
 	Tasks              []WorkflowTaskView          `json:"tasks"`
 	Loops              []WorkflowLoopView          `json:"loops,omitempty"`

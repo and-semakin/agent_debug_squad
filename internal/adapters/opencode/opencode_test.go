@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -710,9 +711,13 @@ func TestSendTimeoutBudgetIncludesStreamingBeforeFinalMessageFetch(t *testing.T)
 	}
 }
 
+// Reset clears local session identity without contacting the server; the
+// replacement external session is created by the next checked turn's Init.
 func TestResetCreatesNewSessionAndClearsContinuity(t *testing.T) {
 	var sessionCreates int
+	var sawRequest atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest.Store(true)
 		if r.Method != http.MethodPost || r.URL.Path != "/session" {
 			t.Fatalf("request = %s %s, want POST /session", r.Method, r.URL.Path)
 		}
@@ -743,11 +748,14 @@ func TestResetCreatesNewSessionAndClearsContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sessionCreates != 1 {
-		t.Fatalf("sessionCreates = %d, want 1", sessionCreates)
+	if sawRequest.Load() {
+		t.Fatalf("reset contacted the server; replacement session creation must be deferred")
 	}
-	if reset.BackendSessionID != "session_new" {
-		t.Fatalf("BackendSessionID = %q, want session_new", reset.BackendSessionID)
+	if sessionCreates != 0 {
+		t.Fatalf("sessionCreates = %d, want 0 during reset", sessionCreates)
+	}
+	if reset.BackendSessionID != "" {
+		t.Fatalf("BackendSessionID = %q, want empty until the next checked turn", reset.BackendSessionID)
 	}
 	if reset.LastRunID != "" {
 		t.Fatalf("LastRunID = %q, want empty", reset.LastRunID)

@@ -64,6 +64,8 @@ type Orchestrator struct {
 	activeSinks map[string]*runSink
 	nextRun     int
 	workerWG    sync.WaitGroup
+	// installationCheck, when set by tests, replaces the adapter check.
+	installationCheck installationChecker
 }
 
 type agentRuntime struct {
@@ -81,7 +83,22 @@ type agentRuntime struct {
 	// instead of the manual agent state file, and manual APIs reject it.
 	owned     bool
 	statePath string
+	// initialized reports whether the adapter's Init ran. Backends whose
+	// Init contacts a server (OpenCode) stay uninitialized until the first
+	// checked turn, so serving a fresh squad never touches unused backends.
+	initialized bool
+	// resetGeneration increments on every reset that clears session identity,
+	// so an admission whose preflight is in flight can detect that a reset
+	// invalidated its reservation.
+	resetGeneration int
+	// admitCancel cancels an in-flight admission preflight when a forced
+	// reset or shutdown invalidates the reservation.
+	admitCancel context.CancelFunc
 }
+
+// installationCheck overrides adapter.CheckInstallation in tests; nil uses
+// the adapter's real check. Production never sets it.
+type installationChecker = func(adapters.AgentAdapter, context.Context, domain.InstallationInput) domain.InstallationResult
 
 func New(ctx context.Context, cfg domain.SessionConfig, s *store.Store) (*Orchestrator, error) {
 	return newOrchestrator(ctx, cfg, s, false)
@@ -162,9 +179,18 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 		state.Model = spec.StringOptions["model"]
 		state.WorkspaceDir = cfg.WorkspaceDir
 
-		state, err = adapter.Init(ctx, spec, state)
-		if err != nil {
-			return nil, err
+		// External session creation is deferred: CLI adapters initialize
+		// locally here, while OpenCode registers metadata only and creates
+		// its first session on the first checked turn. Recovering a saved
+		// session identity likewise waits for that turn.
+		initialized := true
+		if spec.Backend != "opencode" {
+			state, err = adapter.Init(ctx, spec, state)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			initialized = false
 		}
 		if state.WorkspaceDir == "" {
 			state.WorkspaceDir = cfg.WorkspaceDir
@@ -174,9 +200,10 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 		}
 
 		o.runtimes[spec.Name] = &agentRuntime{
-			spec:    spec,
-			state:   state,
-			adapter: adapter,
+			spec:        spec,
+			state:       state,
+			adapter:     adapter,
+			initialized: initialized,
 		}
 	}
 
@@ -232,10 +259,33 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 		return domain.RunRecord{}, ErrAgentBusy
 	}
 
+	// Reserve the agent as admitting: other operations observe busy, and a
+	// forced reset invalidates this reservation through the generation
+	// counter while cancelling the in-flight preflight.
+	rt.busy = true
+	rt.resetGeneration++
+	generation := rt.resetGeneration
+	admitCtx, admitCancel := context.WithCancel(ctx)
+	rt.admitCancel = admitCancel
+	o.mu.Unlock()
+
+	if err := o.PreflightAgents(admitCtx, []string{agentName}); err != nil {
+		o.releaseAdmission(agentName)
+		admitCancel()
+		return domain.RunRecord{}, err
+	}
+
+	o.mu.Lock()
+	if current := o.runtimes[agentName]; current == nil || current.resetGeneration != generation || current.resetting {
+		o.mu.Unlock()
+		o.releaseAdmission(agentName)
+		admitCancel()
+		return domain.RunRecord{}, ErrAgentBusy
+	}
 	runID := fmt.Sprintf("run_%06d", o.nextRun)
 	o.nextRun++
 	runCtx, cancel := context.WithCancel(o.execCtx)
-	rt.busy = true
+	rt.admitCancel = nil
 	rt.activeRunID = runID
 	rt.cancelActiveRun = cancel
 	rt.activeRunDone = make(chan struct{})
@@ -250,6 +300,7 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 	}
 	waiter := o.waiterLocked(runID)
 	o.mu.Unlock()
+	admitCancel()
 
 	if err := o.store.SaveRun(run); err != nil {
 		cancel()
@@ -275,6 +326,22 @@ func (o *Orchestrator) SubmitRun(ctx context.Context, agentName, message string,
 	o.workerWG.Add(1)
 	go o.runWorker(runCtx, agentName, run, waiter, nil)
 	return run, nil
+}
+
+// releaseAdmission drops a busy reservation held by an in-flight preflight.
+// Only the admission path sets busy without an active run ID, so the flag
+// stays unambiguously ours; a forced reset that won the race bumped the
+// generation but left the flag in place.
+func (o *Orchestrator) releaseAdmission(agentName string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if rt, ok := o.runtimes[agentName]; ok && rt.activeRunID == "" {
+		rt.busy = false
+		if rt.admitCancel != nil {
+			rt.admitCancel()
+			rt.admitCancel = nil
+		}
+	}
 }
 
 func (o *Orchestrator) WaitForWorkers(ctx context.Context) error {
@@ -461,6 +528,13 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 		}
 	}
 	rt.resetting = true
+	// A reset that wins serialization invalidates any in-flight admission:
+	// the stale reservation must not launch work or reuse session state.
+	rt.resetGeneration++
+	if rt.admitCancel != nil {
+		rt.admitCancel()
+		rt.admitCancel = nil
+	}
 	o.mu.Unlock()
 
 	defer func() {
@@ -513,6 +587,9 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 	o.mu.Lock()
 	if current := o.runtimes[agentName]; current != nil {
 		current.state = reset
+		// A reset clears session identity; a backend whose Init contacts a
+		// server re-initializes on the next checked turn.
+		current.initialized = current.spec.Backend != "opencode"
 	}
 	o.mu.Unlock()
 	return domain.AgentResetResult{
@@ -575,7 +652,48 @@ func (o *Orchestrator) runWorker(ctx context.Context, runtimeKey string, run dom
 	rt.state.Status = domain.AgentRunning
 	state := rt.state
 	adapter := rt.adapter
+	spec := rt.spec
+	initialized := rt.initialized
 	o.mu.Unlock()
+
+	// The first checked turn creates a deferred external session. Ordinary
+	// repeated turns keep their backend session ID and startup-prompt
+	// behavior: Init runs only while the runtime is uninitialized.
+	if !initialized {
+		if state.WorkspaceDir == "" {
+			state.WorkspaceDir = o.cfg.WorkspaceDir
+		}
+		initState, err := adapter.Init(ctx, spec, state)
+		if err != nil {
+			initState.Status = domain.AgentFailed
+			message := fmt.Sprintf("initialize backend session: %v", err)
+			initState.LastError = &message
+			o.mu.Lock()
+			if current := o.runtimes[runtimeKey]; current != nil {
+				current.state = initState
+			}
+			o.mu.Unlock()
+			o.saveRuntimeState(rt, initState)
+			run.Status = domain.RunFailed
+			run.Error = &message
+			completed := time.Now().UTC()
+			run.CompletedAt = &completed
+			_ = o.store.SaveRun(run)
+			o.logLifecycle("run=%s agent=%s status=%s", run.RunID, run.Agent, run.Status)
+			return
+		}
+		if initState.WorkspaceDir == "" {
+			initState.WorkspaceDir = o.cfg.WorkspaceDir
+		}
+		state = initState
+		o.mu.Lock()
+		if current := o.runtimes[runtimeKey]; current != nil {
+			current.state = initState
+			current.initialized = true
+		}
+		o.mu.Unlock()
+		o.saveRuntimeState(rt, initState)
+	}
 	o.saveRuntimeState(rt, state)
 
 	sink := newRunSink(o.store, run, log.Default(), o.cfg.LogLevel)

@@ -87,7 +87,28 @@ function thunkFor(source, name) {
   }
   return null;
 }
+// Probe-only entry: verify the bundle's required structures and the built-in
+// provider configuration exist and are readable, then stop. Never compiles
+// the bundle, runs thunks, reads account data, touches native credentials,
+// or spawns app-server. Emits one JSON line {ok:true, hash} on stdout.
+function probe(runtime, providerArg) {
+  const source = fs.readFileSync(runtime, 'utf8');
+  const found = discover(source);
+  // The inspector receives the resolved configuration path as an argument; a
+  // missing argument falls back to the bundle-relative default.
+  const providerConfig = providerArg && providerArg.trim() !== ''
+    ? providerArg
+    : path.resolve(path.dirname(runtime), '../config/provider/zcode-builtin.json');
+  fs.accessSync(providerConfig, fs.constants.R_OK);
+  emit({ ok: true, hash: found.hash });
+  process.exit(0);
+}
+
 async function main() {
+  if (process.env.SQUAD_PROBE === '1') {
+    probe(process.argv[1], process.argv[2]);
+    return;
+  }
   const runtime = process.argv[1];
   const source = fs.readFileSync(runtime, 'utf8');
   const found = discover(source);

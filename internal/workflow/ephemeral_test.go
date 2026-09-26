@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestEphemeralDeclarationPersistsWithExecution(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, created, err := m.Create("req-ephemeral-persist")
+	view, created, err := m.Create(context.Background(), "req-ephemeral-persist")
 	if err != nil || !created {
 		t.Fatalf("create: created=%v err=%v", created, err)
 	}
@@ -87,18 +88,18 @@ func TestEphemeralFlagParticipatesInReplayIdentity(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, created, err := m.Create("req-ephemeral-replay")
+	view, created, err := m.Create(context.Background(), "req-ephemeral-replay")
 	if err != nil || !created {
 		t.Fatalf("create: created=%v err=%v", created, err)
 	}
-	replay, createdAgain, err := m.Create("req-ephemeral-replay")
+	replay, createdAgain, err := m.Create(context.Background(), "req-ephemeral-replay")
 	if err != nil || createdAgain || replay.ExecutionID != view.ExecutionID {
 		t.Fatalf("unchanged flag must replay idempotently: created=%v err=%v", createdAgain, err)
 	}
 
 	cfg.Agents[0].Ephemeral = true
 	m.cfg = cfg
-	if _, _, err := m.Create("req-ephemeral-replay"); !errors.Is(err, ErrDefinitionChanged) {
+	if _, _, err := m.Create(context.Background(), "req-ephemeral-replay"); !errors.Is(err, ErrDefinitionChanged) {
 		t.Fatalf("flipped ephemeral must be a changed definition, got %v", err)
 	}
 }

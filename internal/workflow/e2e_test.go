@@ -95,7 +95,7 @@ func TestEndToEndChainThroughRealOrchestrator(t *testing.T) {
 	m, orch, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, created, err := m.Create("req-e2e-chain")
+	view, created, err := m.Create(context.Background(), "req-e2e-chain")
 	if err != nil || !created {
 		t.Fatalf("create: created=%v err=%v", created, err)
 	}
@@ -162,7 +162,7 @@ func TestEndToEndChainThroughRealOrchestrator(t *testing.T) {
 	}
 
 	// A second execution with a new request id starts fresh conversations.
-	view2, created2, err := m.Create("req-e2e-again")
+	view2, created2, err := m.Create(context.Background(), "req-e2e-again")
 	if err != nil || !created2 {
 		t.Fatalf("second create: created=%v err=%v", created2, err)
 	}
@@ -186,7 +186,7 @@ func TestEndToEndTimeoutThroughRealOrchestrator(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, _, err := m.Create("req-e2e-timeout")
+	view, _, err := m.Create(context.Background(), "req-e2e-timeout")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestEndToEndSimultaneousFinishesDoNotOversubscribe(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, _, err := m.Create("req-e2e-race")
+	view, _, err := m.Create(context.Background(), "req-e2e-race")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestEndToEndPauseResumeThroughRealOrchestrator(t *testing.T) {
 	m, _, cleanup := startStack(t, cfg)
 	defer cleanup()
 
-	view, _, err := m.Create("req-e2e-pause")
+	view, _, err := m.Create(context.Background(), "req-e2e-pause")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestEndToEndPauseResumeThroughRealOrchestrator(t *testing.T) {
 	if paused.State != domain.WorkflowPaused {
 		t.Fatalf("paused state: %v", paused.State)
 	}
-	resumed, err := m.Resume(view.ExecutionID)
+	resumed, err := m.Resume(context.Background(), view.ExecutionID)
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}

@@ -200,6 +200,59 @@ func (r *Runtime) start(ctx context.Context) error {
 	}
 }
 
+// FailureLatched reports whether this runtime requires an explicit Squad
+// restart: a failed or cancelled first startup latched failure, or an owned
+// child that already exited. Later requests must not attempt another launch.
+func (r *Runtime) FailureLatched() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failure != nil {
+		return true
+	}
+	if r.cmd != nil {
+		select {
+		case <-r.done:
+			return true
+		default:
+		}
+	}
+	return false
+}
+
+// EnsureReady exposes the existing lifecycle hook for the preflight readiness
+// phase: managed runtimes start their owned server and await health under the
+// same bounded startup contract, without creating sessions or prompts.
+func (r *Runtime) EnsureReady(ctx context.Context) error {
+	return r.ensure(ctx)
+}
+
+// EnsureReadyIssue runs the readiness hook and classifies a failure for the
+// preflight report, preserving the immediate cause code and attaching
+// restart_required when the supervisor latched the failure. nil means ready.
+func (r *Runtime) EnsureReadyIssue(ctx context.Context) *domain.InstallationIssue {
+	err := r.ensure(ctx)
+	if err == nil {
+		return nil
+	}
+	issue := domain.InstallationIssue{
+		Phase:     domain.InstallationPhaseReadiness,
+		Component: domain.ComponentService,
+		Code:      domain.CodeStartFailed,
+		Message:   "the owned OpenCode server is not available; correct the cause and restart Squad explicitly",
+		InstallationLinks: []domain.InstallationLink{
+			{Label: "OpenCode server documentation", URL: domain.DocOpenCodeServer},
+		},
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		issue.Code = domain.CodeTimedOut
+	case errors.Is(err, context.Canceled):
+		issue.Code = domain.CodeCancelled
+	}
+	issue.RestartRequired = r.FailureLatched()
+	return &issue
+}
+
 // Close is idempotent and never contacts or signals an external process.
 func (r *Runtime) Close() {
 	r.cancel() // interrupt startup before waiting for the startup mutex

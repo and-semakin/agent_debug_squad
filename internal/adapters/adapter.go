@@ -17,6 +17,10 @@ type AgentAdapter interface {
 	Send(ctx context.Context, state domain.AgentState, run domain.RunRequest, sink domain.RunSink) (domain.RunResult, domain.AgentState, error)
 	Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error)
 	Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error)
+	// CheckInstallation reports local prerequisites for the associated
+	// launch. Mandatory for every adapter so a new backend cannot silently
+	// skip the gate; expected failures are data, not errors.
+	CheckInstallation(ctx context.Context, input domain.InstallationInput) domain.InstallationResult
 }
 
 func New(spec domain.AgentSpec) (AgentAdapter, error) {

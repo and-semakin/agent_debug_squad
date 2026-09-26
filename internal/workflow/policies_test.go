@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,7 @@ func TestOptionalReviewerFailureStillRunsConsumer(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-review"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-review"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -67,7 +68,7 @@ func TestAllReviewersFailBlocksConsumerWithThresholdReason(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-allfail"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-allfail"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -100,7 +101,7 @@ func TestDefaultZeroThresholdRunsAfterToleratedFailures(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-zero"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-zero"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -130,7 +131,7 @@ func TestMandatoryFailureBlocksDespiteEnoughSuccesses(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-mandatory"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-mandatory"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -161,7 +162,7 @@ func TestThresholdDoesNotTriggerEarlyAggregation(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-early"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-early"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -194,7 +195,7 @@ func TestBlockingPropagatesButIndependentBranchContinues(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2", "a3", "a4")
-	if _, _, err := fx.m.Create("req-branches"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-branches"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -240,7 +241,7 @@ func TestEmptyResponseFailsWithMissingOutput(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-empty"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-empty"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -273,7 +274,7 @@ func TestTimeoutCancelsAndFailsAfterConfirmedCleanup(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1")
-	if _, _, err := fx.m.Create("req-timeout"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-timeout"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -316,7 +317,7 @@ func TestUnconfirmedTimeoutCleanupInterruptsAndStopsScheduling(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-hang"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-hang"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -360,7 +361,7 @@ func TestMissingCommittedResultHoldsAttentionBeforeDispatch(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-artifact"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-artifact"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -401,7 +402,7 @@ func TestRestoredArtifactAllowsResume(t *testing.T) {
 		},
 	}
 	fx := newFixtureFromDef(t, def, "a1", "a2")
-	if _, _, err := fx.m.Create("req-restore"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-restore"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -418,7 +419,7 @@ func TestRestoredArtifactAllowsResume(t *testing.T) {
 	fx.st.mu.Lock()
 	fx.st.verifyErr = errArtifactMissing
 	fx.st.mu.Unlock()
-	if _, err := fx.m.Resume("wf_000001"); err == nil {
+	if _, err := fx.m.Resume(context.Background(), "wf_000001"); err == nil {
 		t.Fatal("resume must refuse while a committed artifact is unverifiable")
 	}
 
@@ -427,7 +428,7 @@ func TestRestoredArtifactAllowsResume(t *testing.T) {
 	fx.st.verifyErr = nil
 	fx.st.mu.Unlock()
 
-	if _, err := fx.m.Resume("wf_000001"); err != nil {
+	if _, err := fx.m.Resume(context.Background(), "wf_000001"); err != nil {
 		t.Fatalf("resume after restore: %v", err)
 	}
 	view, _ := fx.m.View("wf_000001")

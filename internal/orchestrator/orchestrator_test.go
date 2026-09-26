@@ -134,6 +134,10 @@ func (a failingAdapter) Init(_ context.Context, _ domain.AgentSpec, state domain
 	return state, nil
 }
 
+func (a failingAdapter) CheckInstallation(_ context.Context, _ domain.InstallationInput) domain.InstallationResult {
+	return domain.InstallationResult{Status: domain.InstallationStatusReady}
+}
+
 func (a failingAdapter) Send(_ context.Context, state domain.AgentState, _ domain.RunRequest, _ domain.RunSink) (domain.RunResult, domain.AgentState, error) {
 	state.LastRunID = "adapter-owned-value"
 	return domain.RunResult{ErrorMessage: a.err.Error()}, state, a.err
@@ -239,6 +243,8 @@ func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 		switch r.URL.Path {
 		case "/config":
 			_, _ = w.Write([]byte(`{"snapshot":false}`))
+		case "/global/health":
+			_, _ = w.Write([]byte(`{"healthy":true,"version":"test"}`))
 		case "/session":
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)

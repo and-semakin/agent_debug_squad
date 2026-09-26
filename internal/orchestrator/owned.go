@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/config"
@@ -116,6 +117,42 @@ func (o *Orchestrator) SubmitOwnedRun(ctx context.Context, opts domain.OwnedRunO
 	}
 	o.logLifecycle("run=%s agent=%s status=%s owned=true", run.RunID, run.Agent, run.Status)
 
+	// Direct callers cannot bypass the gate: verify the selected backend's
+	// local installation before any external initialization. The scheduler's
+	// batch gate has already checked readiness for the batch; this repeats
+	// only the cheap local check against the actual dispatch spec.
+	checkCtx, checkCancel := context.WithTimeout(ctx, 5*time.Second)
+	input := domain.InstallationInput{
+		WorkspaceDir: o.cfg.WorkspaceDir,
+		AmbientEnv:   os.Environ(),
+	}
+	var result domain.InstallationResult
+	if o.installationCheck != nil {
+		result = o.installationCheck(adapter, checkCtx, input)
+	} else {
+		result = adapter.CheckInstallation(checkCtx, input)
+	}
+	checkCancel()
+	if result.Status == domain.InstallationStatusFailed {
+		report := &domain.PreflightReport{}
+		for _, issue := range result.Issues {
+			report.Issues = append(report.Issues, domain.PreflightIssue{
+				Phase:             issue.Phase,
+				Backend:           spec.Backend,
+				Agents:            []string{opts.Agent},
+				Component:         issue.Component,
+				Code:              issue.Code,
+				RestartRequired:   issue.RestartRequired,
+				Message:           issue.Message,
+				InstallationLinks: issue.InstallationLinks,
+			})
+		}
+		report.Sorted()
+		o.removeOwnedRuntime(key, cancel)
+		o.notify(opts.RunID)
+		return &domain.PreflightError{Report: report}
+	}
+
 	o.workerWG.Add(1)
 	go func() {
 		// An empty identity is the "fresh conversation" signal for Init: the
@@ -156,6 +193,9 @@ func (o *Orchestrator) SubmitOwnedRun(ctx context.Context, opts domain.OwnedRunO
 		}
 		o.mu.Lock()
 		rt.state = initialized
+		// The goroutine's Init covered the deferred initialization; runWorker
+		// must not run it again with a session identity already attached.
+		rt.initialized = true
 		o.mu.Unlock()
 		o.runWorker(runCtx, key, run, waiter, opts.OnDone)
 	}()

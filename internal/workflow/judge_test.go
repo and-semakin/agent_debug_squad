@@ -142,7 +142,7 @@ func TestVerdictSettlesAfterJudgingAndDependentsWait(t *testing.T) {
 		<-gate
 		return passedDecision(0.93), nil
 	})
-	if _, _, err := fx.m.Create("req-verdict"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-verdict"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -210,7 +210,7 @@ func TestUncertainVerdictHoldsForInspection(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return passedDecision(0.45), nil
 	})
-	if _, _, err := fx.m.Create("req-hold"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-hold"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -253,7 +253,7 @@ func TestUncertainVerdictErrorFailsAttempt(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return passedDecision(0.5), nil
 	})
-	if _, _, err := fx.m.Create("req-uncertain-error"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-uncertain-error"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -309,7 +309,7 @@ func TestConfidenceThresholdGating(t *testing.T) {
 				fx.m.cfg.MachineBackends.Judge = &domain.MachineBackendSettings{ConfidenceThreshold: &tc.machine}
 			}
 			fx.judge.setRespond(func(judge.Request) (judge.Decision, error) { return passedDecision(tc.confidence), nil })
-			if _, _, err := fx.m.Create("req-threshold"); err != nil {
+			if _, _, err := fx.m.Create(context.Background(), "req-threshold"); err != nil {
 				t.Fatal(err)
 			}
 			fx.pump()
@@ -352,7 +352,7 @@ func TestMachineConfidenceThresholdDoesNotChangeSavedDefinition(t *testing.T) {
 	fx := newJudgedFixture(t, verdictChainDefinition(), "a1", "a2", "a3")
 	machineThreshold := 0.6
 	fx.m.cfg.MachineBackends.Judge = &domain.MachineBackendSettings{ConfidenceThreshold: &machineThreshold}
-	if _, _, err := fx.m.Create("req-machine-default-identity"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-machine-default-identity"); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := fx.st.LoadWorkflowSnapshot("wf_000001")
@@ -379,7 +379,7 @@ func TestJudgeUnavailableHoldsAndResumeReclassifies(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return judge.Decision{}, errors.New("provider unreachable")
 	})
-	if _, _, err := fx.m.Create("req-unavailable"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-unavailable"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -398,7 +398,7 @@ func TestJudgeUnavailableHoldsAndResumeReclassifies(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return passedDecision(0.95), nil
 	})
-	if _, err := fx.m.Resume("wf_000001"); err != nil {
+	if _, err := fx.m.Resume(context.Background(), "wf_000001"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if !fx.pumpUntil(3*time.Second, func() bool {
@@ -430,7 +430,7 @@ func TestJudgeInputTruncationAndArtifactIntegrity(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return passedDecision(0.99), nil
 	})
-	if _, _, err := fx.m.Create("req-truncate"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-truncate"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -479,7 +479,7 @@ func TestManualOverrideResolvesHold(t *testing.T) {
 	fx.judge.setRespond(func(judge.Request) (judge.Decision, error) {
 		return passedDecision(0.3), nil
 	})
-	if _, _, err := fx.m.Create("req-override"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-override"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -544,7 +544,7 @@ func TestCancellationDuringJudging(t *testing.T) {
 		<-gate
 		return passedDecision(0.9), nil
 	})
-	if _, _, err := fx.m.Create("req-cancel-judging"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-cancel-judging"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -583,7 +583,7 @@ func TestRecoveryReclassifiesJudgingAttempts(t *testing.T) {
 		<-gate
 		return passedDecision(0.9), nil
 	})
-	if _, _, err := fx.m.Create("req-recovery-judging"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-recovery-judging"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
@@ -686,7 +686,7 @@ func TestVerdictWithoutJudgeHolds(t *testing.T) {
 	// A wired server always has a judge for verdict tasks; the manager
 	// still fails safe rather than wedging silently.
 	fx := newManagerFixture(t, verdictChainDefinition(), "a1", "a2", "a3")
-	if _, _, err := fx.m.Create("req-no-judge"); err != nil {
+	if _, _, err := fx.m.Create(context.Background(), "req-no-judge"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	fx.pump()
