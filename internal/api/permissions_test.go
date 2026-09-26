@@ -24,6 +24,8 @@ func permissionAPIServer(t *testing.T, yolo bool, failReply bool) (*Server, chan
 	var promptID atomic.Value
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/config":
+			_, _ = w.Write([]byte(`{"snapshot":false}`))
 		case "/session":
 			_, _ = w.Write([]byte(`{"id":"ses_test"}`))
 		case "/session/ses_test/prompt_async":
@@ -79,7 +81,7 @@ func permissionAPIServer(t *testing.T, yolo bool, failReply bool) (*Server, chan
 	srv := newTestServerWithConfig(t, func(cfg *domain.SessionConfig) {
 		cfg.Defaults.Yolo = yolo
 		cfg.Agents[0].Backend = "opencode"
-		cfg.Agents[0].StringOptions = map[string]string{"base_url": backend.URL, "timeout_seconds": "10"}
+		cfg.Agents[0].StringOptions = map[string]string{"mode": "external", "base_url": backend.URL, "timeout_seconds": "10"}
 	}, "Reviewer")
 	t.Cleanup(func() { _, _ = srv.orchestrator.ResetAgent(context.Background(), "Reviewer", true) })
 	return srv, ask, &calls

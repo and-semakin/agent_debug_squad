@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/adapters"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
@@ -52,9 +53,10 @@ func runtimeKeyForRun(run domain.RunRecord) string {
 }
 
 type Orchestrator struct {
-	cfg     domain.SessionConfig
-	store   *store.Store
-	execCtx context.Context
+	openCode *opencode.Runtime
+	cfg      domain.SessionConfig
+	store    *store.Store
+	execCtx  context.Context
 
 	mu          sync.Mutex
 	runtimes    map[string]*agentRuntime
@@ -116,6 +118,13 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 		nextRun:     1,
 	}
 
+	o.openCode = opencode.NewRuntime(ctx, cfg.WorkspaceDir, cfg.MachineBackends.OpenCode)
+	success := false
+	defer func() {
+		if !success {
+			o.Close()
+		}
+	}()
 	runs, err := s.ListRuns()
 	if err != nil {
 		return nil, err
@@ -127,12 +136,13 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 	}
 
 	if workflowOnly {
+		success = true
 		return o, nil
 	}
 
 	for _, spec := range cfg.Agents {
 		spec = agentSpecWithDefaults(cfg, spec)
-		adapter, err := adapters.New(spec)
+		adapter, err := o.newAdapter(spec)
 		if err != nil {
 			return nil, err
 		}
@@ -170,6 +180,7 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 		}
 	}
 
+	success = true
 	return o, nil
 }
 
@@ -827,4 +838,18 @@ func deref(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// Close releases owned backend servers. Call after stopping scheduling and workers.
+func (o *Orchestrator) Close() {
+	if o.openCode != nil {
+		o.openCode.Close()
+	}
+}
+
+func (o *Orchestrator) newAdapter(spec domain.AgentSpec) (adapters.AgentAdapter, error) {
+	if spec.Backend == "opencode" {
+		return o.openCode.Adapter(spec)
+	}
+	return adapters.New(spec)
 }

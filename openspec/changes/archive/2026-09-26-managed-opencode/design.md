@@ -1,0 +1,34 @@
+## Context
+
+The HTTP adapter currently never starts processes. Both ordinary and workflow-owned adapters are constructed by the orchestrator; workflow attempts use fresh sessions while ordinary agents reload saved IDs. Machine defaults must never leak into persisted specs.
+
+Verified OpenCode 1.18.30 and its tagged sources (`packages/opencode/src/cli/cmd/serve.ts`, `cli/network.ts`, `server/server.ts`, `config/config.ts` at https://github.com/anomalyco/opencode/tree/v1.18.30): classic `serve` announces its actual listening address; `--port 0` atomically binds 4096 if free, otherwise an OS-selected port. No preallocation/release race is necessary. Explicit hostname and mdns flags override config. Instance requests require the workspace header. Runtime inline config is merged before administrative config. See https://opencode.ai/docs/network/ and https://dev.opencode.ai/docs/config/.
+
+## Goals / Non-Goals
+
+**Goals:** Own only launched resources, reuse a server across all agent models, enforce snapshots before work, keep networking private and recovery conservative.
+
+**Non-Goals:** v2 managed service API, editing OpenCode config files, deleting snapshots, automatic prompt retries, changing workflow scheduling semantics, handling uncatchable SIGKILL with a supervisor.
+
+## Decisions
+
+- Add an orchestrator-scoped OpenCode runtime, shared by manual and owned adapters. Initialization is serialized; cancellation and Close stop only its own process group, first TERM then bounded KILL and wait. CLI defers Close even on later startup errors. A failed/dead child is not automatically restarted within that owner. Cancellation of the initiating request during first startup also permanently fails that runtime: clean up the child and require an explicit Squad restart. This intentionally avoids an implicit retry policy, even when no prompt was sent. Cancelling a request after successful startup does not own the server lifetime. This avoids hidden effects from replay and cross-Squad global caches.
+- Start `command serve --hostname 127.0.0.1 --port 0 --mdns=false` in the configured workspace. Parse only the anchored listening announcement from bounded stdout; discard raw logs/stderr. Generate a fresh random server password and use it for readiness/API calls so another listener cannot be adopted. Wait up to 30 seconds for announcement and health, followed by a separate effective-config check bounded to 10 seconds (or an earlier caller deadline).
+- Runtime options are machine-level. Agent mode/base_url are permitted only for explicit external attachment (agent base_url overrides machine base_url); model/agent/timeout/yolo and external username/password remain per-agent. Reject command/proxy/no_proxy/snapshot/env/inherit_env process overrides in squad YAML. External mode rejects machine command/proxy/no_proxy/inherit_env; snapshot is a read-only expectation (default false). Managed plus any base_url fails with a migration message.
+- Child environment is constrained: HOME, PATH, temp and XDG paths plus machine inherit_env. Ambient proxies are not inherited implicitly; explicit proxy_url wins over explicitly inherited upper/lower/all proxy values. Unset proxy_url permits explicitly inherited proxies; empty/unset without inheritance gives direct access. NO_PROXY merges inherited upper/lower values, machine no_proxy, and mandatory localhost/127.0.0.1/::1. Squad HTTP transport always bypasses proxies.
+- A no-model smoke found that 1.18.30 inserts `$schema` into files and migrates the legacy global `config` TOML on read. Before launching, inspect global, custom, project/ancestor `.opencode`, home `.opencode` and managed config locations; reject nonempty JSON(C) without a literal nonempty `$schema`, invalid/unreadable files and legacy global config. This is a conservative compatibility guard, not automatic migration or a filesystem sandbox. Native plugin/package caches remain OpenCode-owned.
+- Merge inherited OPENCODE_CONFIG_CONTENT as JSONC, preserving every other property semantically (JSONC comments and formatting are discarded in the runtime environment), and replace only snapshot. Default false, explicit true. Never patch /config: GET /config must contain the requested boolean before session creation/recovery and each prompt. Unknown/missing/mismatched effective values fail closed, including administrator overrides. External operator must configure the expectation beforehand.
+- External mode requires the same absolute workspace path and filesystem view as Squad. Both modes send x-opencode-directory and verify saved session directories using local canonical path resolution. Remote servers with different roots are unsupported; no path mapping is inferred. HTTP redirects are rejected in both modes to retain endpoint/authentication control; base_url must be the final endpoint.
+- Preserve default OpenCode data directories and workspace scope for recovered session IDs; GET the saved session before accepting it. Missing sessions fail instead of creating replacement conversations. Interrupted work is never resent. A restart launches a new owned process rather than finding or killing any existing server.
+- Sanitize runtime/API output against configured/inherited proxy URLs and credentials before it reaches sinks or errors. Configuration payloads and raw child diagnostics never become artifacts. Configuration verification errors expose only reason/status, not bodies.
+
+## Risks / Trade-offs
+
+- OpenCode CLI/API changes → readiness/config failures are explicit, tests include a no-model smoke against 1.18.30; no claim of v2 support.
+- Config/plugins can change externally after checks → recheck before prompts; no promise against a privileged actor changing config during a prompt.
+- SIGKILL or machine crash can orphan a child → a new owner never adopts or kills it; normal TERM/cancellation/exit are covered. Operators can inspect orphan processes manually.
+- Provider secrets are accessible to the trusted child → exclude raw diagnostics and redact known proxy secrets in emitted data; arbitrary application transformations of secrets cannot be universally recognized.
+
+## Migration Plan
+
+Add `mode: external` beside existing base_url, or remove base_url and use managed. External operators must expose the same workspace at the same absolute path and use a final, non-redirecting base_url. This is a compatibility restriction for remote/differently mounted external servers. External operators set snapshot=false in their OpenCode configuration, or explicitly set machine snapshot=true when intended. Existing JSON(C) configs must already declare `$schema`; schema-less or legacy files need operator-controlled migration before managed launch. Move process options to backends.yaml; use inherit_env for provider keys/custom configuration that the constrained child needs. Rollback restores old external operation; saved OpenCode session IDs remain unchanged.

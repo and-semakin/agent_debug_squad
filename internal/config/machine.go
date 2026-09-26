@@ -33,7 +33,7 @@ var supportedMachineKeys = map[string][]string{
 	domain.MachineBackendCodex:    {"command", "inherit_env", "no_proxy", "proxy_url"},
 	domain.MachineBackendCursor:   {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url"},
 	domain.MachineBackendKimi:     {"command", "inherit_env", "no_proxy", "proxy_url"},
-	domain.MachineBackendOpenCode: {"base_url"},
+	domain.MachineBackendOpenCode: {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
 	domain.MachineBackendZCode:    {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url", "runtime_path"},
 	domain.MachineBackendJudge:    {"confidence_threshold", "proxy_url"},
 }
@@ -41,6 +41,7 @@ var supportedMachineKeys = map[string][]string{
 // stringMachineKeys are the keys decoded as plain strings.
 var stringMachineKeys = map[string]bool{
 	"base_url":     true,
+	"mode":         true,
 	"ca_cert_file": true,
 	"command":      true,
 	"runtime_path": true,
@@ -149,6 +150,8 @@ func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBac
 				return nil, err
 			}
 			switch key {
+			case "mode":
+				settings.Mode = decoded
 			case "base_url":
 				if decoded != "" {
 					if err := validateMachineURL(path, name, key, decoded); err != nil {
@@ -163,6 +166,15 @@ func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBac
 			case "runtime_path":
 				settings.RuntimePath = decoded
 			}
+		case key == "snapshot":
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
+				return nil, fmt.Errorf("backends config %s: section %q: key snapshot must be a boolean", path, name)
+			}
+			var snapshot bool
+			if err := value.Decode(&snapshot); err != nil {
+				return nil, fmt.Errorf("backends config %s: section %q: key snapshot must be a boolean", path, name)
+			}
+			settings.Snapshot = &snapshot
 		case key == "proxy_url":
 			decoded, err := decodeMachineString(path, name, key, &value)
 			if err != nil {
@@ -195,6 +207,15 @@ func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBac
 				return nil, err
 			}
 			settings.InheritEnv = inherit
+		}
+	}
+	if name == domain.MachineBackendOpenCode {
+		settings.Declared = map[string]bool{}
+		for _, key := range keys {
+			settings.Declared[key] = true
+		}
+		if err := ValidateOpenCodeSettings(*settings); err != nil {
+			return nil, fmt.Errorf("backends config %s: %w", path, err)
 		}
 	}
 	if machineSectionEmpty(settings) {
@@ -253,7 +274,7 @@ func decodeNoProxy(path, name string, node *yaml.Node) (string, error) {
 }
 
 func machineSectionEmpty(settings *domain.MachineBackendSettings) bool {
-	return settings.Command == "" && settings.RuntimePath == "" && settings.BaseURL == "" &&
+	return settings.Mode == "" && settings.Snapshot == nil && len(settings.Declared) == 0 && settings.Command == "" && settings.RuntimePath == "" && settings.BaseURL == "" &&
 		settings.ProxyURL == "" && settings.NoProxy == "" && settings.CACertFile == "" &&
 		len(settings.InheritEnv) == 0 && settings.ConfidenceThreshold == nil
 }
@@ -369,11 +390,10 @@ func MachineEnvEntries(backend string, settings *domain.MachineBackendSettings) 
 // machineStringDefaults lists the agent option keys a backend may default
 // from machine settings.
 var machineStringDefaults = map[string][]string{
-	domain.MachineBackendCodex:    {"command"},
-	domain.MachineBackendCursor:   {"command"},
-	domain.MachineBackendKimi:     {"command"},
-	domain.MachineBackendOpenCode: {"base_url"},
-	domain.MachineBackendZCode:    {"command", "runtime_path"},
+	domain.MachineBackendCodex:  {"command"},
+	domain.MachineBackendCursor: {"command"},
+	domain.MachineBackendKimi:   {"command"},
+	domain.MachineBackendZCode:  {"command", "runtime_path"},
 }
 
 // MergeMachineDefaults applies machine backend settings to one agent spec as
@@ -386,6 +406,9 @@ var machineStringDefaults = map[string][]string{
 // input spec's maps are never mutated; persisted snapshots keep storing only
 // the agent's raw options.
 func MergeMachineDefaults(spec domain.AgentSpec, backends domain.MachineBackends) domain.AgentSpec {
+	if spec.Backend == domain.MachineBackendOpenCode {
+		return spec
+	}
 	settings := backends.For(spec.Backend)
 	if settings == nil {
 		return spec

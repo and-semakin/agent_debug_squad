@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/and-semakin/agent_debug_squad/internal/adapters"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
@@ -64,7 +63,7 @@ func (o *Orchestrator) SubmitOwnedRun(ctx context.Context, opts domain.OwnedRunO
 		}
 		spec = agentSpecWithDefaults(o.cfg, spec)
 	}
-	adapter, err := adapters.New(spec)
+	adapter, err := o.newAdapter(spec)
 	if err != nil {
 		o.mu.Unlock()
 		return err
@@ -123,7 +122,7 @@ func (o *Orchestrator) SubmitOwnedRun(ctx context.Context, opts domain.OwnedRunO
 		// adapter allocates a new backend session instead of reusing one. The
 		// workspace is set up front because CLI adapters run child processes
 		// with state.WorkspaceDir as their working directory.
-		initialized, initErr := adapter.Init(ctx, spec, domain.AgentState{
+		initialized, initErr := adapter.Init(runCtx, spec, domain.AgentState{
 			Backend:      spec.Backend,
 			WorkspaceDir: o.cfg.WorkspaceDir,
 		})

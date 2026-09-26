@@ -6,6 +6,10 @@ import "sort"
 // values describe local backend locations and network settings; the judge can
 // also set a local confidence default without changing shared workflow YAML.
 type MachineBackendSettings struct {
+	Mode     string
+	Snapshot *bool
+	// Declared records explicitly present machine keys, including empty values.
+	Declared    map[string]bool
 	Command     string
 	RuntimePath string
 	BaseURL     string
@@ -18,7 +22,8 @@ type MachineBackendSettings struct {
 	// InheritEnv names ambient variables to copy from the server process
 	// into every child process of the backend as a default below agent
 	// options. Values come from the server environment at dispatch time, so
-	// the file itself never carries secrets.
+	// the file itself never carries secrets. Managed OpenCode captures its
+	// environment once per runtime and has no per-agent process overrides.
 	InheritEnv []string
 }
 

@@ -1,28 +1,4 @@
-# backend-config Specification
-
-## Purpose
-Keeps machine-specific backend settings and the judge confidence default in one optional file in the user's home directory, so squad YAML files stay free of machine details and remain shareable.
-
-## Requirements
-
-### Requirement: Machine backend settings file
-
-The system SHALL read an optional backend settings file from `~/.agent-debug-squad/backends.yaml`, resolved against the server user's home directory and therefore outside any workspace. The file SHALL be loaded exactly once at server startup; later edits to it SHALL NOT affect a running server. When the file is absent, the system SHALL start and behave exactly as if no machine backend settings existed, with no warning.
-
-#### Scenario: Missing file changes nothing
-
-- **WHEN** the server starts and `~/.agent-debug-squad/backends.yaml` does not exist
-- **THEN** startup succeeds and every backend resolves its settings from squad YAML agent options and built-in defaults exactly as before
-
-#### Scenario: Machine file supplies an executable default
-
-- **WHEN** the machine file sets `codex.command` to an absolute path and a squad YAML codex agent sets no `command` option
-- **THEN** that codex agent's runs use the machine-configured executable
-
-#### Scenario: Edits apply only after restart
-
-- **WHEN** the machine file is modified while the server is running
-- **THEN** already-running and newly started agent runs keep using the settings resolved at startup until the server is restarted
+## MODIFIED Requirements
 
 ### Requirement: Strict validation of the machine settings file
 
@@ -77,25 +53,6 @@ The file SHALL accept only the backend sections `codex`, `cursor`, `kimi`, `open
 
 - **WHEN** `confidence_threshold` appears in a backend section other than `judge`
 - **THEN** startup fails with an unsupported-key error for that section
-
-### Requirement: Machine judge confidence default
-
-The machine file SHALL accept `judge.confidence_threshold` as a computer-wide default for verdict classifications. The server SHALL read it once at startup and SHALL apply it only when the saved workflow definition omits its own `confidence_threshold`. When the machine value is absent, the built-in default SHALL remain 0.7. The machine value SHALL stay outside workflow definition identity and saved snapshots.
-
-#### Scenario: Machine default applies to omitted workflow threshold
-
-- **WHEN** the machine file sets `judge.confidence_threshold: 0.6` and the workflow omits `confidence_threshold`
-- **THEN** the effective gate is 0.6 without changing the workflow definition hash
-
-#### Scenario: Workflow threshold wins
-
-- **WHEN** the machine file sets `judge.confidence_threshold: 0.6` and the workflow sets `confidence_threshold: 0.8`
-- **THEN** the effective gate is 0.8
-
-#### Scenario: Machine default is loaded at startup
-
-- **WHEN** the machine file changes from 0.6 to another valid value while the server is running
-- **THEN** classifications continue using 0.6 until the server restarts
 
 ### Requirement: Proxy and CA translation per backend
 
@@ -169,19 +126,8 @@ OpenCode process settings SHALL be machine-only; only external mode/base_url and
 - **WHEN** a server restarts, the machine file sets `codex.command`, and a workflow execution recovers agents from its persisted snapshot whose specs set no `command`
 - **THEN** the recovered codex agents run with the machine-configured executable
 
-### Requirement: Machine settings values stay out of logs and artifacts
 
-Proxy URLs from the machine settings file MUST NOT be written to server logs, run artifacts, persisted state, or validation errors, because they may embed credentials; diagnostics SHALL name at most the file, section, and key — never a value. Startup diagnostics SHALL report at most which backends have machine settings applied, without their values. Executable, runtime, and server locations (`command`, `runtime_path`, `base_url`) are operational provenance rather than secrets: they MAY appear in existing invocation diagnostics and launch errors, exactly as agent-configured values of the same kind already do.
-
-#### Scenario: Proxy URL never appears in diagnostics
-
-- **WHEN** the machine file sets `codex.proxy_url` containing userinfo, or a credentialed `proxy_url` fails validation
-- **THEN** neither the URL nor any credential part appears in any error, log, run artifact, or persisted state; diagnostics name at most the file, section, key, and the backends for which machine settings were applied
-
-#### Scenario: Executable path is operational provenance
-
-- **WHEN** the machine file sets `cursor.command` and a cursor agent run is recorded
-- **THEN** the existing invocation diagnostic may name the resolved executable, as it already does for agent-configured commands
+## ADDED Requirements
 
 ### Requirement: OpenCode mode and migration validation
 OpenCode mode SHALL default to managed, with command defaulting to opencode and snapshot to false. Only managed/external modes SHALL be valid. Managed mode with any explicit base_url SHALL fail with instructions to select external. External mode SHALL require base_url and reject process settings command, proxy_url, no_proxy and inherit_env, including explicitly empty declarations. Snapshot in external mode SHALL be a read-only expectation. Squad YAML SHALL reject process overrides command, proxy_url, no_proxy, snapshot, env and inherit_env rather than silently ignoring them. Managed mode SHALL reject nonempty per-agent username or password because Squad owns server authentication; external mode SHALL accept these credentials for HTTP Basic authentication.

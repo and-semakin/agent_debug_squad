@@ -210,6 +210,9 @@ func normalizeAgentSpec(spec domain.AgentSpec) (domain.AgentSpec, error) {
 	}
 	spec.StringOptions = stringOptions
 	spec.ListOptions = listOptions
+	if err := ValidateOpenCodeAgent(spec); err != nil {
+		return spec, err
+	}
 	return spec, nil
 }
 

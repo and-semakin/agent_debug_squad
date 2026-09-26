@@ -66,6 +66,7 @@ zcode:
   no_proxy: localhost
   ca_cert_file: /etc/zcode-ca.pem
 opencode:
+  mode: external
   base_url: http://127.0.0.1:4097
 judge:
   proxy_url: http://proxy.example:8080
@@ -79,7 +80,7 @@ judge:
 		Cursor:   &domain.MachineBackendSettings{Command: "/opt/cursor-agent", ProxyURL: "https://proxy.example:8443", NoProxy: "localhost,.internal.example", CACertFile: "/etc/cursor-ca.pem"},
 		Kimi:     &domain.MachineBackendSettings{Command: "/opt/kimi", ProxyURL: "http://proxy.example:8080"},
 		ZCode:    &domain.MachineBackendSettings{Command: "/opt/node", RuntimePath: "/opt/zcode.cjs", ProxyURL: "http://proxy.example:8080", NoProxy: "localhost", CACertFile: "/etc/zcode-ca.pem"},
-		OpenCode: &domain.MachineBackendSettings{BaseURL: "http://127.0.0.1:4097"},
+		OpenCode: &domain.MachineBackendSettings{Mode: "external", BaseURL: "http://127.0.0.1:4097", Declared: map[string]bool{"mode": true, "base_url": true}},
 		Judge:    &domain.MachineBackendSettings{ProxyURL: "http://proxy.example:8080"},
 	}
 	if !reflect.DeepEqual(backends.Codex, want.Codex) {
@@ -179,13 +180,13 @@ func TestLoadMachineBackendsUnknownSectionFails(t *testing.T) {
 }
 
 func TestLoadMachineBackendsUnsupportedKeyFails(t *testing.T) {
-	home := writeMachineBackends(t, "opencode:\n  proxy_url: http://proxy.example:8080\n")
+	home := writeMachineBackends(t, "opencode:\n  ca_cert_file: /tmp/ca.pem\n")
 	_, err := LoadMachineBackends(home)
 	if err == nil {
 		t.Fatal("expected unsupported key error")
 	}
 	path := MachineBackendsPath(home)
-	for _, want := range []string{path, "opencode", "proxy_url", "base_url"} {
+	for _, want := range []string{path, "opencode", "ca_cert_file", "base_url"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
@@ -393,8 +394,8 @@ func TestMergeMachineDefaultsOpenCodeBaseURL(t *testing.T) {
 	}
 	spec := agentSpecForMerge("opencode")
 	merged := MergeMachineDefaults(spec, backends)
-	if got := merged.StringOptions["base_url"]; got != "http://127.0.0.1:4097" {
-		t.Fatalf("base_url = %q, want machine default", got)
+	if got := merged.StringOptions["base_url"]; got != "" {
+		t.Fatalf("machine settings must remain private to runtime, got %q", got)
 	}
 	if len(merged.ListOptions["env"]) != 0 {
 		t.Fatalf("opencode must get no env entries, got %v", merged.ListOptions["env"])
@@ -468,7 +469,7 @@ zcode:
 }
 
 func TestLoadMachineBackendsInheritEnvRejectedWithoutChildProcess(t *testing.T) {
-	for _, section := range []string{"opencode", "judge"} {
+	for _, section := range []string{"judge"} {
 		home := writeMachineBackends(t, section+":\n  inherit_env:\n    - HOME\n")
 		_, err := LoadMachineBackends(home)
 		if err == nil || !strings.Contains(err.Error(), "inherit_env") || !strings.Contains(err.Error(), section) {
@@ -625,11 +626,11 @@ func TestLoadMachineBackendsRejectsBlankValues(t *testing.T) {
 }
 
 func TestLoadMachineBackendsValidatesBaseURL(t *testing.T) {
-	home := writeMachineBackends(t, "opencode:\n  base_url: \"not a url\"\n")
+	home := writeMachineBackends(t, "opencode:\n  mode: external\n  base_url: \"not a url\"\n")
 	if _, err := LoadMachineBackends(home); err == nil || !strings.Contains(err.Error(), "base_url") {
 		t.Fatalf("expected base_url URL error, got %v", err)
 	}
-	home = writeMachineBackends(t, "opencode:\n  base_url: \"http://127.0.0.1:4096\"\n")
+	home = writeMachineBackends(t, "opencode:\n  mode: external\n  base_url: \"http://127.0.0.1:4096\"\n")
 	if _, err := LoadMachineBackends(home); err != nil {
 		t.Fatalf("valid base_url rejected: %v", err)
 	}

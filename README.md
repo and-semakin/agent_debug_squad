@@ -155,7 +155,7 @@ The verdict must be one the task declares (`400` otherwise), and the request is 
 | --- | --- | --- | --- |
 | `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
-| `opencode` | Local HTTP server | OpenCode session ID | `base_url`, `model`, `timeout_seconds`, `yolo` |
+| `opencode` | Owned `opencode serve` (default), or explicit external HTTP server | OpenCode session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
 | `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `model`, `reasoning`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `fake` | In process | Deterministic state | none |
@@ -242,17 +242,56 @@ zcode:
   no_proxy: localhost
   ca_cert_file: /etc/proxy-ca.pem        # ZCODE_AGENT_CA_CERT
 opencode:
-  base_url: http://127.0.0.1:4096        # the only opencode key; the loopback connection is never proxied
+  mode: managed                       # default; Squad owns and reuses opencode serve
+  command: opencode                    # executable path, not a shell command
+  proxy_url: http://proxy.example:3128  # optional: OpenCode -> provider, not Squad -> OpenCode
+  no_proxy: [localhost, 127.0.0.1, "::1"] # mandatory loopback entries are always added
+  snapshot: false                      # default; true opts back in
+  inherit_env: [OPENAI_API_KEY]          # optional explicit provider/config environment
 judge:
   proxy_url: http://proxy.example:3128   # default for the OpenRouter judge; the session judge.proxy_url wins
   confidence_threshold: 0.6             # default for workflows without their own threshold; number in (0, 1]
 ```
 
-`inherit_env` (CLI backends only; rejected for `opencode` and `judge`) names ambient variables copied from the server process into every child process of that backend — values come from the server environment at dispatch time, so the file itself never carries secrets. It unions with the agent's own `options.inherit_env` (machine entries first, duplicates removed), an explicit agent `options.env` entry still wins, and naming a variable there suppresses a machine-injected value for it. Declaring `inherit_env: [HOME, PATH]` alongside a proxy is the recommended baseline for CLI backends — for `kimi` in particular, whose child switches to the constrained environment model as soon as any machine network settings or `inherit_env` apply.
+`inherit_env` (rejected for `judge` and external OpenCode; see the managed OpenCode policy below) names ambient variables copied from the server process into every child process of that backend — values come from the server environment at dispatch time, so the file itself never carries secrets. It unions with the agent's own `options.inherit_env` (machine entries first, duplicates removed), an explicit agent `options.env` entry still wins, and naming a variable there suppresses a machine-injected value for it. Declaring `inherit_env: [HOME, PATH]` alongside a proxy is the recommended baseline for CLI backends — for `kimi` in particular, whose child switches to the constrained environment model as soon as any machine network settings or `inherit_env` apply.
 
 `judge.confidence_threshold` must be an unquoted, finite number greater than 0 and at most 1. An explicit workflow threshold still wins. The machine default applies to future classifications of saved executions whose workflow omitted the field, including after recovery; it does not rewrite completed verdicts or enter the workflow hash. Restart the server after changing this file.
 
-Precedence is one rule everywhere: explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
+For Codex, Cursor, Kimi and ZCode, explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
+
+### Managed and external OpenCode
+
+OpenCode defaults to **managed** mode. One Squad owns one reusable `opencode serve` process in its workspace; ordinary agents and workflow attempts share that server while retaining separate sessions and per-request models. The server binds `127.0.0.1`, disables mDNS, and uses a generated password. `--port 0` lets OpenCode bind an available port itself (v1 prefers 4096, otherwise an OS-selected port); Squad uses the child's announcement, never an independently running server. Startup allows 30 seconds for authenticated health readiness, followed by a separate configuration check bounded to 10 seconds or an earlier caller deadline.
+
+Process settings belong only in `~/.agent-debug-squad/backends.yaml`. Agent `options.command`, `proxy_url`, `no_proxy`, `snapshot`, `env` and `inherit_env` are rejected. Nonempty agent `username`/`password` are rejected in managed mode because Squad generates authentication; they remain available in external mode (username defaults to `opencode`). Models, OpenCode agent selection, timeouts and YOLO remain per-agent. This prevents agents racing over shared process configuration. Different process settings require separate Squad processes.
+
+The child inherits `HOME`, `PATH`, `TMPDIR`, `TMP`, `TEMP` and the four `XDG_*_HOME` config/data/cache/state paths. Other variables (provider API keys, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, certificates, etc.) require machine `inherit_env`. Environment is captured when Squad creates its runtime. Ambient proxies are not inherited automatically. An explicit `proxy_url` overrides inherited proxies and sets `HTTP_PROXY`/`HTTPS_PROXY`; otherwise explicitly inherited proxy variables remain effective. No configured or inherited proxy means direct provider connections. Upper/lowercase `NO_PROXY` combines inherited exclusions, machine `no_proxy`, and `localhost,127.0.0.1,::1`. Squad's own HTTP transport always bypasses proxies, including in external mode.
+
+Managed mode merges `snapshot` into inherited JSONC `OPENCODE_CONFIG_CONTENT`, preserving other property values and OpenCode's normal config merging. Comments and formatting are discarded only in the serialized child environment; source files and the parent environment are not rewritten. It never patches `/config` or writes user/project configuration to apply this setting. Before each prompt, session creation or saved-session recovery, Squad reads effective `/config` for the workspace and requires the requested boolean. Missing values, unavailable APIs and higher-priority administrator overrides fail closed. Existing snapshot data is not deleted.
+
+**OpenCode 1.18.30 compatibility guard:** OpenCode itself adds `$schema` to config files that omit it, and migrates a legacy global `config` TOML. Managed startup inspects known config locations and refuses these files (or unreadable/invalid JSONC), leaving migration to the operator. Existing JSON/JSONC configs should contain `"$schema": "https://opencode.ai/config.json"`. This is not a filesystem sandbox: native package caches, plugins and agent tools still have their usual behavior. The smoke test covers classic v1 `serve` and HTTP/SSE on 1.18.30; this is not the v2 managed service API.
+
+To retain an independently operated server, **add explicit external mode** to an existing endpoint configuration:
+
+```yaml
+opencode:
+  mode: external
+  base_url: http://127.0.0.1:4096
+  snapshot: false  # read-only expectation; configure the server itself beforehand
+```
+
+**External workspace compatibility:** the server must see the same workspace at the same absolute path as Squad. Both modes send `x-opencode-directory`; saved sessions must report that directory or a symlink resolving locally to it. Remote servers with different roots/mount paths are unsupported, with no implicit mapping or fallback to server cwd. This is a migration restriction for existing external configurations. HTTP redirects are rejected in both modes to keep endpoint selection and authentication under Squad control; use the final, non-redirecting `base_url`.
+
+Alternatively use `options.mode: external` with `options.base_url` on an individual agent; its endpoint overrides the machine endpoint. Existing `base_url` without external mode now fails with migration guidance instead of silently changing connection ownership. External mode rejects machine `command`, `proxy_url`, `no_proxy` and `inherit_env`, even if explicitly empty. The operator must apply provider networking to their own process. Squad verifies `snapshot` but never changes external configuration or stops that server. If snapshots are intentionally enabled externally, declare `snapshot: true` in machine settings.
+
+Resetting an agent or completing a workflow attempt keeps the managed server alive. Squad cancellation and normal exit terminate only its owned process group, escalating from TERM to KILL after three seconds. Cancellation of the initiating request during first startup also leaves that runtime failed until an explicit Squad restart, even if no prompt was submitted. Later request cancellation after successful startup keeps the shared server running. Child failure fails operations; it never triggers automatic restart or prompt replay. Restart Squad explicitly to launch a fresh owned process and validate existing saved session IDs in the same workspace/data directory. Missing IDs or IDs from a different workspace fail instead of silently replacing conversations; restore the original data or explicitly choose a new `session_name`. After uncatchable SIGKILL or a machine crash, an orphan may need operator cleanup; a new Squad never adopts or kills that process. One-shot workflow execution closes the owned server after stopping scheduling and workers.
+
+Raw child diagnostics are suppressed because they can contain secrets; startup errors report the failing stage. Known proxy URLs and credentials are redacted from adapter output and errors. No model calls are needed for the opt-in integration check:
+
+```sh
+SQUAD_OPENCODE_SMOKE=1 go test ./internal/adapters/opencode -run TestInstalledOpenCodeSmoke -count=1 -v
+```
+
 
 ## HTTP API
 

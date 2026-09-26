@@ -25,6 +25,9 @@ const (
 )
 
 type Adapter struct {
+	runtime            *Runtime
+	settings           domain.MachineBackendSettings
+	workspace          string
 	mu                 sync.Mutex
 	permissions        *permissionRun
 	spec               domain.AgentSpec
@@ -32,7 +35,8 @@ type Adapter struct {
 }
 
 type sessionResponse struct {
-	ID string `json:"id"`
+	Directory string `json:"directory"`
+	ID        string `json:"id"`
 }
 
 type sessionMessage struct {
@@ -62,18 +66,26 @@ func New(spec domain.AgentSpec) *Adapter {
 }
 
 func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	if err := a.checkReady(ctx); err != nil {
+		return state, err
+	}
+	if a.runtime != nil && state.BackendSessionID != "" {
+		if err := a.verifySession(ctx, state.BackendSessionID); err != nil {
+			return state, err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
 	if state.Name == "" {
-		state = domain.AgentState{
-			Name:          spec.Name,
-			Backend:       spec.Backend,
-			StartupPrompt: spec.StartupPrompt,
-			Status:        domain.AgentIdle,
-			CreatedAt:     time.Now().UTC(),
+		state.Name = spec.Name
+		state.Backend = spec.Backend
+		state.StartupPrompt = spec.StartupPrompt
+		if state.CreatedAt.IsZero() {
+			state.CreatedAt = time.Now().UTC()
 		}
 	}
+
 	if state.BackendSessionID == "" {
 		id, err := a.createSession(ctx)
 		if err != nil {
@@ -85,9 +97,20 @@ func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.
 	return state, nil
 }
 
-func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.RunRequest, sink domain.RunSink) (domain.RunResult, domain.AgentState, error) {
+func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.RunRequest, sink domain.RunSink) (result domain.RunResult, next domain.AgentState, sendErr error) {
+	defer func() {
+		result.FinalMessage = a.redact(result.FinalMessage)
+		result.ErrorMessage = a.redact(result.ErrorMessage)
+		sendErr = a.safeError(sendErr)
+	}()
+	if err := a.checkReady(ctx); err != nil {
+		return domain.RunResult{ErrorMessage: err.Error()}, state, err
+	}
 	if sink == nil {
 		sink = domain.DiscardRunSink()
+	}
+	if a.runtime != nil {
+		sink = redactingSink{RunSink: sink, adapter: a}
 	}
 	if state.BackendSessionID == "" {
 		err := errors.New("opencode backend_session_id is empty")
@@ -169,6 +192,14 @@ func (a *Adapter) startupPrompt(state domain.AgentState) string {
 }
 
 func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.AgentState, error) {
+	if err := a.checkReady(ctx); err != nil {
+		return state, err
+	}
+	if a.runtime != nil && state.BackendSessionID != "" {
+		if err := a.verifySession(ctx, state.BackendSessionID); err != nil {
+			return state, err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
@@ -177,6 +208,9 @@ func (a *Adapter) Recover(ctx context.Context, state domain.AgentState) (domain.
 }
 
 func (a *Adapter) Reset(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
+	if err := a.checkReady(ctx); err != nil {
+		return state, err
+	}
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
@@ -203,7 +237,7 @@ func (a *Adapter) createSession(ctx context.Context) (string, error) {
 	if err := a.postJSON(ctx, "/session", map[string]any{"title": a.spec.Name}, &response); err != nil {
 		return "", err
 	}
-	if response.ID == "" {
+	if response.ID == "" || a.redact(response.ID) != response.ID {
 		return "", errors.New("opencode create session response did not include id")
 	}
 	return response.ID, nil
@@ -230,7 +264,15 @@ func (a *Adapter) newRequest(ctx context.Context, method string, path string, bo
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if password := a.spec.StringOptions["password"]; password != "" {
+	if a.workspace != "" {
+		req.Header.Set("x-opencode-directory", a.workspace)
+	}
+	if a.runtime != nil && a.settings.Mode == "managed" {
+		a.runtime.mu.Lock()
+		password := a.runtime.password
+		a.runtime.mu.Unlock()
+		req.SetBasicAuth("opencode", password)
+	} else if password := a.spec.StringOptions["password"]; password != "" {
 		username := a.spec.StringOptions["username"]
 		if username == "" {
 			username = "opencode"
@@ -247,17 +289,21 @@ func (a *Adapter) doJSON(ctx context.Context, method string, path string, body a
 	}
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
-		return err
+		return a.safeError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return httpStatusError(path, resp)
+		return a.safeError(httpStatusError(path, resp))
 	}
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return a.safeError(err)
+	}
+	return a.safeError(json.Unmarshal(data, out))
 }
 
 func (a *Adapter) promptBody(message string, messageID string) map[string]any {
@@ -285,13 +331,14 @@ func (a *Adapter) streamEvents(ctx context.Context, runID string, sessionID stri
 
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
+		err = a.safeError(err)
 		ready <- err
 		return streamResult{Err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		err := httpStatusError("/event", resp)
+		err := a.safeError(httpStatusError("/event", resp))
 		ready <- err
 		return streamResult{Err: err}
 	}
@@ -443,6 +490,14 @@ func sendContextErr(parent context.Context, sendCtx context.Context) error {
 }
 
 func (a *Adapter) baseURL() string {
+	if a.runtime != nil {
+		if a.settings.Mode == "external" {
+			return strings.TrimRight(a.settings.BaseURL, "/")
+		}
+		a.runtime.mu.Lock()
+		defer a.runtime.mu.Unlock()
+		return a.runtime.endpoint
+	}
 	baseURL := strings.TrimRight(a.spec.StringOptions["base_url"], "/")
 	if baseURL == "" {
 		return defaultBaseURL
@@ -451,7 +506,7 @@ func (a *Adapter) baseURL() string {
 }
 
 func (a *Adapter) httpClient() *http.Client {
-	return &http.Client{Timeout: a.httpTimeout()}
+	return &http.Client{Timeout: a.httpTimeout(), Transport: directTransport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 func (a *Adapter) httpTimeout() time.Duration {

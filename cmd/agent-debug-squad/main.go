@@ -171,6 +171,7 @@ func serve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer orch.Close()
 	judgeClient, err := judge.Setup(cfg.Judge, cfg.Workflow, home, cfg.MachineBackends.JudgeProxyURL())
 	if err != nil {
 		return err

@@ -1,0 +1,20 @@
+session_name: opencode-review
+workspace_dir: .
+# Machine process/proxy/snapshot settings go in ~/.agent-debug-squad/backends.yaml.
+# With no machine settings, Squad owns one opencode serve with snapshot=false.
+defaults:
+  yolo: false
+agents:
+  - name: reviewer
+    backend: opencode
+    startup_prompt: "Review the code and report findings. Do not edit files."
+    options:
+      model: openai/gpt-5.4
+  - name: verifier
+    backend: opencode
+    startup_prompt: "Verify the review findings independently. Do not edit files."
+    options:
+      model: anthropic/claude-sonnet-4-6
+      # External alternative, only when machine process overrides are absent:
+      # mode: external
+      # base_url: http://127.0.0.1:4096

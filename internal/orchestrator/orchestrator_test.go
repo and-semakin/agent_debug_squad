@@ -237,6 +237,8 @@ func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/config":
+			_, _ = w.Write([]byte(`{"snapshot":false}`))
 		case "/session":
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)
@@ -320,6 +322,7 @@ func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 	cfg.Agents[0].Backend = "opencode"
 	cfg.Agents[0].StringOptions = map[string]string{
 		"base_url":        server.URL,
+		"mode":            "external",
 		"timeout_seconds": "3",
 	}
 	s := store.New(cfg)

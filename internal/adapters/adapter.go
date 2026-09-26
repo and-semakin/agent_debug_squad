@@ -8,7 +8,6 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/cursor"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/fake"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/kimi"
-	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/zcode"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
@@ -33,7 +32,7 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 	case "kimi":
 		return kimi.New(spec), nil
 	case "opencode":
-		return opencode.New(spec), nil
+		return nil, fmt.Errorf("opencode requires an owned runtime; construct it through the orchestrator")
 	default:
 		return nil, fmt.Errorf("unknown backend %q", spec.Backend)
 	}

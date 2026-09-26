@@ -495,6 +495,7 @@ func (r *runner) livePath(startupCtx context.Context, cfg domain.SessionConfig, 
 		_ = listener.Close()
 		return r.startupFailure(fmt.Errorf("initialize orchestrator: %w", err), CleanupNotStarted)
 	}
+	defer orch.Close()
 
 	var judgeClient judge.Judge
 	if declaresVerdicts(cfg.Workflow) {
@@ -732,6 +733,9 @@ func (r *runner) teardown(srv *http.Server, manager *workflow.Manager, orch *orc
 	}
 	if orchCancel != nil {
 		orchCancel()
+	}
+	if orch != nil {
+		orch.Close()
 	}
 	sortStrings(report.OutstandingRunIDs)
 	return report
