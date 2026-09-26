@@ -84,20 +84,34 @@ func TestCheckInstallationRejectsUnsupportedBundle(t *testing.T) {
 }
 
 func TestCheckInstallationReportsIndependentFailures(t *testing.T) {
+	// Pin every input to a guaranteed-missing path so the host's ambient
+	// environment cannot make the check platform- or machine-dependent.
 	spec := domain.AgentSpec{
-		Name:          "Z",
-		Backend:       "zcode",
-		StringOptions: map[string]string{"command": "/nonexistent/node", "runtime_path": "/nonexistent/bundle.cjs"},
+		Name:    "Z",
+		Backend: "zcode",
+		StringOptions: map[string]string{
+			"command":      "/nonexistent/node",
+			"runtime_path": "/nonexistent/bundle.cjs",
+		},
+		ListOptions: map[string][]string{
+			"env": {`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/nonexistent/provider.json`},
+		},
 	}
 	result := New(spec).CheckInstallation(context.Background(), domain.InstallationInput{
 		WorkspaceDir: t.TempDir(),
-		AmbientEnv:   os.Environ(),
+		AmbientEnv:   []string{"PATH=/usr/bin:/bin"},
 	})
-	if result.Status != domain.InstallationStatusFailed || len(result.Issues) != 2 {
-		t.Fatalf("want both independent failures, got %+v", result)
+	if result.Status != domain.InstallationStatusFailed || len(result.Issues) != 3 {
+		t.Fatalf("want all three independent failures, got %+v", result)
 	}
-	if result.Issues[0].Component == result.Issues[1].Component {
-		t.Fatalf("components must be distinct: %+v", result.Issues)
+	components := map[string]bool{}
+	for _, issue := range result.Issues {
+		components[issue.Component] = true
+	}
+	for _, want := range []string{domain.ComponentExecutable, domain.ComponentRuntime, domain.ComponentProviderConfig} {
+		if !components[want] {
+			t.Fatalf("missing component issue %s: %+v", want, result.Issues)
+		}
 	}
 	links := 0
 	for _, issue := range result.Issues {
