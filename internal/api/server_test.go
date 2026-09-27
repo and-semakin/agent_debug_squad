@@ -509,6 +509,13 @@ func TestResetAgentEndpointReturnsUpdatedState(t *testing.T) {
 		t.Fatalf("run status = %d, want %d; body = %s", runRR.Code, http.StatusAccepted, runRR.Body.String())
 	}
 
+	// A terminal run record can be visible before the worker releases the agent.
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := srv.orchestrator.WaitForWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitForWorkers() error = %v", err)
+	}
+
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/agents/Reviewer/reset", nil))
 

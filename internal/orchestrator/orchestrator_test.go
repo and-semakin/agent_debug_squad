@@ -709,6 +709,13 @@ func TestResetAgentClearsIdleAgentContinuity(t *testing.T) {
 		t.Fatalf("Wait() error = %v", err)
 	}
 
+	// A terminal run record can be visible before the worker releases the agent.
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := o.WaitForWorkers(waitCtx); err != nil {
+		t.Fatalf("WaitForWorkers() error = %v", err)
+	}
+
 	result, err := o.ResetAgent(ctx, "Reviewer", false)
 	if err != nil {
 		t.Fatalf("ResetAgent() error = %v", err)
