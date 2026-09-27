@@ -19,7 +19,8 @@ import (
 // mutex first; stale results cannot launch work.
 func (m *Manager) reconcile() {
 	m.mu.Lock()
-	if m.active != nil && !m.stopping && !m.recoveryChecking && m.loopCtx != nil &&
+	approved := map[string]bool{}
+	if m.active != nil && !m.stopping && !m.recoveryChecking && (m.loopCtx != nil || m.active.snapshot.Definition.Version == 2) &&
 		m.storageErr == nil &&
 		m.active.snapshot.Mode == domain.WorkflowModeRunning &&
 		m.active.snapshot.State == domain.WorkflowRunning {
@@ -27,7 +28,11 @@ func (m *Manager) reconcile() {
 		agents, revision := m.readyCandidateAgentsLocked(snapshot)
 		if len(agents) > 0 {
 			m.mu.Unlock()
-			err := m.runPreflight(m.loopCtx, agents)
+			ctx := m.loopCtx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			err := m.runPreflight(ctx, agents)
 			m.mu.Lock()
 			if m.active == nil || m.active.snapshot != snapshot || m.stopping || snapshot.Revision != revision {
 				// Stale: cancellation, pause, retry or another control moved
@@ -45,10 +50,17 @@ func (m *Manager) reconcile() {
 				m.mu.Unlock()
 				return
 			}
+			for _, agent := range agents {
+				approved[agent] = true
+			}
 			m.preflightSuccessLocked(snapshot, "")
 		}
 	}
-	m.reconcileLocked()
+	if m.active != nil && !m.stopping && m.active.snapshot.Definition.Version == 2 {
+		m.reconcileV2Locked(approved)
+	} else {
+		m.reconcileLocked()
+	}
 	m.mu.Unlock()
 }
 
@@ -180,6 +192,9 @@ func (m *Manager) applyCancellingLocked(snapshot *domain.WorkflowSnapshot) bool 
 }
 
 func (m *Manager) liveForTaskLocked(taskID string) (*liveAttempt, bool) {
+	if m.active == nil {
+		return nil, false
+	}
 	for _, live := range m.active.live {
 		if live.taskID == taskID {
 			return live, true
@@ -206,7 +221,7 @@ func dependencyAcceptable(dep *domain.WorkflowTaskExecution, def domain.Workflow
 func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) bool {
 	changed := false
 	def := snapshot.Definition
-	nested := def.HasNesting()
+	nested := def.UsesIterationPaths()
 	for _, taskID := range topologicalOrder(def) {
 		task := snapshot.Tasks[taskID]
 		if task == nil {
@@ -226,6 +241,14 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 		// re-evaluates from dependencies below. Loopless tasks keep whole-history
 		// scope.
 		taskDef := def.Tasks[taskID]
+		if def.Version == 2 && currentSkip(snapshot, taskID) != nil {
+			if task.State != domain.WorkflowTaskSkipped {
+				changed = true
+			}
+			task.State = domain.WorkflowTaskSkipped
+			task.BlockedReason = ""
+			continue
+		}
 		var last *domain.WorkflowAttempt
 		if taskDef.Loop != "" {
 			last = lastAttemptInLoopContext(task, snapshot.Loops[taskDef.Loop], nested)
@@ -274,6 +297,19 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 			}
 		}
 
+		if def.Version == 2 && !taskPhaseOpen(snapshot, taskID) {
+			if task.State != domain.WorkflowTaskPending || task.BlockedReason != "" {
+				changed = true
+			}
+			task.State = domain.WorkflowTaskPending
+			task.BlockedReason = phaseWaitReason(snapshot, taskID)
+			if reason := projectedBlockReason(snapshot, taskID); reason != "" {
+				task.State = domain.WorkflowTaskBlocked
+				task.BlockedReason = reason
+				changed = true
+			}
+			continue
+		}
 		// No live or committed attempt in scope: evaluate dependencies.
 		depDef := taskDef
 		allSettled := true
@@ -300,7 +336,7 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 					barrier = barrierLoopFor(def, taskDef.Loop, depTaskDef.Loop)
 				}
 				if barrier != "" {
-					if loop := snapshot.Loops[barrier]; loop != nil && loop.State != domain.WorkflowLoopDone {
+					if loop := snapshot.Loops[barrier]; loop != nil && !loop.State.Settled() {
 						allSettled = false
 						if waitingLoop == "" {
 							waitingLoop = waitLoopReason(snapshot, barrier)
@@ -323,6 +359,9 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 				acceptable = false
 				if blockedBy == "" {
 					blockedBy = fmt.Sprintf("dependency_%s:%s", dep.State, depID)
+					if skip := currentSkip(snapshot, depID); def.Version == 2 && skip != nil {
+						blockedBy = "dependency_skipped:" + depID + ":" + skip.DecisionID
+					}
 				}
 			}
 			if dep.State == domain.WorkflowTaskSucceeded {
@@ -356,6 +395,10 @@ func (m *Manager) recomputeTaskStatesLocked(snapshot *domain.WorkflowSnapshot) b
 // dispatchReadyTasksLocked reserves attempts and sends them to the executor,
 // in lexicographic task order, while parallel slots remain.
 func (m *Manager) dispatchReadyTasksLocked(snapshot *domain.WorkflowSnapshot) bool {
+	return m.dispatchApprovedTasksLocked(snapshot, nil)
+}
+
+func (m *Manager) dispatchApprovedTasksLocked(snapshot *domain.WorkflowSnapshot, approved map[string]bool) bool {
 	changed := false
 	for {
 		if len(m.active.live) >= snapshot.Definition.MaxParallel {
@@ -365,6 +408,9 @@ func (m *Manager) dispatchReadyTasksLocked(snapshot *domain.WorkflowSnapshot) bo
 		for _, taskID := range sortedTaskIDs(snapshot.Definition.Tasks) {
 			task := snapshot.Tasks[taskID]
 			if task == nil || task.State != domain.WorkflowTaskReady {
+				continue
+			}
+			if approved != nil && !approved[snapshot.Definition.Tasks[taskID].Agent] {
 				continue
 			}
 			target = taskID
@@ -431,7 +477,7 @@ func (m *Manager) dispatchTaskLocked(snapshot *domain.WorkflowSnapshot, taskID s
 			Attempt:   len(task.Attempts) + 1,
 			Iteration: currentIteration(snapshot, def),
 		}
-		if snapshot.Definition.HasNesting() && def.Loop != "" {
+		if snapshot.Definition.UsesIterationPaths() && def.Loop != "" {
 			newAttempt.IterationPath = loopCurrentPath(snapshot, def.Loop)
 		}
 		task.Attempts = append(task.Attempts, newAttempt)
@@ -666,7 +712,7 @@ func (m *Manager) refreshExecutionStateLocked(snapshot *domain.WorkflowSnapshot)
 	// A loop that has not reached its final iteration keeps the execution
 	// non-terminal even when every task state currently looks settled.
 	for _, loop := range snapshot.Loops {
-		if loop.State != domain.WorkflowLoopDone {
+		if !loop.State.Settled() {
 			allSettled = false
 			break
 		}
@@ -828,7 +874,7 @@ func topologicalOrder(def domain.WorkflowDefinition) []string {
 // body-task outcomes.
 func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.WorkflowInputManifest {
 	def := snapshot.Definition.Tasks[taskID]
-	nested := snapshot.Definition.HasNesting()
+	nested := snapshot.Definition.UsesIterationPaths()
 	manifest := domain.WorkflowInputManifest{
 		ExecutionID:  snapshot.ExecutionID,
 		TaskID:       taskID,
@@ -841,6 +887,11 @@ func buildManifest(snapshot *domain.WorkflowSnapshot, taskID string) domain.Work
 	for _, depID := range sortedDependencyIDs(def.Needs) {
 		dep := snapshot.Tasks[depID]
 		if dep == nil {
+			continue
+		}
+		if snapshot.Definition.Version == 2 {
+			entry := outcomeAt(snapshot, depID, dependencyOutcomePath(snapshot, taskID, depID))
+			manifest.Dependencies = append(manifest.Dependencies, entry)
 			continue
 		}
 		attempt := dependencyAttempt(snapshot, taskID, depID)
@@ -912,6 +963,8 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 		builder.WriteString("All direct dependencies below have settled. Read each referenced local response file for the complete result; do not rely on this summary alone.\n")
 		for _, dep := range manifest.Dependencies {
 			switch dep.Status {
+			case "skipped", "absent":
+				fmt.Fprintf(&builder, "- %s: %s (%s). Reason: %s; decision: %s. No result is available.\n", dep.TaskID, dep.Status, carryOverContextLabel(dep), dep.Reason, dep.DecisionID)
 			case string(domain.WorkflowAttemptSucceeded):
 				fmt.Fprintf(&builder, "- %s: succeeded (agent %s, attempt %d, run %s). Full response: %s\n",
 					dep.TaskID, dep.Agent, dep.Attempt, dep.RunID, joinWorkflowPath(execDir, dep.ResultPath))
@@ -926,7 +979,7 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 		}
 	}
 	if len(manifest.PreviousIteration) > 0 {
-		nested := snapshot.Definition.HasNesting()
+		nested := snapshot.Definition.UsesIterationPaths()
 		builder.WriteString("\n--- Previous iteration outcomes ---\n")
 		if nested {
 			fmt.Fprintf(&builder, "Loop iteration %s; the loop body settled in the previous invocation %s as follows. Read each referenced local response file for the complete result; do not rely on this summary alone.\n",
@@ -937,6 +990,8 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 		}
 		for _, entry := range manifest.PreviousIteration {
 			switch entry.Status {
+			case "skipped", "absent":
+				fmt.Fprintf(&builder, "- %s: %s (%s). Reason: %s; decision: %s. No result is available.\n", entry.TaskID, entry.Status, carryOverContextLabel(entry), entry.Reason, entry.DecisionID)
 			case string(domain.WorkflowAttemptSucceeded):
 				ref := joinWorkflowPath(execDir, entry.ResultPath)
 				if entry.Verdict != nil {
@@ -963,6 +1018,8 @@ func (m *Manager) buildPromptLocked(snapshot *domain.WorkflowSnapshot, taskID st
 			fmt.Fprintf(&builder, "\n[enclosing context %s]\n", domain.RenderIterationPath(section.IterationPath))
 			for _, entry := range section.Outcomes {
 				switch entry.Status {
+				case "skipped", "absent":
+					fmt.Fprintf(&builder, "- %s: %s (%s). Reason: %s; decision: %s. No result is available.\n", entry.TaskID, entry.Status, carryOverContextLabel(entry), entry.Reason, entry.DecisionID)
 				case string(domain.WorkflowAttemptSucceeded):
 					ref := joinWorkflowPath(execDir, entry.ResultPath)
 					if entry.Verdict != nil {

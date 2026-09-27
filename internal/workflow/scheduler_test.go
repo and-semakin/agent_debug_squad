@@ -297,6 +297,8 @@ func (fx *managerFixture) pump() {
 		case c := <-fx.m.completions:
 			fx.m.handleCompletion(c)
 			continue
+		case <-fx.m.wake:
+			continue
 		default:
 			return
 		}

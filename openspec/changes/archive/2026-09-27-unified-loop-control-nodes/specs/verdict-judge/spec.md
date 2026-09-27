@@ -1,59 +1,6 @@
-# verdict-judge Specification
+## MODIFIED Requirements
 
-## Purpose
-Classifies completed workflow task attempts through an external decision model, recording a machine-readable semantic verdict — with its confidence and full probability distribution — alongside each saved response, ready for future control flow.
-
-## Requirements
-
-### Requirement: Judge configuration and startup gating
-The system SHALL accept an optional `judge` configuration section with `provider`, `model`, `api_key_file`, `proxy_url`, and a decision timeout. The `openrouter` provider SHALL authenticate every decision request with the key read from the configured file, whose default location is `~/.agent-debug-squad/openrouter-api-key` in the user's home directory, outside the workspace. Decision requests SHALL be sent through the configured HTTP proxy when one is set; without one, standard environment proxy behavior applies. The effective proxy SHALL resolve in order: a `proxy_url` set in the session YAML `judge` section wins; when it is empty, a `proxy_url` set for `judge` in the machine backend configuration file applies; otherwise no explicit proxy is configured. The default model SHALL be `~typesafe/jev-latest`, overridable to an exact version. When the configured workflow contains tasks declaring verdicts, or a `judge` section is present, the key file MUST exist and be readable at startup; otherwise startup SHALL fail with an actionable error naming the expected path. Without verdict tasks and without a `judge` section, the system SHALL start and operate without any judge dependency.
-
-#### Scenario: Missing key with verdict tasks
-- **WHEN** the configured workflow declares a task with verdicts and the OpenRouter key file is absent
-- **THEN** startup fails with an error naming the expected key file path, and no server starts
-
-#### Scenario: No judge dependency without verdicts
-- **WHEN** the configuration has no `judge` section and no task declares verdicts
-- **THEN** the server starts and serves squads and workflows without requiring an OpenRouter key
-
-#### Scenario: Key file override
-- **WHEN** `api_key_file` points to a readable file in a nondefault location
-- **THEN** the judge authenticates with that file's key and startup succeeds
-
-#### Scenario: Proxy is applied to decision requests
-- **WHEN** `proxy_url` is configured
-- **THEN** decision requests are sent through that proxy
-
-#### Scenario: Machine-level judge proxy default applies
-- **WHEN** the session YAML `judge` section sets no `proxy_url` and the machine backend configuration sets `judge.proxy_url`
-- **THEN** decision requests are sent through the machine-configured proxy
-
-#### Scenario: Session judge proxy wins over the machine default
-- **WHEN** the session YAML `judge` section sets `proxy_url` and the machine backend configuration also sets `judge.proxy_url` to a different URL
-- **THEN** decision requests are sent through the session YAML proxy
-
-### Requirement: Verdict classification is an asynchronous post-response phase
-When an attempt of a task that declares verdicts completes with a nonempty final response, the system SHALL persist the response artifact exactly as for non-verdict tasks, then enter the attempt into a `judging` phase and classify it asynchronously. While judging, the attempt SHALL NOT be treated as settled and dependent tasks SHALL NOT be dispatched. The attempt settles only after its verdict is resolved by the judge, by policy, or by manual override. The judge call MUST NOT execute under the scheduler's serialization; classification outcomes are committed through the same serialized decision path as worker completions. The classification request SHALL carry the task's declared verdict options with their descriptions and the attempt's final response; responses exceeding a size cap SHALL be truncated deterministically (head and tail) with the truncation recorded. The provider adapter SHALL implement the `choice`, `noul`, and `score` decision types; workflow verdict classification SHALL use `choice` only.
-
-#### Scenario: Dependents wait for the verdict
-- **WHEN** a verdict task's owned run stops with a saved response and its dependent is otherwise ready
-- **THEN** the dependent is not dispatched until the attempt's verdict resolves and the attempt settles
-
-#### Scenario: Non-verdict tasks are unchanged
-- **WHEN** a task declares no verdicts
-- **THEN** its attempts settle on response commit as before, with no judging phase and no judge call
-
-#### Scenario: Judge never runs under the scheduler lock
-- **WHEN** a verdict task completes while other tasks are being scheduled
-- **THEN** the decision request executes outside the scheduler's serialized reconciliation, and its result is committed in a serialized pass
-
-#### Scenario: Large response is truncated for the judge only
-- **WHEN** the attempt's final response exceeds the size cap
-- **THEN** the judge receives a deterministic head-plus-tail excerpt, the truncation is recorded on the attempt, and the saved response file remains complete and unmodified
-
-#### Scenario: Adapter covers all decision types
-- **WHEN** `noul` and `score` decisions are issued through the judge interface
-- **THEN** the provider sends the corresponding typed requests and returns their typed answers with distributions
+Scenario titles inherited from the current main spec are retained as stable regression identifiers for OpenSpec replacement validation. In their updated scenario bodies, control means the version-2 task.control model; condition refers only to explicitly described legacy syntax/history.
 
 ### Requirement: Confidence threshold gates uncertain outcomes
 Workflow definitions SHALL accept a `confidence_threshold` between 0 and 1 exclusive of zero, defaulting to 0.7 when no machine judge default exists. An explicit workflow threshold SHALL take precedence over a machine judge threshold, which SHALL take precedence over 0.7. Saved definitions without a threshold SHALL use the startup-loaded machine threshold, or 0.7 when absent, for subsequent classifications, including recovery; already settled verdicts SHALL retain their recorded outcomes and thresholds. The judge's chosen verdict SHALL apply only when its confidence is greater than or equal to the threshold. Below the threshold the attempt receives the synthetic `uncertain` outcome, which MUST NOT be declarable as a verdict name. With `on_uncertain: needs_attention` (the default) the execution SHALL enter needs_attention with an uncertain-verdict reason, keep the attempt in `judging`, and expose the full probability distribution for inspection. With `on_uncertain: error` the attempt SHALL fail with reason `uncertain_verdict`, the distribution SHALL still be recorded, and existing failure policy and retry semantics apply.
@@ -128,17 +75,6 @@ Workflow definitions SHALL accept a `confidence_threshold` between 0 and 1 exclu
 - **WHEN** a held judging attempt is manually overridden while a machine threshold of 0.6 applies and the workflow has no explicit threshold
 - **THEN** the override records threshold 0.6
 
-### Requirement: Judge unavailability holds rather than fails
-If the decision request fails at the transport level or times out after bounded retries, the system SHALL move the execution to needs_attention with a `judge_unavailable` reason, keep the attempt in `judging` with its response artifact intact, and MUST NOT fail the task. Resuming the execution, or recovering the process, SHALL re-attempt classification for held judging attempts.
-
-#### Scenario: Provider outage
-- **WHEN** the judge endpoint is unreachable and retries are exhausted
-- **THEN** the execution enters needs_attention with a judge_unavailable reason and the attempt is not failed
-
-#### Scenario: Resume re-classifies
-- **WHEN** an execution held on judge unavailability is resumed after the provider recovers
-- **THEN** classification re-runs for the held attempt without re-running the agent
-
 ### Requirement: Held verdicts admit manual override
 The system SHALL accept `POST /workflows/{id}/tasks/{task}/attempts/{attempt}/verdict` with a nonempty `request_id` and a `verdict` value declared by that task. For an attempt held in `judging`, the override SHALL record the verdict with a manual source and settle the attempt as succeeded with that verdict. A settled attempt whose recorded verdict is load-bearing on a live hold SHALL be overridable the same way: an attempt whose verdict currently holds a control barrier through a `needs_attention` action. The replacement verdict is recorded with a manual source on a new view of the attempt outcome, and downstream behavior — dependency evaluation and control barriers included — follows the replacement verdict. Repeating an identical request SHALL return the recorded result without new effects; a different verdict for the same request ID SHALL return 409. Overrides against attempts not in `judging` and not holding as described SHALL return 409, undeclared verdict names SHALL return 400, and unknown execution, task, or attempt identifiers SHALL return 404. For a loop-owned attempt, a new override SHALL additionally require the complete iteration path to match the current loop and every ancestor iteration. Matching a local counter alone SHALL NOT make an old invocation current. A settled control attempt in a done owning invocation SHALL return 409 even if that invocation's final path is still current: it has no live control-action hold. Override SHALL NOT reopen a done invocation or any ancestor. Existing judging eligibility and direct ownership of a loop's control task SHALL remain required where applicable. Prior iteration contexts SHALL remain immutable. Identical accepted requests SHALL replay before current-context and done-loop eligibility checks, returning their existing result without changing history or applying the old verdict to a new invocation.
 
@@ -211,18 +147,3 @@ Eligibility SHALL require an unresolved judging attempt or a decision whose curr
 #### Scenario: Control override applies cap and global gates
 - **WHEN** a held control is overridden to a declared continue-mapped verdict at the cap while another attention cause remains
 - **THEN** its suffix is skipped and exhaustion is applied atomically; no extra pass or dispatch bypasses the cap or unrelated hold
-
-### Requirement: Verdict outcomes are persisted and auditable
-For every classified attempt, the system SHALL persist on the attempt record the verdict name (or `uncertain`), confidence, the full probability distribution across declared verdicts, the model string, the threshold used, the verdict source (`judge` or `manual`), and whether the judge input was truncated. The complete raw decision response SHALL be persisted as a readable per-attempt artifact next to the attempt's inputs and response. Judging MUST NOT modify the saved response file or the input manifest. Workflow views SHALL expose the judging state and the recorded verdict data.
-
-#### Scenario: Verdict data in the execution view
-- **WHEN** an attempt settles with a judge verdict
-- **THEN** the workflow view shows the verdict, confidence, distribution, model, and source for that attempt
-
-#### Scenario: Raw decision artifact
-- **WHEN** a decision completes
-- **THEN** the attempt's directory contains a readable artifact holding the provider's complete decision response
-
-#### Scenario: Response artifact integrity
-- **WHEN** classification and truncation occur
-- **THEN** the saved response file keeps its original bytes, size, and content hash

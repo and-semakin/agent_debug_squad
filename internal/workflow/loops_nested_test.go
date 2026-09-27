@@ -21,7 +21,7 @@ import (
 // involving the judge.
 func nestedStaticDefinition(innerMax, outerMax int) domain.WorkflowDefinition {
 	return domain.WorkflowDefinition{
-		Version: 1, Name: "nested-static", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "nested-static", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer": {MaxIterations: outerMax},
 			"inner": {MaxIterations: innerMax, Parent: "outer"},
@@ -65,8 +65,8 @@ func TestNestedStaticLoopsRunCartesianProduct(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	snapshot := loopSnapshot(t, fx)
-	if snapshot.SchemaVersion != domain.WorkflowSnapshotNestedSchemaVersion {
-		t.Fatalf("nested execution must persist schema 3, got %d", snapshot.SchemaVersion)
+	if snapshot.SchemaVersion != domain.WorkflowSnapshotSchemaVersion {
+		t.Fatalf("nested execution must persist schema 4, got %d", snapshot.SchemaVersion)
 	}
 	// Every loop-owned object carries a complete root-to-owner path even at a
 	// single depth, so a repeated local counter never aliases another ancestor
@@ -258,18 +258,18 @@ func threeLevelDefinition() domain.WorkflowDefinition {
 	verdicts := map[string]string{"pass": "clean", "again": "iterate"}
 	action := map[string]string{"pass": domain.WorkflowLoopActionBreak, "again": domain.WorkflowLoopActionContinue}
 	return domain.WorkflowDefinition{
-		Version: 1, Name: "nested-three", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "nested-three", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{
-			"delivery_loop": {MaxIterations: 1, UntilTask: "accept", OnVerdict: action},
-			"test_loop":     {MaxIterations: 2, UntilTask: "test", OnVerdict: action, Parent: "delivery_loop"},
-			"review_loop":   {MaxIterations: 3, UntilTask: "consolidate", OnVerdict: action, Parent: "test_loop"},
+			"delivery_loop": {MaxIterations: 1},
+			"test_loop":     {MaxIterations: 2, Parent: "delivery_loop"},
+			"review_loop":   {MaxIterations: 3, Parent: "test_loop"},
 		},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"implement":   {Agent: "a1", Prompt: "Implement.", Loop: "review_loop"},
 			"review":      {Agent: "a2", Prompt: "Review.", Loop: "review_loop", Needs: []string{"implement"}},
-			"consolidate": {Agent: "a3", Prompt: "Consolidate.", Loop: "review_loop", Needs: []string{"review"}, Verdicts: verdicts},
-			"test":        {Agent: "a4", Prompt: "Test.", Loop: "test_loop", Needs: []string{"consolidate"}, Verdicts: verdicts},
-			"accept":      {Agent: "a5", Prompt: "Accept.", Loop: "delivery_loop", Needs: []string{"test"}, Verdicts: verdicts},
+			"consolidate": {Agent: "a3", Prompt: "Consolidate.", Loop: "review_loop", Needs: []string{"review"}, Verdicts: verdicts, Control: action},
+			"test":        {Agent: "a4", Prompt: "Test.", Loop: "test_loop", Needs: []string{"consolidate"}, Verdicts: verdicts, Control: action},
+			"accept":      {Agent: "a5", Prompt: "Accept.", Loop: "delivery_loop", Needs: []string{"test"}, Verdicts: verdicts, Control: action},
 		},
 	}
 }
@@ -280,7 +280,7 @@ func TestThreeLevelNestedInitializesCompletePaths(t *testing.T) {
 		t.Fatalf("create must accept the three-level authoring model: %v", err)
 	}
 	snapshot := loopSnapshot(t, fx)
-	if snapshot.SchemaVersion != domain.WorkflowSnapshotNestedSchemaVersion {
+	if snapshot.SchemaVersion != domain.WorkflowSnapshotSchemaVersion {
 		t.Fatalf("schema: %d", snapshot.SchemaVersion)
 	}
 	cases := map[string][]domain.IterationEntry{
@@ -433,7 +433,7 @@ func TestNestedAncestorCarryOverArtifactDamageHolds(t *testing.T) {
 	}
 	// Reconciling advances the outer loop and tries to dispatch implement at
 	// outer=2/inner=1, whose ancestor section references the damaged exit@1.
-	fx.m.reconcile()
+	fx.pump()
 
 	view, _ := fx.m.View("wf_000001")
 	if view.State != domain.WorkflowNeedsAttention {
@@ -452,7 +452,7 @@ func TestNestedAncestorCarryOverArtifactDamageHolds(t *testing.T) {
 func TestLoopWaitBarrierIsLexicographicByDependencyID(t *testing.T) {
 	build := func(needs []string) domain.WorkflowDefinition {
 		return domain.WorkflowDefinition{
-			Version: 1, Name: "barrier", MaxParallel: 1, TaskTimeoutSeconds: 60,
+			Version: 2, Name: "barrier", MaxParallel: 1, TaskTimeoutSeconds: 60,
 			Loops: map[string]domain.WorkflowLoopDefinition{
 				"Lz": {MaxIterations: 2},
 				"La": {MaxIterations: 2},
@@ -474,7 +474,7 @@ func TestLoopWaitBarrierIsLexicographicByDependencyID(t *testing.T) {
 		// Both barriers are unfinished; the reason must name the barrier of the
 		// lexicographically first dependency (atask -> La) regardless of the
 		// declaration order, and never the other one.
-		if reason != "waiting_loop:La" {
+		if reason != "waiting_loop:La=1" {
 			t.Fatalf("needs=%v: want deterministic barrier La, got %q", needs, reason)
 		}
 		if strings.Contains(reason, "Lz") {
@@ -491,7 +491,7 @@ func TestLoopWaitBarrierIsLexicographicByDependencyID(t *testing.T) {
 // the descendant below it.
 func nestedThreeStaticDefinition() domain.WorkflowDefinition {
 	return domain.WorkflowDefinition{
-		Version: 1, Name: "nested-three-static", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "nested-three-static", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer":  {MaxIterations: 2},
 			"middle": {MaxIterations: 2, Parent: "outer"},
@@ -643,7 +643,7 @@ func TestNestedPromptDistinguishesOwnAndAncestorContexts(t *testing.T) {
 		}
 	}
 	// The old ambiguous bare "iteration N" spelling must be gone for nested.
-	if strings.Contains(prompt, "iteration 1 as follows") || strings.Contains(prompt, ", iteration 1, run ") {
+	if strings.Contains(prompt, "iteration 1 as follows") || strings.Contains(prompt, ", context refine=1, run ") {
 		t.Fatalf("nested prompt must not use nonnested iteration-number labels:\n%s", prompt)
 	}
 }
@@ -658,13 +658,13 @@ func TestNonnestedPromptKeepsIterationLabels(t *testing.T) {
 		t.Fatalf("final state: %v (%v)", final.State, final.AttentionReasons)
 	}
 	prompt := readAttemptPrompt(t, fx, "implement", 2)
-	if !strings.Contains(prompt, "Loop iteration 2; the loop body settled in iteration 1 as follows.") {
+	if !strings.Contains(prompt, "Loop iteration refine=2; the loop body settled in the previous invocation refine=1 as follows.") {
 		t.Fatalf("nonnested prompt lost its iteration header:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, ", iteration 1, run ") {
+	if !strings.Contains(prompt, ", context refine=1, run ") {
 		t.Fatalf("nonnested entries must keep the iteration-number label:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "context ") || strings.Contains(prompt, "invocation ") || strings.Contains(prompt, "[enclosing") {
+	if strings.Contains(prompt, "[enclosing") {
 		t.Fatalf("nonnested prompt must not gain nested context markers:\n%s", prompt)
 	}
 }

@@ -51,7 +51,7 @@ func mustAcceptDef(t *testing.T, def domain.WorkflowDefinition) {
 func TestNestedParentCycleRejected(t *testing.T) {
 	// Two loops that name each other as parent are not a forest.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "parent-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "parent-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"a": {MaxIterations: 2, Parent: "b"},
 			"b": {MaxIterations: 2, Parent: "a"},
@@ -65,7 +65,7 @@ func TestNestedParentCycleRejected(t *testing.T) {
 
 func TestNestedSelfParentRejected(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "self-parent", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "self-parent", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"only": {MaxIterations: 2, Parent: "only"},
 		},
@@ -82,7 +82,7 @@ func TestNestedUnrelatedBranchDependencyRejected(t *testing.T) {
 	// Two sibling loops under one root are unrelated branches: a task in one may
 	// not depend directly on a task in the other.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "unrelated", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "unrelated", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"root": {MaxIterations: 2},
 			"c1":   {MaxIterations: 2, Parent: "root"},
@@ -100,7 +100,7 @@ func TestNestedBridgeThroughCommonScopeAccepted(t *testing.T) {
 	// The same handoff becomes legal once routed through an explicit task in the
 	// least-common enclosing scope (the root loop).
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "bridge", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "bridge", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"root": {MaxIterations: 2},
 			"c1":   {MaxIterations: 2, Parent: "root"},
@@ -120,7 +120,7 @@ func TestNestedAncestorDescendantDependencyAccepted(t *testing.T) {
 	// A descendant consuming an ancestor output, and an ancestor consuming a
 	// descendant output, are both allowed relations.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "anc-desc", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "anc-desc", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer": {MaxIterations: 2},
 			"inner": {MaxIterations: 2, Parent: "outer"},
@@ -140,7 +140,7 @@ func TestNestedBoundaryCycleAcrossScopesRejected(t *testing.T) {
 	// inner.A -> outer.X -> inner.B is acyclic in the raw task graph but forms a
 	// cycle through the outer scope's inner-loop boundary node.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "scope-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "scope-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer": {MaxIterations: 2},
 			"inner": {MaxIterations: 2, Parent: "outer"},
@@ -158,7 +158,7 @@ func TestNestedBoundaryCycleBelowThirdLevelRejected(t *testing.T) {
 	// A cycle that collapses only at the middle scope (below the third level)
 	// is caught even though the raw task graph stays acyclic.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "scope-cycle-3", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "scope-cycle-3", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer":     {MaxIterations: 2},
 			"middle":    {MaxIterations: 2, Parent: "outer"},
@@ -179,7 +179,7 @@ func TestNestedBoundaryCycleBelowThirdLevelRejected(t *testing.T) {
 func TestNestedConditionTaskMustBeDirectMember(t *testing.T) {
 	// An inner loop may not use an outer-owned task as its until_task.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "cond-owner", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "cond-owner", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer": {MaxIterations: 2},
 			"inner": {
@@ -193,7 +193,7 @@ func TestNestedConditionTaskMustBeDirectMember(t *testing.T) {
 			"innerbody": {Agent: "a2", Prompt: "p", Loop: "inner"},
 		},
 	}
-	mustRejectDef(t, def, "must be a member of the loop body")
+	mustRejectDef(t, def, "removed")
 }
 
 // --- whole-subtree sink coverage ---------------------------------------------
@@ -202,12 +202,10 @@ func TestNestedSinkMustCoverWholeSubtree(t *testing.T) {
 	// The outer loop's until_task must be reachable from every descendant task,
 	// including work owned by an inner loop; an orphan inner task is uncovered.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "sink-subtree", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "sink-subtree", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer": {
 				MaxIterations: 2,
-				UntilTask:     "end",
-				OnVerdict:     map[string]string{"ok": domain.WorkflowLoopActionBreak, "again": domain.WorkflowLoopActionContinue},
 			},
 			"inner": {MaxIterations: 2, Parent: "outer"},
 		},
@@ -215,20 +213,18 @@ func TestNestedSinkMustCoverWholeSubtree(t *testing.T) {
 			"main": {Agent: "a1", Prompt: "p", Loop: "inner"},
 			"side": {Agent: "a2", Prompt: "p", Loop: "inner"},
 			"end": {Agent: "a3", Prompt: "p", Loop: "outer", Needs: []string{"main"},
-				Verdicts: map[string]string{"ok": "y", "again": "n"}},
+				Verdicts: map[string]string{"ok": "y", "again": "n"}, Control: map[string]string{"ok": "break", "again": "continue"}},
 		},
 	}
-	mustRejectDef(t, def, "unique body sink")
+	mustAcceptDef(t, def) // Whole-child admission makes its independent root part of the barrier.
 }
 
 func TestNestedSinkCoveringWholeSubtreeAccepted(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "sink-covered", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "sink-covered", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"outer": {
 				MaxIterations: 2,
-				UntilTask:     "end",
-				OnVerdict:     map[string]string{"ok": domain.WorkflowLoopActionBreak, "again": domain.WorkflowLoopActionContinue},
 			},
 			"inner": {MaxIterations: 2, Parent: "outer"},
 		},
@@ -236,7 +232,7 @@ func TestNestedSinkCoveringWholeSubtreeAccepted(t *testing.T) {
 			"main": {Agent: "a1", Prompt: "p", Loop: "inner"},
 			"side": {Agent: "a2", Prompt: "p", Loop: "inner", Needs: []string{"main"}},
 			"end": {Agent: "a3", Prompt: "p", Loop: "outer", Needs: []string{"side"},
-				Verdicts: map[string]string{"ok": "y", "again": "n"}},
+				Verdicts: map[string]string{"ok": "y", "again": "n"}, Control: map[string]string{"ok": "break", "again": "continue"}},
 		},
 	}
 	mustAcceptDef(t, def)
@@ -248,7 +244,7 @@ func TestNestedContainerLoopAccepted(t *testing.T) {
 	// A loop with no directly-owned tasks is legal as long as its subtree has
 	// members through a descendant loop.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "container", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "container", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"container": {MaxIterations: 2},
 			"worker":    {MaxIterations: 2, Parent: "container"},
@@ -264,7 +260,7 @@ func TestNestedContainerLoopAccepted(t *testing.T) {
 func TestNestedEmptySubtreeRejected(t *testing.T) {
 	// A loop whose entire subtree, descendants included, has no tasks is illegal.
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "empty-subtree", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "empty-subtree", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"container": {MaxIterations: 2},
 			"worker":    {MaxIterations: 2},

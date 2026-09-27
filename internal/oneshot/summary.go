@@ -27,25 +27,27 @@ const (
 // It is a derived, latest-invocation report: never read for scheduling or
 // recovery, and replaceable on replay.
 type Summary struct {
-	SummaryVersion   int                       `json:"summary_version"`
-	RequestID        string                    `json:"request_id"`
-	ExecutionID      *string                   `json:"execution_id"`
-	WorkflowState    *string                   `json:"workflow_state"`
-	Revision         *int64                    `json:"revision"`
-	ExitCode         int                       `json:"exit_code"`
-	ExitReason       string                    `json:"exit_reason"`
-	TriggeringSignal *string                   `json:"triggering_signal"`
-	TaskCounts       domain.WorkflowTaskCounts `json:"task_counts"`
-	FailedBlocked    []TaskIssue               `json:"failed_blocked_tasks"`
-	Verdicts         []VerdictEntry            `json:"verdicts"`
-	AttentionReasons []string                  `json:"attention_reasons,omitempty"`
-	SessionDir       string                    `json:"session_dir,omitempty"`
-	WorkflowDir      string                    `json:"workflow_dir,omitempty"`
-	SnapshotPath     string                    `json:"snapshot_path,omitempty"`
-	ResponsePaths    []string                  `json:"response_paths,omitempty"`
-	DecisionPaths    []string                  `json:"decision_paths,omitempty"`
-	Cleanup          CleanupReport             `json:"cleanup"`
-	SummaryPersisted bool                      `json:"summary_persisted"`
+	ControlDecisions []domain.WorkflowControlDecision     `json:"control_decisions,omitempty"`
+	SkippedTasks     map[string][]domain.WorkflowTaskSkip `json:"skipped_tasks,omitempty"`
+	SummaryVersion   int                                  `json:"summary_version"`
+	RequestID        string                               `json:"request_id"`
+	ExecutionID      *string                              `json:"execution_id"`
+	WorkflowState    *string                              `json:"workflow_state"`
+	Revision         *int64                               `json:"revision"`
+	ExitCode         int                                  `json:"exit_code"`
+	ExitReason       string                               `json:"exit_reason"`
+	TriggeringSignal *string                              `json:"triggering_signal"`
+	TaskCounts       domain.WorkflowTaskCounts            `json:"task_counts"`
+	FailedBlocked    []TaskIssue                          `json:"failed_blocked_tasks"`
+	Verdicts         []VerdictEntry                       `json:"verdicts"`
+	AttentionReasons []string                             `json:"attention_reasons,omitempty"`
+	SessionDir       string                               `json:"session_dir,omitempty"`
+	WorkflowDir      string                               `json:"workflow_dir,omitempty"`
+	SnapshotPath     string                               `json:"snapshot_path,omitempty"`
+	ResponsePaths    []string                             `json:"response_paths,omitempty"`
+	DecisionPaths    []string                             `json:"decision_paths,omitempty"`
+	Cleanup          CleanupReport                        `json:"cleanup"`
+	SummaryPersisted bool                                 `json:"summary_persisted"`
 }
 
 // TaskIssue describes one failed or blocked task's durable outcome.
@@ -91,6 +93,15 @@ func buildSummary(snapshot *domain.WorkflowSnapshot, counts domain.WorkflowTaskC
 		FailedBlocked:  []TaskIssue{},
 		Verdicts:       []VerdictEntry{},
 		Cleanup:        cleanup,
+	}
+	s.ControlDecisions = snapshot.Decisions
+	for id, task := range snapshot.Tasks {
+		if len(task.Skips) > 0 {
+			if s.SkippedTasks == nil {
+				s.SkippedTasks = map[string][]domain.WorkflowTaskSkip{}
+			}
+			s.SkippedTasks[id] = task.Skips
+		}
 	}
 	if signal != "" {
 		s.TriggeringSignal = &signal
@@ -173,6 +184,8 @@ func countTasks(snapshot *domain.WorkflowSnapshot) domain.WorkflowTaskCounts {
 	counts := domain.WorkflowTaskCounts{}
 	for _, task := range snapshot.Tasks {
 		switch task.State {
+		case domain.WorkflowTaskSkipped:
+			counts.Skipped++
 		case domain.WorkflowTaskPending:
 			counts.Pending++
 		case domain.WorkflowTaskReady:

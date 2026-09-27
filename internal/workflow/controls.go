@@ -21,6 +21,10 @@ func (m *Manager) Pause(executionID string) (domain.WorkflowExecutionView, error
 	if err != nil {
 		return domain.WorkflowExecutionView{}, err
 	}
+
+	if snapshot.LegacyLoops() {
+		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: legacy loop execution is read-only", ErrRetryConflict)
+	}
 	if snapshot.State.Terminal() {
 		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: execution is %s", ErrInvalidTransition, snapshot.State)
 	}
@@ -53,6 +57,11 @@ func (m *Manager) Resume(ctx context.Context, executionID string) (domain.Workfl
 	if err != nil {
 		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, err
+	}
+
+	if snapshot.LegacyLoops() {
+		m.mu.Unlock()
+		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: legacy loop execution is read-only", ErrRetryConflict)
 	}
 	if snapshot.State.Terminal() || snapshot.Mode == domain.WorkflowModeCancelling {
 		m.mu.Unlock()
@@ -118,7 +127,6 @@ func (m *Manager) Resume(ctx context.Context, executionID string) (domain.Workfl
 			return domain.WorkflowExecutionView{}, preflightErr
 		}
 		if m.preflightSuccessLocked(snapshot, "") {
-			m.mu.Unlock()
 			return m.resumeCommit(ctx, executionID, snapshot, reasons)
 		}
 	}
@@ -213,6 +221,10 @@ func (m *Manager) Cancel(executionID string, opts CancelOptions) (domain.Workflo
 	snapshot, err := m.loadSnapshotLocked(executionID)
 	if err != nil {
 		return domain.WorkflowExecutionView{}, err
+	}
+
+	if snapshot.LegacyLoops() {
+		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: legacy loop execution is read-only", ErrRetryConflict)
 	}
 	if snapshot.State.Terminal() && snapshot.State != domain.WorkflowCancelled {
 		return domain.WorkflowExecutionView{}, fmt.Errorf("%w: execution is %s", ErrInvalidTransition, snapshot.State)
@@ -339,10 +351,16 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 
 	// Idempotent replays were checked above; a new request may not reopen
 	// the sealed one-shot execution.
+	if snapshot.LegacyLoops() {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: legacy loop execution is read-only; finish or cancel with the previous binary", ErrRetryConflict)
+	}
 	if err := m.oneShotReopenGuardLocked(executionID); err != nil {
 		return domain.WorkflowExecutionView{}, false, err
 	}
 
+	if snapshot.Mode == domain.WorkflowModeCancelling || snapshot.State.Terminal() {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: execution is %s", ErrVerdictConflict, snapshot.State)
+	}
 	task := snapshot.Tasks[taskID]
 	if task == nil {
 		return domain.WorkflowExecutionView{}, false, ErrTaskNotFound
@@ -365,6 +383,15 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 		}
 	}
 
+	if snapshot.Definition.Version == 2 {
+		updated, err := cloneWorkflowSnapshot(snapshot)
+		if err != nil {
+			return domain.WorkflowExecutionView{}, false, err
+		}
+		snapshot = updated
+		task = snapshot.Tasks[taskID]
+		attempt = findAttempt(snapshot, taskID, attemptNumber)
+	}
 	now := m.now()
 	attempt.State = domain.WorkflowAttemptSucceeded
 	attempt.Reason = ""
@@ -380,6 +407,21 @@ func (m *Manager) OverrideVerdict(executionID, taskID string, attemptNumber int,
 		TaskID: taskID, Attempt: attemptNumber, Detail: req.Verdict,
 	}
 	snapshot.Controls = append(snapshot.Controls, event)
+	if snapshot.Definition.Version == 2 {
+		if err := applyTaskControl(snapshot, taskID, attempt, now); err != nil {
+			return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: %v", ErrVerdictConflict, err)
+		}
+		if err := m.commitControlLocked(executionID, snapshot); err != nil {
+			return domain.WorkflowExecutionView{}, false, err
+		}
+		_ = m.store.AppendWorkflowEvent(executionID, event)
+		m.reconcileLocked()
+		m.Notify()
+		if m.active != nil {
+			snapshot = m.active.snapshot
+		}
+		return m.buildViewLocked(snapshot), true, nil
+	}
 	_ = m.store.AppendWorkflowEvent(executionID, event)
 	snapshot.AttentionReasons = collectAttentionReasons(snapshot)
 	if len(snapshot.AttentionReasons) == 0 && !snapshot.State.Terminal() {
@@ -427,6 +469,9 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 
 	// Idempotent replays of accepted retries were checked above; a new
 	// request may not reopen the sealed one-shot execution.
+	if snapshot.LegacyLoops() {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: legacy loop execution is read-only; finish or cancel with the previous binary", ErrRetryConflict)
+	}
 	if err := m.oneShotReopenGuardLocked(executionID); err != nil {
 		return domain.WorkflowExecutionView{}, false, err
 	}
@@ -460,7 +505,7 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 	// rejects the request. A nested execution identifies the invocation by its
 	// complete iteration path; a nonnested execution keeps the local iteration.
 	taskDef := snapshot.Definition.Tasks[taskID]
-	nested := snapshot.Definition.HasNesting()
+	nested := snapshot.Definition.UsesIterationPaths()
 	retryIteration := currentIteration(snapshot, taskDef)
 	var retryPath []domain.IterationEntry
 	if taskDef.Loop != "" {
@@ -488,7 +533,7 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 		if m.exec.OwnedRunActive(last.RunID) {
 			return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: run %s is still active", ErrWorkerActive, last.RunID)
 		}
-		if last.CleanupConfirmedAt == nil {
+		if last.CleanupConfirmedAt == nil && snapshot.Definition.Version != 2 {
 			at := m.now()
 			last.CleanupConfirmedAt = &at
 		}
@@ -534,6 +579,18 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 		}
 		return domain.WorkflowExecutionView{}, false, preflightErr
 	}
+	if snapshot.Definition.Version == 2 {
+		updated, err := cloneWorkflowSnapshot(snapshot)
+		if err != nil {
+			return domain.WorkflowExecutionView{}, false, err
+		}
+		snapshot = updated
+		task = snapshot.Tasks[taskID]
+		if last := task.LastAttempt(); last != nil && last.State == domain.WorkflowAttemptInterrupted && last.CleanupConfirmedAt == nil {
+			at := m.now()
+			last.CleanupConfirmedAt = &at
+		}
+	}
 	m.preflightSuccessLocked(snapshot, targetAgent)
 
 	now := m.now()
@@ -554,12 +611,27 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 	// intent are kept; descendants are never reinitialized.
 	if taskDef.Loop != "" {
 		for _, name := range snapshot.Definition.LoopAncestry(taskDef.Loop) {
-			if loop := snapshot.Loops[name]; loop != nil && loop.State == domain.WorkflowLoopDone {
+			if loop := snapshot.Loops[name]; loop != nil && loop.State.Settled() {
 				loop.State = domain.WorkflowLoopRunning
+				if snapshot.Definition.Version == 2 {
+					loop.Closed = false
+					loop.CloseReason = ""
+					loop.DecisionID = ""
+					kept := snapshot.LoopHistory[:0]
+					for _, h := range snapshot.LoopHistory {
+						if !domain.PathsEqual(h.IterationPath, loop.IterationPath) {
+							kept = append(kept, h)
+						}
+					}
+					snapshot.LoopHistory = kept
+				}
 			}
 		}
 	}
 
+	if snapshot.RetryRequests == nil {
+		snapshot.RetryRequests = map[string]domain.WorkflowRetryRecord{}
+	}
 	snapshot.RetryRequests[req.RequestID] = domain.WorkflowRetryRecord{
 		RequestID:              req.RequestID,
 		TaskID:                 taskID,
@@ -573,7 +645,7 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 		snapshot.Mode = domain.WorkflowModeRunning
 	}
 	// A retried terminal execution becomes schedulable again.
-	if m.active == nil {
+	if m.active == nil && snapshot.Definition.Version != 2 {
 		m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
 	}
 	// Recompute dependent readiness with the queued attempt treated as
@@ -592,7 +664,14 @@ func (m *Manager) RetryTask(ctx context.Context, executionID, taskID string, req
 		IterationPath:          retryPath,
 		ConfirmPreviousStopped: req.ConfirmPreviousStopped,
 	})
-	if err := m.persistLocked(snapshot); err != nil {
+	if snapshot.Definition.Version == 2 {
+		if err := m.commitControlLocked(executionID, snapshot); err != nil {
+			return domain.WorkflowExecutionView{}, false, err
+		}
+		if m.active == nil {
+			m.active = &execution{snapshot: snapshot, live: map[string]*liveAttempt{}}
+		}
+	} else if err := m.persistLocked(snapshot); err != nil {
 		return domain.WorkflowExecutionView{}, false, err
 	}
 	if snapshot.State != domain.WorkflowPaused {
@@ -647,7 +726,12 @@ func onlyRetryRepairableReasons(snapshot *domain.WorkflowSnapshot) bool {
 // final result. A nested execution instead scopes each reservation by the
 // deepest loop shared between the producer's and descendant's owner chains.
 func assertNoDescendantAttempts(snapshot *domain.WorkflowSnapshot, taskID string) error {
-	if snapshot.Definition.HasNesting() {
+	if snapshot.Definition.Version == 2 {
+		if err := assertNoV2Consumption(snapshot, taskID); err != nil {
+			return err
+		}
+	}
+	if snapshot.Definition.UsesIterationPaths() {
 		return assertNoDescendantAttemptsNested(snapshot, taskID)
 	}
 	taskLoop := snapshot.Definition.Tasks[taskID].Loop
@@ -694,6 +778,10 @@ func (m *Manager) reconcileLocked() {
 	if m.active == nil || m.stopping {
 		return
 	}
+	if m.active.snapshot.Definition.Version == 2 {
+		m.reconcileV2Locked(nil)
+		return
+	}
 	snapshot := m.active.snapshot
 	changed := false
 	if m.storageErr == nil {
@@ -701,28 +789,10 @@ func (m *Manager) reconcileLocked() {
 	}
 	changed = m.applyCancellingLocked(snapshot) || changed
 	changed = m.recomputeTaskStatesLocked(snapshot) || changed
-	// Resolve pending manual-stop intents before the execution-state refresh so
-	// a stop can retire its own condition/exhaustion hold even while other
-	// loops remain held. Marking a stopped loop done releases its outside
-	// consumers, so recompute task states again when a stop resolved.
-	if resolveStopsLocked(snapshot) {
-		changed = true
-		changed = m.recomputeTaskStatesLocked(snapshot) || changed
-	}
 	// Refresh the execution state before dispatching so that attention
 	// conditions established above block new work in the same pass.
 	changed = m.refreshExecutionStateLocked(snapshot) || changed
 	if m.storageErr == nil && !m.recoveryChecking && snapshot.Mode == domain.WorkflowModeRunning && snapshot.State == domain.WorkflowRunning {
-		// An attention-free running execution may re-arm settled loops. The
-		// advance is committed before any next-iteration dispatch; a failed
-		// advance save stops scheduling instead of releasing unsaved work.
-		if m.advanceLoopsLocked(snapshot) {
-			if err := m.persistLocked(snapshot); err != nil {
-				changed = true
-			} else {
-				changed = m.recomputeTaskStatesLocked(snapshot) || changed
-			}
-		}
 		if m.storageErr == nil {
 			changed = m.dispatchReadyTasksLocked(snapshot) || changed
 		}
@@ -797,6 +867,8 @@ func countTaskStates(snapshot *domain.WorkflowSnapshot) domain.WorkflowTaskCount
 	counts := domain.WorkflowTaskCounts{}
 	for _, task := range snapshot.Tasks {
 		switch task.State {
+		case domain.WorkflowTaskSkipped:
+			counts.Skipped++
 		case domain.WorkflowTaskPending:
 			counts.Pending++
 		case domain.WorkflowTaskReady:
@@ -843,6 +915,13 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 		TaskCounts:       countTaskStates(snapshot),
 		CreatedAt:        snapshot.CreatedAt,
 		UpdatedAt:        snapshot.UpdatedAt,
+	}
+	view.Decisions = snapshot.Decisions
+	view.LoopHistory = snapshot.LoopHistory
+	if snapshot.LegacyLoops() {
+		supported := false
+		view.ExecutionSupported = &supported
+		view.CompatibilityGuidance = "Legacy loop history is read-only. Finish or cancel active loops with the previous binary; submit a version-2 definition under a new request ID."
 	}
 	// The checking status is transient observation, never a persisted state;
 	// a persisted report renders as failed with its sanitized issues.
@@ -895,6 +974,23 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 				taskView.Result = attemptView.Result
 			}
 		}
+		if snapshot.Definition.Version == 2 {
+			taskView.Skips = task.Skips
+			taskView.Result = nil
+			path := loopCurrentPath(snapshot, snapshot.Definition.Tasks[taskID].Loop)
+			out := outcomeAt(snapshot, taskID, path)
+			if out.Status == "succeeded" && out.ResultPath != "" {
+				taskView.Result = &domain.WorkflowResultRef{Path: joinWorkflowPath(execDir, out.ResultPath), Size: out.ResultSize, SHA256: out.ResultSHA256}
+			} else {
+				taskView.ResultUnavailableReason = out.Reason
+				if taskView.ResultUnavailableReason == "" {
+					taskView.ResultUnavailableReason = out.Status
+				}
+				if out.DecisionID != "" {
+					taskView.ResultUnavailableReason += ":" + out.DecisionID
+				}
+			}
+		}
 		view.Tasks = append(view.Tasks, taskView)
 	}
 
@@ -915,6 +1011,11 @@ func (m *Manager) buildViewLocked(snapshot *domain.WorkflowSnapshot) domain.Work
 			IterationPath: loopCurrentPath(snapshot, name),
 			Parent:        loopDef.Parent,
 			StopRequested: loop.StopRequested,
+		}
+		loopView.WorkflowLoopProgress = loop.WorkflowLoopProgress
+		if snapshot.Definition.Version == 2 {
+			loopView.ControlTasks = snapshot.Definition.ControlTasks(name)
+			loopView.EffectiveMaxIterations = loop.EffectiveCap(loopDef.MaxIterations)
 		}
 		if loopDef.HasCondition() {
 			loopView.UntilTask = loopDef.UntilTask

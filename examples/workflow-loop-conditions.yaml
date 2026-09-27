@@ -1,12 +1,5 @@
-# A conditioned loop: the reviewer's verdict decides whether the loop keeps
-# refining or stops early. The "polish" body runs implement -> review; the
-# review task is the loop's until_task and must declare verdicts. on_verdict
-# maps every declared verdict to an action: review_passed breaks the loop at
-# the current iteration, issues_found continues to the next iteration (up to
-# the cap), and needs_human holds the loop for a manual override, stop, or
-# cancel. The budget is still bounded by max_iterations; a continue at the cap
-# follows on_exhaustion (needs_attention by default, or succeed). The fake
-# backend keeps this example portable and free to run.
+# A bounded loop with a mandatory tail control. The task maps every declared
+# verdict to an action; continue at the cap holds by default.
 session_name: workflow-loop-conditions
 workspace_dir: .
 defaults:
@@ -26,18 +19,13 @@ agents:
     backend: fake
     startup_prompt: "Summarize the final outcome for the user."
 workflow:
-  version: 1
+  version: 2
   name: review-until-clean
   max_parallel: 1
   task_timeout_seconds: 1800
   loops:
     polish:
       max_iterations: 3
-      until_task: review
-      on_verdict:
-        review_passed: break
-        issues_found: continue
-        needs_human: needs_attention
       # Optional; needs_attention is the default when omitted.
       on_exhaustion: needs_attention
   tasks:
@@ -45,9 +33,12 @@ workflow:
       agent: implementer
       loop: polish
       prompt: "Implement the change. In later iterations, address the previous iteration's review feedback."
-    # The condition task: a body member that declares verdicts, is mandatory
-    # (allowed_to_fail is omitted), and is the unique sink of the body.
+    # The tail control follows every other direct task in this loop.
     review:
+      control:
+        review_passed: break
+        issues_found: continue
+        needs_human: needs_attention
       agent: reviewer
       loop: polish
       needs: [implement]

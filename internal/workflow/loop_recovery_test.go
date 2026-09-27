@@ -118,7 +118,7 @@ func TestLoopFailureHoldSurvivesRestart(t *testing.T) {
 
 	view := mustView2(t, second)
 	if view.State != domain.WorkflowNeedsAttention ||
-		!hasReason(view, "loop_failure:refine:1:implement:retry_or_cancel") {
+		!hasReason(view, "loop_failure:refine=1:implement:retry_or_cancel") {
 		t.Fatalf("failure hold must survive restart: %v (%v)", view.State, view.AttentionReasons)
 	}
 	if view.Loops[0].Iteration != 1 {
@@ -129,7 +129,7 @@ func TestLoopFailureHoldSurvivesRestart(t *testing.T) {
 	}
 	held, err := second.m.Wait(context.Background(), "wf_000001", 2*time.Second)
 	if err != nil || held.State != domain.WorkflowNeedsAttention ||
-		!hasReason(held, "loop_failure:refine:1:implement") {
+		!hasReason(held, "loop_failure:refine=1:implement") {
 		t.Fatalf("wait must surface the durable hold: %+v err=%v", held.AttentionReasons, err)
 	}
 
@@ -162,7 +162,7 @@ func TestSameIterationConsumptionBlocksRetry(t *testing.T) {
 
 	_, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1})
 	if !errors.Is(err, ErrRetryConflict) ||
-		!strings.Contains(err.Error(), "descendant review already has an attempt in loop refine iteration 1") {
+		!strings.Contains(err.Error(), "descendant review already has an attempt in the enclosing iteration of loop refine") {
 		t.Fatalf("same-iteration consumption must block the retry, got %v", err)
 	}
 	snapshot := loopSnapshot(t, fx)
@@ -173,7 +173,7 @@ func TestSameIterationConsumptionBlocksRetry(t *testing.T) {
 
 func TestOutsideConsumptionBlocksRetry(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "outside-consumed", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "outside-consumed", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"once": {MaxIterations: 1}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo":   {Agent: "a1", Prompt: "Solo.", Loop: "once", AllowedToFail: true},
@@ -256,7 +256,7 @@ func TestHistoricalFailureCannotBeRetriedAfterAdvance(t *testing.T) {
 
 func TestFinalIterationRetryReopensDoneLoop(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "reopen", MaxParallel: 2, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "reopen", MaxParallel: 2, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"once": {MaxIterations: 1}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo":   {Agent: "a1", Prompt: "Solo.", Loop: "once", AllowedToFail: true},
@@ -315,7 +315,7 @@ func TestFinalIterationRetryReopensDoneLoop(t *testing.T) {
 
 func TestPausedLoopRepairStaysPausedUntilResume(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "paused-repair", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "paused-repair", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo": {Agent: "a1", Prompt: "Refine.", Loop: "refine"},
@@ -366,7 +366,7 @@ func TestPausedLoopRepairStaysPausedUntilResume(t *testing.T) {
 
 func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "artifact-under-hold", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "artifact-under-hold", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"seed":      {Agent: "a1", Prompt: "Seed."},
@@ -390,7 +390,7 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 		t.Fatalf("resume must be accepted for loop executions: %v", err)
 	}
 	if resumed.State != domain.WorkflowNeedsAttention ||
-		!hasReason(resumed, "artifact:seed:1") || !hasReason(resumed, "loop_failure:refine:1:implement") {
+		!hasReason(resumed, "artifact:seed:1") || !hasReason(resumed, "loop_failure:refine=1:implement") {
 		t.Fatalf("resume must keep both unresolved causes visible: %v (%v)", resumed.State, resumed.AttentionReasons)
 	}
 	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
@@ -407,7 +407,7 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 	if hasReason(resumed, "artifact:") {
 		t.Fatalf("repaired artifact reason must clear: %v", resumed.AttentionReasons)
 	}
-	if !hasReason(resumed, "loop_failure:refine:1:implement") {
+	if !hasReason(resumed, "loop_failure:refine=1:implement") {
 		t.Fatalf("loop failure must survive artifact recovery: %v", resumed.AttentionReasons)
 	}
 	if _, _, err := fx.m.RetryTask(context.Background(), "wf_000001", "implement", RetryRequest{RequestID: "r-repair", ExpectedAttempt: 1}); err != nil {
@@ -424,7 +424,7 @@ func TestRestoredArtifactRevalidatedDuringLoopFailure(t *testing.T) {
 
 func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "judge-and-loop", MaxParallel: 3, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "judge-and-loop", MaxParallel: 3, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"implement": {Agent: "a1", Prompt: "Implement.", Loop: "refine"},
@@ -449,7 +449,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	// The judge is down: classification holds while the loop failure holds
 	// independently.
 	view := pumpReason(t, jf.managerFixture, "judge_unavailable:reviewer:1")
-	if !hasReason(view, "loop_failure:refine:1:fix:retry_or_cancel") {
+	if !hasReason(view, "loop_failure:refine=1:fix:retry_or_cancel") {
 		t.Fatalf("both holds must be visible: %v", view.AttentionReasons)
 	}
 	if _, _, err := jf.m.RetryTask(context.Background(), "wf_000001", "fix", RetryRequest{RequestID: "r-blocked", ExpectedAttempt: 1}); !errors.Is(err, ErrRetryConflict) {
@@ -468,7 +468,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 	}
 	if resumed.State != domain.WorkflowNeedsAttention ||
 		!hasReason(resumed, "judge_unavailable:reviewer:1") ||
-		!hasReason(resumed, "loop_failure:refine:1:fix") {
+		!hasReason(resumed, "loop_failure:refine=1:fix") {
 		t.Fatalf("resume must retain both unresolved holds: %v", resumed.AttentionReasons)
 	}
 	if !jf.pumpUntil(2*time.Second, func() bool { return jf.judge.requestCount() == 2 }) {
@@ -496,7 +496,7 @@ func TestLoopFailureAndJudgeOutageRepairedIndependently(t *testing.T) {
 		t.Fatal("reviewer classification must settle after the provider recovers")
 	}
 	view = mustView2(t, jf.managerFixture)
-	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_failure:refine:1:fix") {
+	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_failure:refine=1:fix") {
 		t.Fatalf("loop failure must still hold: %v (%v)", view.State, view.AttentionReasons)
 	}
 	if snapshot := loopSnapshot(t, jf.managerFixture); snapshot.Loops["refine"].Iteration != 1 {
@@ -559,7 +559,7 @@ func TestCancelFromLoopFailureHold(t *testing.T) {
 
 func TestAdvanceCommitFaultAndBoundaryCrashes(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "advance-fault", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "advance-fault", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo": {Agent: "a1", Prompt: "Refine.", Loop: "refine"},
@@ -600,7 +600,7 @@ func TestAdvanceCommitFaultAndBoundaryCrashes(t *testing.T) {
 	if err := second.m.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	second.pump()
+	second.pumpUntil(2*time.Second, func() bool { return len(iterationNumbersForTask(t, second, "solo")) == 2 })
 	if got := iterationNumbersForTask(t, second, "solo"); len(got) != 2 || got[1] != 2 {
 		t.Fatalf("recovery must advance once and start iteration 2: %v", got)
 	}

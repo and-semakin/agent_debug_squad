@@ -615,137 +615,88 @@ Retry and recovery limits:
 
 - No retries are automatic. `retry` reserves a fresh attempt (fresh conversation, same instructions and manifest semantics) for a failed/interrupted task only while no transitive descendant has attempt reservations, and only with a new unique `request_id` plus the `expected_attempt` number. Identical retries replay; stale or conflicting ones return `409`. Once a tolerated failure has been consumed downstream, retry is rejected — start a new execution for a different consistent result set. Inside a loop, eligibility is iteration-scoped; see [Bounded Loops](#bounded-loops).
 - Retrying an interrupted attempt, or finishing a cancellation after a crash, requires `confirm_previous_stopped: true` — the caller's assertion that prior backend work stopped, recorded for audit. Squad cannot verify external cleanup after a process crash, and a worker known to be active in the current process is never overridden.
-- Restart recovers committed outcomes and artifacts, keeps paused executions paused, continues `cancelling` until resolved, and marks reserved/running attempts without committed outcomes as `interrupted`, stopping new dispatch until intervention. Unknown snapshot schema versions or damaged authoritative state fail closed. Workflow snapshot schema is versioned upgrade-only: older binaries cannot resume schema-2 (loop) or schema-3 (nested-loop) executions — stop the new server before rolling back and keep the artifacts; downgrade conversion is out of scope.
+- Restart recovers committed outcomes and artifacts, keeps paused executions paused, continues `cancelling` until resolved, and marks reserved/running attempts without committed outcomes as `interrupted`, stopping new dispatch until intervention. Unknown snapshot schema versions or damaged authoritative state fail closed. Version-2 workflows use schema 4. Legacy loop executions must be finished or cancelled with the previous binary before upgrade; terminal legacy history remains read-only. See [Loop Intervention and Recovery](#loop-intervention-and-recovery).
 - A workflow-owned runtime rejects manual run/reset mutation with `409`; manual agents, follow-up continuity, run APIs, and permission replies keep their existing behavior, and workflow attempts are visible through the same run endpoints.
 
 ### Bounded Loops
 
-A workflow may declare one or more bounded loops. `loops` maps loop names to their mandatory positive `max_iterations`; tasks join a loop body with `loop:`:
+New loops require `workflow.version: 2`. Loopless version-1 workflows retain their existing format and behavior. Each loop declares a positive `max_iterations`; each task's `loop` names its direct owner. A loop without control tasks runs exactly its bounded number of passes. See [workflow-loop.yaml](examples/workflow-loop.yaml).
 
 ```yaml
 workflow:
-  version: 1
-  name: refine-loop
+  version: 2
+  name: review-queue
+  max_parallel: 2
   loops:
-    refine:
-      max_iterations: 3
+    queue: {max_iterations: 10}
   tasks:
-    implement:
-      agent: implementer
-      loop: refine
-      prompt: "Implement the change. In later iterations, address the previous iteration's review feedback."
+    select:
+      agent: selector
+      loop: queue
+      prompt: "Select the next MR, or report that the queue is empty."
+      verdicts: {ready: "An MR is ready", empty: "No MRs remain", human: "A decision is required"}
+      control: {ready: proceed, empty: break, human: needs_attention}
     review:
       agent: reviewer
-      loop: refine
-      needs: [implement]
-      prompt: "Review this iteration's implementation; report remaining defects or state it is acceptable."
+      loop: queue
+      needs: [select]
+      prompt: "Review the selected MR."
     report:
       agent: reporter
-      needs: [review]
-      prompt: "Summarize the final implementation and the last review for the user."
+      needs: [select]
+      prompt: "Summarize the queue outcome."
 ```
 
-Semantics and limits of this stage:
+A pass counts as soon as it is entered, even when the head selector immediately breaks or continues without reviewing anything. Root loops enter pass 1 at submission. A child has a planned path at local counter 1 but consumes no pass until admitted. Judge calls and explicit task retries do not increment pass counters. Automatic attempts per leaf are bounded by the effective caps of its enclosing invocations; manual extensions and retries remain explicit interventions, not an elapsed-time or spending guarantee.
 
-- A static loop (no condition fields) runs its body exactly `max_iterations` times; a conditioned loop may exit early through its condition (see [Loop Conditions](#loop-conditions)). Loops may also be nested to arbitrary depth with `parent` (see [Nested Loops](#nested-loops)). A task belongs to exactly one direct owner loop, and loops cannot share tasks or depend directly across unrelated loop boundaries (validation rejects these; sibling loops, ancestor/descendant handoff, and outside consumers are supported).
-- Automatic work is bounded by construction: one dispatch per body task per iteration (body tasks × `max_iterations` initial attempts). Failures never trigger automatic retries. Explicit user/coordinator retries are excluded from that bound — there is no retry-count or elapsed-time guarantee, only the descendant guards below.
-- An iteration advances when every body task has a settled current-iteration attempt that is acceptable under the ordinary dependency rules: `allowed_to_fail` and `min_successful_dependencies` compose per iteration exactly as in a flat graph, so tolerated failures don't block advance but re-run in the next iteration.
-- Handoff is iteration-scoped: `needs` inside the loop resolve to the dependency's current-iteration committed attempt; dependencies from outside the loop resolve once the loop is done and consume only the final iteration. Prior iterations are immutable inputs — completed iterations are never re-executed.
-- Carry-over: a body task dispatching in iteration k > 1 gets a previous-iteration outcomes section in its manifest and prompt — all body tasks' iteration-(k−1) committed attempts (states, verdicts, errors, result files), verified like every committed artifact before dispatch.
-- The execution view exposes per-loop state (`name`, `iteration`, `max_iterations`, `state`), and every attempt view carries its `iteration` number.
-- A non-tolerated body failure or a blocked body task puts the execution in a durable `needs_attention` hold with an actionable `loop_failure`/`loop_blocked` reason naming loop, task, and iteration. The hold survives restart, stops new dispatch and all loop advance, lets live work finish, and keeps outside consumers pending with a `waiting_loop` reason. Recovery is intervention: retry the eligible attempt or cancel.
-- Retry inside a loop targets the latest failed/interrupted attempt of the current iteration and stays in that iteration; an eligible retry can reopen a finished loop at its final iteration. Same-loop descendants block a retry only when they already have an attempt in that iteration; outside descendants and loopless tasks keep the all-history guard. Reserving a retry recomputes dependent readiness, clearing exactly the loop holds it resolves.
-- Resume is independent of retry/cancel and never dispatches loop work by itself: it revalidates restored artifacts and re-attempts held judge classifications (a completed resume can still return `200` with `needs_attention` while unresolved causes remain). Iteration counters survive restart; the advance is committed before any next-iteration backend work, so recovery never repeats, skips, or double-dispatches an iteration.
-- Loop executions raise the snapshot schema: flat (nonnested) loops persist at version 2, nested executions at version 3. Compatibility is upgrade-only (schema 1 loads as loopless, unknown versions fail closed) and downgrade support is out of scope. See [Nested Loops](#nested-loops).
+Every loop-owned attempt and outcome carries its complete `iteration_path`, including flat loops (`queue=1`) and nested loops (`delivery=2/review=1`). Local counters alone do not identify historical outcomes. Results from earlier passes remain inspectable but do not replace missing results in the final pass.
 
-### Loop Conditions
+### Task Controls
 
-A loop may decide its continuation from a verdict instead of running a fixed budget. Three optional fields turn a static loop into a conditioned one (a loop with none of them stays fully static):
+An optional task `control` maps **every declared verdict** to one of four actions. The control task must directly belong to a loop, declare at least two verdicts and be mandatory (`allowed_to_fail: false`, the default). `until_task` and loop-level `on_verdict` have been removed; configuration errors include migration guidance. Other tasks may declare observational verdicts without a control map.
 
-```yaml
-workflow:
-  version: 1
-  name: review-until-clean
-  loops:
-    polish:
-      max_iterations: 3
-      until_task: review            # the loop's single condition task
-      on_verdict:                   # total map, one entry per declared verdict
-        review_passed: break        # complete now at this iteration
-        issues_found: continue      # re-arm, or hit the budget cap
-        needs_human: needs_attention  # hold for intervention
-      on_exhaustion: needs_attention  # or `succeed`; requires the pair above
-  tasks:
-    implement:
-      agent: implementer
-      loop: polish
-      prompt: "Implement, then address the previous iteration's review."
-    review:
-      agent: reviewer
-      loop: polish
-      needs: [implement]
-      verdicts:                       # until_task must declare verdicts
-        review_passed: "No blocking defects remain."
-        issues_found: "Concrete defects to fix."
-        needs_human: "A decision only a human can make."
-      prompt: "Review this iteration; pick exactly one verdict."
-```
+| Action | Effect after the control verdict settles |
+| --- | --- |
+| `proceed` | Release the remaining phase of this pass. |
+| `continue` | Skip the remaining phase, close this pass and request another bounded pass. |
+| `break` | Skip the remaining phase and complete only the owning loop. |
+| `needs_attention` | Hold at the control; keep the remaining phase pending for intervention. |
 
-- `until_task` names the loop's condition task. It must be a body member, must declare `verdicts`, must be mandatory (`allowed_to_fail` omitted or `false`; other body tasks may stay optional reviewers), and must be the **unique body sink** — every other body task reaches it through same-loop `needs` edges (a singleton body qualifies). `on_verdict` must map each declared verdict exactly once, to `break`, `continue`, or `needs_attention`; missing keys, unknown verdict names, and bad actions are rejected with a corrective example. `until_task` and `on_verdict` pair up, and an explicit `on_exhaustion` requires that pair (a static loop that sets only `on_exhaustion` is rejected rather than ignored).
-- **Evaluation point:** the condition is read only after the whole iteration settles acceptably, and it reads `until_task`'s latest committed current-iteration verdict. Loop failure/blocking holds, an interrupted attempt, a held/judging classification, and `on_uncertain: error` all take precedence and prevent evaluation — a failed condition attempt holds for retry and never supplies a continuation decision, and a synthetic `uncertain` value is never looked up in `on_verdict`.
-- **Actions:** `break` completes the loop at the current iteration and releases outside consumers with that iteration's results; `continue` re-arms the next iteration, or at the effective cap triggers the exhaustion policy; `needs_attention` holds at the current iteration with a `loop_attention:<loop>:<iter>:<task>:<verdict>` reason offering override, stop, or cancel. A `needs_attention` action keeps priority even at the cap.
-- **Exhaustion** (`continue` at the effective cap): `needs_attention` (default) holds with a `loop_exhausted:<loop>:<iter>` reason offering extend, stop, or cancel; `succeed` completes the loop like a `break`, preserving the recorded verdict and ordinary tolerated-failure accounting (it never forces workflow success or finalizes failure on its own).
-- **Verdict names carry no built-in scheduling meaning.** `blocked`, `needs_input`, and any other declared name are ordinary verdicts; to wait for a human on a condition task, map its verdict to `needs_attention` explicitly. Non-condition tasks' verdicts stay observational and never hold execution by name, and a task without `verdicts` is never classified (free-form "please help" text creates no structured outcome). No automatic answer injection or successful-attempt rerun is provided ("answer and continue" is deferred).
-- **Extend control:** `POST /workflows/{id}/loops/{name}/extend` with a positive `add_iterations` durably raises the loop's effective cap (`max_iterations` + granted extensions) — a manual, audited, idempotent action. The system itself never loops unboundedly. Identical requests replay without a second increase even after completion or restart; reusing a request ID for another loop or amount returns `409`; new requests against a done loop or a terminal/cancelling execution return `409`. Extending an exhausted loop clears its `loop_exhausted` cause on the next reconcile.
-- **Stop control:** `POST /workflows/{id}/loops/{name}/stop` durably requests a manual break after the current iteration. Remaining body work finishes under normal dependency and pause rules, no next iteration begins, and outside consumers wait for acceptable settlement. Stop resolves a condition-action or exhaustion hold locally even while another loop is held, but it never cancels workers, unpauses, or waives failures, interruptions, or unresolved classification. Intent survives restart and same-iteration retries; `stop_requested` is exposed in loop views.
-- **Views:** a conditioned loop view carries `until_task`, `effective_max_iterations` (declared plus extensions), the latest settled `last_condition_verdict`, and `stop_requested` when pending; static-loop views are unchanged. There is no automatic downgrade: an older binary must not be relied on to preserve condition semantics, extensions, or pending stop intent.
+Controls can appear at the head, middle or tail, and a loop may have several ordered controls. In each loop's projected graph, every other direct task or immediate child-loop subtree must be before or after each control. An independent bypass branch is rejected. Child admission is a whole-subtree barrier: even an internal root without a raw dependency waits for every projected predecessor. An outer control waits for an entire preceding child invocation to finish.
+
+Classification and scheduling stay distinct. Backend failure, timeout, missing response, unavailable judge and low confidence never select a control action. Confidence keeps the existing precedence: explicit workflow threshold, startup-loaded machine threshold, then `0.7`. The synthetic `uncertain` verdict is not a control-map key.
+
+Normal completion of a pass requests another pass too. At the effective cap, a fixed-count loop succeeds; a controlled loop applies `on_exhaustion` (`needs_attention` by default, or `succeed`). **A controlled loop whose maps always say `proceed` therefore holds at the cap by default.** `needs_attention` selected by a control is a distinct hold and is not waived by exhaustion policy. Explicit `on_exhaustion` requires a directly owned control task.
+
+Skipped work is an outcome, not a backend attempt: it has a full planned path, `loop_break` or `loop_continue` reason and a stable `lcd_N` decision ID, with no fabricated run, attempt, verdict or result. Skipping an unadmitted child recursively records its children and grandchildren with `entered: false` and `iterations_started: 0`. Existing prefix results and all historical skips are preserved. Skips alone do not fail the workflow, but a required dependency on a final skipped task blocks with `dependency_skipped:<producer>:<decision-id>`; neither `allowed_to_fail` nor a quorum threshold waives missing output. In the example, a report on `select` can run after an empty queue, while a report on `review` would block.
+
+Loop failure or blocking holds unfinished loop work for intervention. Outside consumers wait for the actual child/root completion barrier. A required skipped output outside all loops can make the final workflow fail. Ordinary tolerated failures retain their existing accounting.
 
 ### Nested Loops
 
-Loops nest to arbitrary depth. Add `parent` (the enclosing loop's name) to any loop; a task's `loop` always names its **direct owner**. `examples/workflow-nested-loop.yaml` is a runnable three-level graph (`implement → review → consolidate → test → accept`) following the authoring model below.
+Loops form a forest through optional `parent`. A present parent must be a nonempty string naming a declared loop; cycles, empty subtrees and unrelated cross-branch dependencies are rejected. A container loop may have only children and no directly owned tasks. See [workflow-nested-loop.yaml](examples/workflow-nested-loop.yaml) for a three-level example.
 
-```yaml
-workflow:
-  version: 1
-  name: nested-delivery
-  loops:
-    delivery_loop:            # root
-      max_iterations: 2
-      until_task: accept
-      on_verdict: { accepted: break, reject: continue }
-    test_loop:                # child of delivery_loop
-      max_iterations: 2
-      parent: delivery_loop
-      until_task: test
-      on_verdict: { passed: break, failed: continue }
-    review_loop:              # child of test_loop
-      max_iterations: 3
-      parent: test_loop
-      until_task: consolidate
-      on_verdict: { ready: break, revise: continue }
-  tasks:
-    implement:   { agent: implementer, loop: review_loop }
-    review:      { agent: reviewer, loop: review_loop, needs: [implement] }
-    consolidate: { agent: consolidator, loop: review_loop, needs: [review], verdicts: { ready: "…", revise: "…" } }
-    test:        { agent: tester, loop: test_loop, needs: [consolidate], verdicts: { passed: "…", failed: "…" } }
-    accept:      { agent: acceptor, loop: delivery_loop, needs: [test], verdicts: { accepted: "…", reject: "…" } }
-```
+The shared scope graph projects each immediate child subtree to one vertex and checks boundary cycles recursively. Route sibling handoffs through an explicit task in their common enclosing scope, or through a workflow-scope task for separate roots. Such bridges cost an agent task and transfer completed invocations; they are not a channel between simultaneous iterations.
 
-- **Forest and `parent`.** Loops form a forest via `parent`; a present `parent` must be a nonempty string naming a declared loop (no trimming or coercion of empty, whitespace, null, numbers, booleans, sequences, or maps), and only omission means no parent. Self-parenting, cycles, undeclared parents, empty subtrees, and shared tasks are rejected. `parent` participates in definition hashing when present.
-- **Context identity is the complete path, not a local counter.** A nested invocation is identified by an ordered iteration path from the root loop to the direct owner, e.g. `[{"loop":"delivery_loop","iteration":1},{"loop":"test_loop","iteration":2},{"loop":"review_loop","iteration":1}]`. A repeated local counter never aliases another ancestor context. Schema-3 executions persist and expose `iteration_path` on every loop-owned loop state, attempt, view, and dependency/carry-over entry (root-owned tasks carry a one-entry path); `iteration` stays as the direct owner's counter and must agree with the path's last entry. Paths render as `name=N` joined by `/` (root first, no spaces) inside reason strings.
-- **Subtree body vs direct members.** A loop's body is its whole task subtree; its direct members are only the tasks that name it. Advancing a loop runs its descendants again: **advance** increments the loop's counter, resets its direct tasks, and recursively creates fresh child invocations at iteration 1 (clearing child-local extensions and stop intent), while **complete** marks the invocation done at its existing path and preserves descendants. Dependency descendants are always distinguished from loop descendants.
-- **Whole-subtree sinks.** Each conditioned loop must directly own its `until_task`, which must be mandatory and the **unique sink of the loop's whole subtree**: every other task in that subtree reaches the condition through `needs` edges. A nested condition cannot double as an ancestor's condition (rejected); an ancestor decision needs its own directly owned task, so a container-only loop is static.
-- **Context-exact handoff.** When a consumer depends on a producer in another loop, resolution is exact to the context with no cross-context fallback: a same-owner producer resolves to the latest attempt at the exact current path; an ancestor-owner producer to the outcome at the consumer path truncated to that owner; a descendant producer to the **final** outcome under the consumer's current prefix once every intervening child invocation is done; a loop producer feeding a workflow-scope consumer resolves to the final outcome after the producer's root-ancestor invocation completes. Never falling back to another context is what keeps a negative verdict distinct from a backend failure: a `failed`/`reject` verdict is a deliberate `continue`, while a real task error takes the durable `needs_attention` hold path.
-- **Final-only, whole-subtree carry-over.** Carry-over walks the owner then each ancestor nearest-first; each level whose local counter exceeds 1 summarizes that previous iteration's **entire subtree** (with `previous_iteration_path` alongside the existing `previous_iteration` array in schema 3). Hand-offs carry final outcomes only, never a transcript of every inner iteration; earlier attempts remain inspectable history and every referenced artifact is verified before dispatch.
-- **Shared-enclosing-iteration retry guard.** The flat all-history descendant guard becomes a shared-enclosing-context guard for nested producers: a same-loop consumer blocks a retry only within the exact current path; an inner consumer of an outer producer blocks anywhere in that producer's outer iteration; a bridged sibling blocks within the common ancestor iteration; workflow-scope producers/consumers keep the whole-history rule. An eligible retry atomically reopens done owning/ancestor invocations at the same paths without resetting independent work, and never grants another iteration (a capped or stopped invocation completes again at the same path).
-- **Controls bind to the invocation current at serialization (a race).** There is no compare-and-set parameter. If a parent advance commits before a newly issued stop serializes, that stop targets the *new* current iteration; replaying a control after an advance acknowledges the old action and does not apply it to the new invocation. Extensions belong to their accepted invocation, persist across that loop's local advances, and clear only when an ancestor creates a new invocation (root extensions therefore last the execution). Control audit records store the accepted target path and affected descendant paths.
-- **Stop vs cancel.** A loop's **stop** completes the current iteration normally and propagates to every currently unfinished descendant invocation in one saved transition — never cancelling workers or waiving failures; even a child initialized at iteration 1 with no dispatched attempt finishes that iteration on stop. **Cancellation** is the operation for abandoning unstarted work. Propagated stop clears a child's condition-action or exhaustion hold once that iteration is otherwise acceptably settled, but not failure, interruption, or judging holds.
-- **Invocation-local budgets.** Automatic attempts per leaf are bounded by the product of effective caps along its owner chain. Extensions raise an invocation's cap and clear only when an ancestor creates a new invocation, so a conservative bound uses the maximum cap ever granted to each named loop (a reset may have cleared a larger historical extension). Four nested levels with cap 5 permit up to 5⁴ = 625 initial attempts per leaf before retries — a conservative upper bound, not a remaining-work estimate or a spending limit, and no global cost cap is added. Explicit retries stay excluded, so indefinite external intervention is not a finite-execution guarantee.
-- **Bridges cost an agent task and transfer completed invocations.** A direct edge between unrelated loop branches is rejected; the error names the least common enclosing scope where an explicit bridge task can transfer results. A bridge costs an agent task and transfers a *completed* invocation once — it is not a channel for iteration-by-iteration exchange between roots, and it stays subject to boundary-cycle checks.
-- **Ordering is explicit in `needs`.** Setting `parent` adds no ordering edge and no workspace snapshot. A directly owned static-loop task with no `needs` on a child loop may run concurrently with it. `break` completes only its owning invocation; static ancestors still repeat their declared budgets.
-- **Observation and schema.** Loop and attempt views carry paths, and loop views carry the `parent` name, so the forest is reconstructable from one snapshot; failure/blocking/attention/exhaustion/wait reasons render the complete path, and a wait reason names the actual root or intermediate completion barrier (not the producer's innermost loop). Flat (nonnested) executions keep their prior wire format, reason strings, and task counts byte-for-byte and stay at schema 2; nested executions use schema 3, which is upgrade-only.
+Advancing a parent resets descendants to fresh planned pass-1 paths and clears their local extensions and stop intent. Completing a parent preserves the final child states. A child's `break` is local: fixed-count ancestors may still repeat. Every closed pass records its final child paths, so handoff follows exact historical contexts instead of searching for the latest successful descendant. `previous_iteration` and nearest-first `ancestor_previous_iterations` are explicitly historical summaries of the entire corresponding subtree, including skips. Every referenced successful result remains hash-verified before dispatch.
 
-See [examples/workflow-chain.yaml](examples/workflow-chain.yaml), [examples/workflow-review.yaml](examples/workflow-review.yaml), [examples/workflow-loop.yaml](examples/workflow-loop.yaml), [examples/workflow-loop-conditions.yaml](examples/workflow-loop-conditions.yaml), and [examples/workflow-nested-loop.yaml](examples/workflow-nested-loop.yaml) for runnable fake-backend graphs.
+### Loop Intervention and Recovery
+
+- **Extend:** `POST /workflows/{id}/loops/{name}/extend` takes `request_id` and positive `add_iterations`, raises only the current invocation's cap and rejects integer overflow. It can release an exhaustion hold but does not resurrect a skipped suffix. Done/skipped loops and terminal/cancelling executions reject new extensions. Replays acknowledge the originally accepted context, even after an ancestor advances.
+- **Stop:** `POST /workflows/{id}/loops/{name}/stop` takes `request_id` and finishes the current pass without starting another. It propagates to all unfinished descendants, including planned children that must still run their first pass when admitted. At a held `needs_attention` decision it records effective `proceed` while preserving the mapped action and verdict evidence. At `continue` it preserves suffix skips and completes. A stop never cancels workers, unpauses, or waives failure, uncertainty or interruption.
+- **Override:** only a current judging attempt or the current live held control decision can be overridden. A revision creates a new decision ID. Released or closed decisions cannot be rewritten, including attention decisions released by stop while paused. Accepted requests replay before lifecycle eligibility checks; new conflicts return `409`.
+- **Retry:** only a current failed/interrupted real attempt can be retried, subject to existing cleanup and consumption guards. Skips cannot be retried. Projected child admission and committed controls consume their prefix, preventing a retry even if paused before suffix dispatch. An unfenced fixed-count loop can reopen at its final path without resetting descendants or granting a new pass.
+- **Pause/cancel:** pause allows already-running outcomes and control decisions to commit, but prevents new admission, advance and dispatch. Resume does not waive semantic holds. Cancellation committed before classification wins; committed decisions and historical skips remain auditable.
+
+All version-2 executions, including loopless graphs, persist **schema 4**. The authoritative commit includes a settled control verdict, decision, skips, close/exhaustion state and accepted request record. Advance consumes a closed pass in a separate atomic transition before any new work. Failed saves do not publish partial decisions. Recovery preserves committed decisions and skips, reclassifies unresolved judge work without repeating backend work, and requires intervention for interrupted attempts.
+
+Views expose ordered `control_tasks`, decisions and evidence, effective actions, full paths, admitted/planned state, `iterations_started`, skip history, loop close history and unavailable-result reasons. Decision IDs are execution-local monotonic `lcd_N` identifiers; the decision record supplies the exact path/task/attempt/revision.
+
+Before upgrading, finish or cancel every active legacy loop execution **using the previous binary**, then stop that server. Recognized schema-2/3 legacy loop executions are read-only history (`execution_supported: false`); any nonterminal legacy loop blocks new-server startup before state mutation or API availability. New mutations return `409`; accepted historical request replays remain read-only. Unknown schemas and corrupt records fail startup even when terminal. Loopless schemas 1/2 retain supported recovery.
+
+Migrate configuration to version 2 and move each old `on_verdict` map onto the named task as `control`; use a **new submission request ID** because the definition identity changes. Do not edit snapshots or replay external effects to migrate an execution. Schema 4 cannot be rolled back into an older binary: stop the new server and retain its state and artifacts separately before rollback.
+
+Runnable examples: [fixed count](examples/workflow-loop.yaml), [tail control](examples/workflow-loop-conditions.yaml), [nested controls](examples/workflow-nested-loop.yaml), and [queue with parallel reviews](examples/workflow-queue.yaml). Verdict examples require the configured judge, even with fake task backends.
 
 ## One-Shot Workflow Runs
 

@@ -30,7 +30,9 @@ func (s *Store) SaveWorkflowSnapshot(snapshot *domain.WorkflowSnapshot) error {
 	// recovered schema-1 snapshot saved later becomes schema 2 without any
 	// nesting fields. A nested execution persists at schema 3. This never
 	// downgrades and otherwise leaves the flat wire format unchanged.
-	if snapshot.Definition.HasNesting() {
+	if snapshot.Definition.Version == 2 {
+		snapshot.SchemaVersion = 4
+	} else if snapshot.Definition.HasNesting() {
 		snapshot.SchemaVersion = domain.WorkflowSnapshotNestedSchemaVersion
 	} else if snapshot.SchemaVersion < domain.WorkflowSnapshotNonNestedSchemaVersion {
 		snapshot.SchemaVersion = domain.WorkflowSnapshotNonNestedSchemaVersion
@@ -155,7 +157,42 @@ func scanJSONValue(dec *json.Decoder, path string) (string, string, bool, error)
 // attempts carry none. Nonnested schema-1/2 snapshots are only checked for the
 // absence of nesting, so their recovery behavior is unchanged.
 func validateWorkflowSnapshot(snapshot *domain.WorkflowSnapshot) error {
-	nested := snapshot.Definition.HasNesting()
+	if snapshot.Definition.Version == 2 {
+		if snapshot.SchemaVersion != 4 {
+			return fmt.Errorf("version 2 requires snapshot schema 4")
+		}
+		if err := validateControlSnapshot(snapshot); err != nil {
+			return err
+		}
+	} else if snapshot.SchemaVersion == 4 {
+		return fmt.Errorf("schema 4 requires workflow version 2")
+	}
+	if snapshot.LegacyLoops() {
+		if snapshot.SchemaVersion < 2 {
+			return fmt.Errorf("legacy loops require schema 2 or 3")
+		}
+		if len(snapshot.Loops) != len(snapshot.Definition.Loops) {
+			return fmt.Errorf("legacy loop records do not match the definition")
+		}
+		for name, def := range snapshot.Definition.Loops {
+			l := snapshot.Loops[name]
+			if l == nil || def.MaxIterations < 1 || l.Iteration < 1 || l.ExtendedIterations < 0 {
+				return fmt.Errorf("invalid legacy loop record %q", name)
+			}
+		}
+		for id, t := range snapshot.Definition.Tasks {
+			if snapshot.Tasks[id] == nil {
+				return fmt.Errorf("missing legacy task %q", id)
+			}
+			if len(t.Control) > 0 {
+				return fmt.Errorf("task.control requires schema 4")
+			}
+		}
+		if len(snapshot.Decisions) > 0 || len(snapshot.LoopHistory) > 0 {
+			return fmt.Errorf("control state requires schema 4")
+		}
+	}
+	nested := snapshot.Definition.UsesIterationPaths()
 	switch {
 	case nested && snapshot.SchemaVersion < domain.WorkflowSnapshotNestedSchemaVersion:
 		return fmt.Errorf("definition declares nested loops but snapshot uses schema %d; nested executions require schema %d", snapshot.SchemaVersion, domain.WorkflowSnapshotNestedSchemaVersion)
@@ -239,11 +276,11 @@ func validateWorkflowSnapshot(snapshot *domain.WorkflowSnapshot) error {
 	}
 	// A done loop must not contain an unfinished child invocation.
 	for loopName, loop := range snapshot.Loops {
-		if loop == nil || loop.State != domain.WorkflowLoopDone {
+		if loop == nil || !loop.State.Settled() {
 			continue
 		}
 		for _, child := range snapshot.Definition.ChildLoops(loopName) {
-			if cl := snapshot.Loops[child]; cl != nil && cl.State != domain.WorkflowLoopDone {
+			if cl := snapshot.Loops[child]; cl != nil && !cl.State.Settled() {
 				return fmt.Errorf("loop %q is done but child loop %q is %s", loopName, child, cl.State)
 			}
 		}

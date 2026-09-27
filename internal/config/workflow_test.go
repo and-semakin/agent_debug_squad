@@ -133,8 +133,8 @@ func TestLoadRejectsMalformedWorkflowValues(t *testing.T) {
 		workflow string
 		wantErr  string
 	}{
-		{"wrong version", "workflow:\n  version: 2\n  name: x\n  max_parallel: 1\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "version must be 1"},
-		{"missing version", "workflow:\n  name: x\n  max_parallel: 1\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "version must be 1"},
+		{"wrong version", "workflow:\n  version: 3\n  name: x\n  max_parallel: 1\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "version must be 1 or 2"},
+		{"missing version", "workflow:\n  name: x\n  max_parallel: 1\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "version must be 1 or 2"},
 		{"empty name", "workflow:\n  version: 1\n  max_parallel: 1\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "name is required"},
 		{"zero max_parallel", "workflow:\n  version: 1\n  name: x\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "max_parallel"},
 		{"negative max_parallel", "workflow:\n  version: 1\n  name: x\n  max_parallel: -1\n  tasks:\n    a:\n      agent: reviewer_a\n      prompt: p\n", "max_parallel"},
@@ -263,7 +263,7 @@ func TestValidateWorkflowDefinitionAcceptsChainsAndDiamonds(t *testing.T) {
 }
 
 const validLoopYAML = `workflow:
-  version: 1
+  version: 2
   name: loop-review
   max_parallel: 1
   loops:
@@ -309,7 +309,7 @@ func TestLoadAcceptsSiblingLoopsAndOutsideDependencies(t *testing.T) {
 		{Name: "a5", Backend: "fake"},
 	}
 	siblings := domain.WorkflowDefinition{
-		Version: 1, Name: "siblings", MaxParallel: 2, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "siblings", MaxParallel: 2, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"left":  {MaxIterations: 2},
 			"right": {MaxIterations: 3},
@@ -366,7 +366,7 @@ func TestLoadRejectsInvalidLoopDefinitions(t *testing.T) {
 		{
 			name: "cross-loop dependency",
 			workflow: `workflow:
-  version: 1
+  version: 2
   name: crossed
   max_parallel: 1
   loops:
@@ -390,7 +390,7 @@ func TestLoadRejectsInvalidLoopDefinitions(t *testing.T) {
 		{
 			name: "cycle through loop boundary",
 			workflow: `workflow:
-  version: 1
+  version: 2
   name: boundary-cycle
   max_parallel: 1
   loops:
@@ -438,7 +438,7 @@ func TestLoadRejectsInvalidLoopDefinitions(t *testing.T) {
 func TestValidateRejectsBodyInternalCycleWithTaskError(t *testing.T) {
 	agents := []domain.AgentSpec{{Name: "a1", Backend: "fake"}, {Name: "a2", Backend: "fake"}}
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "self-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
+		Version: 2, Name: "self-cycle", MaxParallel: 1, TaskTimeoutSeconds: 60,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"a": {Agent: "a1", Prompt: "p", Loop: "refine", Needs: []string{"b"}},
@@ -458,6 +458,7 @@ func TestLoadExistingExampleConfigsStillLoad(t *testing.T) {
 		"../../examples/cursor-squad.yaml",
 		"../../examples/workflow-chain.yaml",
 		"../../examples/workflow-review.yaml",
+		"../../examples/workflow-queue.yaml",
 		"../../examples/workflow-loop.yaml",
 		"../../examples/workflow-loop-conditions.yaml",
 		"../../examples/workflow-nested-loop.yaml",

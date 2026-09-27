@@ -18,7 +18,10 @@ import (
 // for every nonnested execution (including recovered schema-1 state) so their
 // wire format is unchanged.
 func schemaVersionForDefinition(def domain.WorkflowDefinition) int {
-	if def.HasNesting() {
+	if def.Version == 2 {
+		return 4
+	}
+	if def.UsesIterationPaths() {
 		return domain.WorkflowSnapshotNestedSchemaVersion
 	}
 	return domain.WorkflowSnapshotNonNestedSchemaVersion
@@ -48,6 +51,14 @@ func initNestedLoopExecutions(def domain.WorkflowDefinition) map[string]*domain.
 	loops := make(map[string]*domain.WorkflowLoopExecution, len(def.Loops))
 	for _, name := range sortedLoopNames(def.Loops) {
 		loops[name] = &domain.WorkflowLoopExecution{Iteration: 1, State: domain.WorkflowLoopRunning}
+		if def.Version == 2 {
+			entered := def.Loops[name].Parent == ""
+			count := 0
+			if entered {
+				count = 1
+			}
+			loops[name].WorkflowLoopProgress = &domain.WorkflowLoopProgress{Entered: entered, IterationsStarted: count}
+		}
 	}
 	// Assign paths in dependency order: a loop's path needs its parent's path,
 	// so iterate until every loop is resolved (at most depth+1 passes).
@@ -208,6 +219,11 @@ func nestedPreviousIterationOutcomes(snapshot *domain.WorkflowSnapshot, loopName
 		if task == nil {
 			continue
 		}
+		if snapshot.Definition.Version == 2 {
+			path := exactOutcomePath(snapshot, snapshot.Definition.Tasks[taskID].Loop, summarizedPath)
+			entries = append(entries, outcomeAt(snapshot, taskID, path))
+			continue
+		}
 		attempt := lastCommittedAttemptUnderPrefix(task, summarizedPath)
 		if attempt == nil {
 			continue
@@ -278,7 +294,7 @@ func barrierLoopFor(def domain.WorkflowDefinition, consumerLoop, depLoop string)
 // keeps the legacy `waiting_loop:<name>` spelling; a nested execution names the
 // actual completion barrier by its current iteration path.
 func waitLoopReason(snapshot *domain.WorkflowSnapshot, barrierLoop string) string {
-	if snapshot.Definition.HasNesting() {
+	if snapshot.Definition.UsesIterationPaths() {
 		return "waiting_loop:" + domain.RenderIterationPath(loopCurrentPath(snapshot, barrierLoop))
 	}
 	return "waiting_loop:" + barrierLoop
