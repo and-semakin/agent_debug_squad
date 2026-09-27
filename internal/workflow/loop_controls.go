@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
@@ -98,6 +99,9 @@ func (m *Manager) ExtendLoop(executionID, loopName string, req ExtendRequest) (d
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: extend request id already used for another loop or amount", ErrLoopControlConflict)
 	}
 
+	if snapshot.LegacyLoops() {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: legacy loop execution is read-only; finish or cancel with the previous binary", ErrLoopControlConflict)
+	}
 	loop := snapshot.Loops[loopName]
 	if loop == nil {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: loop %q", ErrLoopNotFound, loopName)
@@ -105,7 +109,7 @@ func (m *Manager) ExtendLoop(executionID, loopName string, req ExtendRequest) (d
 	if snapshot.Mode == domain.WorkflowModeCancelling || snapshot.State.Terminal() {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: execution is %s", ErrLoopControlConflict, snapshot.State)
 	}
-	if loop.State == domain.WorkflowLoopDone {
+	if loop.State.Settled() {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: loop %q is done", ErrLoopControlConflict, loopName)
 	}
 
@@ -117,18 +121,24 @@ func (m *Manager) ExtendLoop(executionID, loopName string, req ExtendRequest) (d
 		return domain.WorkflowExecutionView{}, false, err
 	}
 	now := m.now()
+	if req.AddIterations > math.MaxInt-loop.EffectiveCap(snapshot.Definition.Loops[loopName].MaxIterations) {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: iteration cap overflow", ErrInvalidRequest)
+	}
 	updated.Loops[loopName].ExtendedIterations += req.AddIterations
 	event := domain.WorkflowControlEvent{
 		Type: "loop_extend", At: now, RequestID: req.RequestID,
 		Loop: loopName, Detail: amount,
 	}
-	if snapshot.Definition.HasNesting() {
+	if snapshot.Definition.UsesIterationPaths() {
 		// Extensions belong to the invocation current at serialization; record
 		// its path so replay after an ancestor advance cannot be mistaken for an
 		// effect on the new invocation.
 		event.IterationPath = loopCurrentPath(updated, loopName)
 	}
 	updated.Controls = append(updated.Controls, event)
+	if updated.Definition.Version == 2 {
+		settleV2Passes(updated)
+	}
 	updated.AttentionReasons = collectAttentionReasons(updated)
 	if len(updated.AttentionReasons) == 0 && !updated.State.Terminal() {
 		updated.State = stateForMode(updated)
@@ -179,6 +189,9 @@ func (m *Manager) StopLoop(executionID, loopName string, req StopRequest) (domai
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: stop request id already used for another loop", ErrLoopControlConflict)
 	}
 
+	if snapshot.LegacyLoops() {
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: legacy loop execution is read-only; finish or cancel with the previous binary", ErrLoopControlConflict)
+	}
 	loop := snapshot.Loops[loopName]
 	if loop == nil {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: loop %q", ErrLoopNotFound, loopName)
@@ -186,7 +199,7 @@ func (m *Manager) StopLoop(executionID, loopName string, req StopRequest) (domai
 	if snapshot.Mode == domain.WorkflowModeCancelling || snapshot.State.Terminal() {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: execution is %s", ErrLoopControlConflict, snapshot.State)
 	}
-	if loop.State == domain.WorkflowLoopDone {
+	if loop.State.Settled() {
 		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: loop %q is done", ErrLoopControlConflict, loopName)
 	}
 
@@ -203,7 +216,7 @@ func (m *Manager) StopLoop(executionID, loopName string, req StopRequest) (domai
 	event := domain.WorkflowControlEvent{
 		Type: "loop_stop", At: now, RequestID: req.RequestID, Loop: loopName,
 	}
-	if snapshot.Definition.HasNesting() {
+	if snapshot.Definition.UsesIterationPaths() {
 		// A nested stop binds to the invocation current at serialization and
 		// propagates to every currently unfinished descendant in the same saved
 		// transition: it never reaches ancestors or siblings, and it completes
@@ -213,7 +226,7 @@ func (m *Manager) StopLoop(executionID, loopName string, req StopRequest) (domai
 		event.IterationPath = loopCurrentPath(updated, loopName)
 		for _, desc := range childLoopsUnderParentAdvance(snapshot.Definition, loopName) {
 			dl := updated.Loops[desc]
-			if dl == nil || dl.State == domain.WorkflowLoopDone {
+			if dl == nil || dl.State.Settled() {
 				continue
 			}
 			dl.StopRequested = true
@@ -222,6 +235,9 @@ func (m *Manager) StopLoop(executionID, loopName string, req StopRequest) (domai
 	}
 	updated.Controls = append(updated.Controls, event)
 
+	if updated.Definition.Version == 2 {
+		settleV2Passes(updated)
+	}
 	updated.AttentionReasons = collectAttentionReasons(updated)
 	if len(updated.AttentionReasons) == 0 && !updated.State.Terminal() {
 		updated.State = stateForMode(updated)

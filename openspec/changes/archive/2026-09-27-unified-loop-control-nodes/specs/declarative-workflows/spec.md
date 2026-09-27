@@ -1,10 +1,6 @@
-# declarative-workflows Specification
+## MODIFIED Requirements
 
-## Purpose
-
-Execute declarative graphs of independent agent conversations with predictable dependency ordering, bounded parallelism, and explicit transfer of predecessor results.
-
-## Requirements
+Scenario titles inherited from the current main spec are retained as stable regression identifiers for OpenSpec replacement validation. In their updated scenario bodies, control means the version-2 task.control model; condition refers only to explicitly described legacy syntax/history.
 
 ### Requirement: Workflow definitions are validated before execution
 The system SHALL accept an optional YAML workflow with a nonempty name, positive integer max_parallel, and nonempty task map. New definitions with loops SHALL require version: 2. Loopless version: 1 definitions SHALL remain accepted with their existing identity and defaults; version 2 SHALL also accept loopless graphs. Unknown versions SHALL be rejected. Tasks SHALL declare nonempty agent and prompt, optional needs defaulting to an empty list, allowed_to_fail defaulting to false, min_successful_dependencies defaulting to zero, optional verdicts, optional direct-owner loop, and optional control. Workflow confidence_threshold SHALL remain greater than zero and at most one. Its effective value SHALL follow the existing verdict-judge precedence: explicit workflow threshold, otherwise the startup-loaded machine judge threshold, otherwise 0.7. Machine defaults SHALL remain outside saved definition identity, and omission SHALL remain omitted rather than materializing a default. on_uncertain SHALL remain needs_attention or error, default needs_attention.
@@ -215,17 +211,6 @@ After YAML syntax/type/duplicate-key checks, removed until_task/on_verdict diagn
 - **WHEN** an inner-owned control exists under an outer loop with no directly owned controls and all graph rules hold
 - **THEN** validation accepts; inner actions affect only inner and outer remains fixed-count
 
-### Requirement: Task conversations are isolated
-Every task attempt SHALL start a fresh backend conversation owned by its workflow execution, task, and attempt. It MUST NOT inherit another task's chat history, a manual agent conversation, or a previous execution's conversation. A retry SHALL also use a fresh conversation. Identical model/backend selections SHALL NOT imply a shared session. Dependency results SHALL be provided explicitly.
-
-#### Scenario: Matching model without matching context
-- **WHEN** two nodes using the same model run and a manual conversation for that model already exists
-- **THEN** all three conversations remain distinct and workflow nodes receive only their own instructions and declared dependency inputs
-
-#### Scenario: Subsequent execution
-- **WHEN** a completed definition is submitted again with a new request ID
-- **THEN** its nodes start fresh conversations and the previous execution's artifacts remain available
-
 ### Requirement: Program-driven scheduling respects the graph and limit
 After explicit workflow submission, the system SHALL schedule tasks without additional coordinator turns. It SHALL wait for all direct dependencies to settle before evaluating a dependent task. At most `max_parallel` task attempts SHALL be dispatched or running at once within the execution, counting permission waits and attempts whose cancellation has not completed. Ready-task ties SHALL use lexicographic task ID order. Completion order of concurrently executing tasks is not guaranteed. Backend-native subagents and independent manual runs are outside this limit. The system SHALL NOT detect file-write intent, impose workspace edit locks, or create worktrees.
 
@@ -280,21 +265,6 @@ A control-skipped producer SHALL be unavailable, not a tolerated failure or a su
 - **WHEN** a final-iteration producer was skipped by break and its outside dependent has threshold zero
 - **THEN** the dependent remains blocked with dependency_skipped and cannot receive an older result or an empty success
 
-### Requirement: Handoff is complete and bound to saved attempt results
-Before dispatch, the system SHALL save the exact task message and an input manifest containing every direct dependency in sorted task ID order, with task/agent/attempt/run identities, outcome, error when present, and successful result path, byte size, and content hash. It SHALL provide the manifest and readable local result references to the receiving agent, without sharing predecessor chat history. It MUST verify committed successful result files before dispatch, MUST NOT silently truncate them, and MUST hold execution for intervention if they are missing or changed. Partial output from a failed attempt SHALL NOT be represented as successful output. Agent response text MUST NOT modify the graph or scheduling policy.
-
-#### Scenario: Stable fan-in input
-- **WHEN** B and C complete in either order and D becomes ready
-- **THEN** D's saved manifest contains the same ordered dependency identities and references their exact successful attempt results
-
-#### Scenario: Missing committed result
-- **WHEN** a successful dependency's committed result file is removed or its contents change before consumer dispatch
-- **THEN** the workflow enters needs_attention and the consumer is not dispatched
-
-#### Scenario: Large responses
-- **WHEN** predecessor responses are too large to embed conveniently in the next prompt
-- **THEN** the complete saved responses remain readable through manifest paths without silent truncation
-
 ### Requirement: Success and timeouts have explicit boundaries
 A workflow task SHALL succeed only after its backend turn completes successfully, owned execution stops, a nonempty final response is saved, and the outcome is durably committed. An empty response SHALL produce a failed task with a missing-output reason. For a task that declares verdicts, the attempt SHALL additionally pass through a `judging` phase after the response is saved and SHALL settle only after its verdict is resolved; dependent tasks wait for that settlement. The task timeout SHALL NOT extend into the judging phase; judging is bounded by the judge's own decision timeout. The workflow SHALL have `task_timeout_seconds` defaulting to 1800 and tasks SHALL accept an optional positive `timeout_seconds` override. The timeout SHALL count wall time from dispatch, including permissions and backend subagents, excluding dependency/queue wait. Expiry SHALL cancel owned work and produce a failed timeout outcome only after cleanup is confirmed; uncertain cleanup SHALL produce interruption requiring intervention. The system SHALL NOT claim that a successful textual response proves substantive task correctness, and a resolved semantic verdict SHALL influence loop continuation only through the task's declared control mapping. Other tasks' semantic verdicts MUST NOT alter scheduling or dependency evaluation, and no declared verdict name has implicit intervention semantics. Existing classifier uncertainty and outage policies remain applicable.
 
@@ -317,48 +287,6 @@ A workflow task SHALL succeed only after its backend turn completes successfully
 #### Scenario: Verdict value does not drive scheduling
 - **WHEN** a verdict task without control settles with any declared verdict
 - **THEN** dependency evaluation, dispatch decisions, and the execution's final state are exactly those of the same definition without verdicts
-
-### Requirement: Reviewer quorum is an ordinary workflow
-The repository skill and examples SHALL demonstrate translating a familiar reviewer-quorum request into parallel reviewer tasks and a dependent verifier task without requiring the user to author YAML. The verifier SHALL be instructed to check evidence against code, deduplicate findings, align severity, produce the final report, and identify missing reviews. User-specified models, backends, and constraints SHALL be preserved. Optional reviewer failures and a positive success threshold SHALL be demonstrated explicitly. The Go service MUST NOT require a special review execution mode.
-
-#### Scenario: Familiar review request
-- **WHEN** a facilitator follows the skill for a request to run specified reviewers and rank findings
-- **THEN** it can prepare and submit an ordinary workflow, wait for completion, and deliver the verifier result without manually dispatching each dependency transition
-
-#### Scenario: No review results
-- **WHEN** every reviewer in the documented optional-reviewer example fails
-- **THEN** the positive threshold prevents a verifier report being presented as a completed review
-
-### Requirement: Ephemeral agents declare a one-shot lifecycle
-Agent definitions SHALL accept an optional boolean `ephemeral` field, defaulting to false. An ephemeral agent declares a one-shot execution model for workflows: every invocation — every task attempt, every retry, and any future repeated visit such as a loop iteration — MUST execute on a newly created runtime whose backend session starts empty, and MUST NOT inherit conversation history, backend session identity, or runtime state from any earlier invocation of that agent, whether within the same execution or another. The declaration SHALL be captured in the execution's immutable saved agent configuration at submission, SHALL participate in the definition identity used for idempotent replay, and MUST be preserved through recovery so a recovered execution keeps its original flag value. In this version the flag MUST NOT relax graph validation: one agent may still be referenced by at most one task. It MUST NOT alter facilitator-driven manual turns, which retain backend session continuity exactly as for non-ephemeral agents, and it MUST NOT change HTTP response shapes.
-
-#### Scenario: Declaration persists with the execution
-- **WHEN** a workflow referencing an agent configured with `ephemeral: true` is submitted
-- **THEN** the execution's saved agent configuration records the flag, and the persisted snapshot retains that value across recovery restarts
-
-#### Scenario: Flag participates in definition identity
-- **WHEN** the same request ID is resubmitted after the referenced agent's `ephemeral` value changed
-- **THEN** the submission is treated as a changed definition and rejected, rather than replayed as the original execution
-
-#### Scenario: Fresh runtime on every invocation
-- **WHEN** a task attempt of an ephemeral agent is dispatched, and later a retry of that task is dispatched
-- **THEN** each attempt runs on a new runtime whose backend session starts empty, with no conversation or session state carried between the attempts
-
-#### Scenario: Default preserves behavior
-- **WHEN** the `ephemeral` field is omitted or set to false
-- **THEN** configuration loading, graph validation, scheduling, and observable results are indistinguishable from the behavior without this field
-
-#### Scenario: One reference per task still enforced
-- **WHEN** a definition references the same ephemeral agent from two different tasks
-- **THEN** validation rejects the graph with the same reused-agent explanation as for non-ephemeral agents
-
-#### Scenario: Facilitator continuity unchanged
-- **WHEN** a facilitator sends consecutive manual turns to an agent declared ephemeral
-- **THEN** the manual conversation preserves backend session continuity exactly as it does for non-ephemeral agents
-
-#### Scenario: Non-boolean flag value is rejected
-- **WHEN** an agent definition sets `ephemeral` to a non-boolean value
-- **THEN** configuration loading fails with an actionable error and no workflow execution starts
 
 ### Requirement: Loop bodies re-arm for a bounded number of iterations
 A version-2 loop SHALL execute direct tasks and admitted child invocations in its current pass. Each task SHALL have at most one initial automatic attempt per complete iteration path. Each child invocation SHALL be confined to one parent pass. Ordinary settlement SHALL require direct tasks to succeed or fail tolerably and admitted child invocations to complete; pending, running, judging, interrupted, blocked or mandatory failed work SHALL prevent ordinary settlement. A committed break/continue SHALL instead close its pass using acceptable completed prefix outcomes and explicit control skips for its unstarted suffix.
@@ -641,6 +569,8 @@ Current paths SHALL match every current ancestor. The system MUST NOT infer miss
 - **WHEN** a terminal schema-3 history contains root-owned test, nested review and workflow-scope report
 - **THEN** read-only observation preserves root and nested paths and report path omission; active schema-3 loop recovery is unsupported
 
+## ADDED Requirements
+
 ### Requirement: Control tasks form complete phase barriers
 For every loop scope, the projected DAG SHALL contain its directly owned tasks and each immediate child subtree as one vertex, with projected dependency edges between distinct vertices. For each directly owned control c, every other vertex SHALL be either a strict dependency ancestor or a strict dependency descendant of c using paths inside that scope. Incomparable vertices SHALL cause rejection even with max_parallel one. All directly owned controls SHALL therefore be totally ordered by reachability. Recursive boundary-cycle checks SHALL apply before this rule, including edges crossing grandchildren.
 
@@ -710,3 +640,9 @@ Skipping an unadmitted child SHALL recursively record every unadmitted descendan
 #### Scenario: Break skips child and grandchild invocations
 - **WHEN** outer at iteration 2 breaks before child and its grandchild are admitted
 - **THEN** child is skipped at outer=2/child=1 and grandchild at outer=2/child=1/grandchild=1, both entered false with iterations_started zero and no attempts
+
+## REMOVED Requirements
+
+### Requirement: Loop conditions evaluate settled verdicts
+**Reason**: Terminal-only until_task/on_verdict is replaced by ordered task-local control barriers.
+**Migration**: Use workflow version 2 and move the old on_verdict map to the directly owned task.control; preserve needs/caps and review early-exit result availability. Saved executions follow the explicit legacy recovery boundary.

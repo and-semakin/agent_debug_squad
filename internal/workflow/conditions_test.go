@@ -20,15 +20,10 @@ import (
 // onExhaustion is "" (default needs_attention) or "succeed".
 func conditionedLoopDefinition(maxIterations int, onExhaustion string) domain.WorkflowDefinition {
 	return domain.WorkflowDefinition{
-		Version: 1, Name: "loop-conditions", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "loop-conditions", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {
 			MaxIterations: maxIterations,
-			UntilTask:     "review",
-			OnVerdict: map[string]string{
-				"review_passed": domain.WorkflowLoopActionBreak,
-				"issues_found":  domain.WorkflowLoopActionContinue,
-				"needs_human":   domain.WorkflowLoopActionNeedsAttention,
-			},
+
 			OnExhaustion: onExhaustion,
 		}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
@@ -38,7 +33,12 @@ func conditionedLoopDefinition(maxIterations int, onExhaustion string) domain.Wo
 					"review_passed": "clean",
 					"issues_found":  "issues remain",
 					"needs_human":   "escalate",
-				}},
+				}, Control: map[string]string{
+					"review_passed": domain.WorkflowLoopActionBreak,
+					"issues_found":  domain.WorkflowLoopActionContinue,
+					"needs_human":   domain.WorkflowLoopActionNeedsAttention,
+				},
+			},
 			"report": {Agent: "a3", Prompt: "Report.", Needs: []string{"review"}},
 		},
 	}
@@ -147,7 +147,7 @@ func TestStaticLoopViewCarriesNoConditionFields(t *testing.T) {
 	}
 	view := mustView2(t, fx)
 	loop := view.Loops[0]
-	if loop.UntilTask != "" || loop.LastConditionVerdict != "" || loop.EffectiveMaxIterations != 0 || loop.StopRequested {
+	if loop.UntilTask != "" || loop.LastConditionVerdict != "" || loop.EffectiveMaxIterations != loop.MaxIterations || loop.StopRequested {
 		t.Fatalf("static-loop views must stay byte-identical: %+v", loop)
 	}
 }
@@ -166,7 +166,7 @@ func TestConditionNeedsAttentionHoldsAndOverrideRedirectsToBreak(t *testing.T) {
 	if view.State != domain.WorkflowNeedsAttention {
 		t.Fatalf("needs_attention action must hold: %v", view.State)
 	}
-	if !hasReason(view, "loop_attention:refine:1:review:needs_human") {
+	if !hasReason(view, "loop_attention:refine=1:review:needs_human") {
 		t.Fatalf("hold reason must name loop/iteration/task/verdict: %v", view.AttentionReasons)
 	}
 	if view.Loops[0].Iteration != 1 || view.Loops[0].State != domain.WorkflowLoopNeedsAttention {
@@ -237,7 +237,7 @@ func TestConditionFailureHoldsForRetryWithoutAdvancing(t *testing.T) {
 	if view.State != domain.WorkflowNeedsAttention {
 		t.Fatalf("a failed condition task must hold for attention: %v", view.State)
 	}
-	if !hasReason(view, "loop_failure:refine:1:review:retry_or_cancel") {
+	if !hasReason(view, "loop_failure:refine=1:review:retry_or_cancel") {
 		t.Fatalf("failure must hold via loop_failure, not a condition action: %v", view.AttentionReasons)
 	}
 	if hasReason(view, "loop_attention:refine") || hasReason(view, "loop_exhausted:refine") {
@@ -288,7 +288,7 @@ func TestConditionUncertainAsErrorHoldsWithoutLookup(t *testing.T) {
 		t.Fatalf("uncertain failure must carry the synthetic reserved verdict: %+v", attempt.Verdict)
 	}
 	view := mustView2(t, fx.managerFixture)
-	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_failure:refine:1:review") {
+	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_failure:refine=1:review") {
 		t.Fatalf("a mandatory uncertain condition must hold via loop_failure: %v (%v)", view.State, view.AttentionReasons)
 	}
 	// The synthetic "uncertain" value must not be resolved against on_verdict as a
@@ -312,7 +312,7 @@ func TestExhaustionNeedsAttentionHoldsAtCapWithExtendGuidance(t *testing.T) {
 	fx.pump()
 
 	view := mustView2(t, fx.managerFixture)
-	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_exhausted:refine:1:extend_or_stop_or_cancel") {
+	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_exhausted:refine=1:extend_or_stop_or_cancel") {
 		t.Fatalf("default exhaustion must hold with extend/stop guidance: %v (%v)", view.State, view.AttentionReasons)
 	}
 	if view.Loops[0].State != domain.WorkflowLoopNeedsAttention {
@@ -330,7 +330,7 @@ func TestNeedsAttentionActionWinsOverExhaustionAtCap(t *testing.T) {
 	runIteration(t, fx, queue, "needs_human")
 	fx.pump()
 	view := mustView2(t, fx.managerFixture)
-	if !hasReason(view, "loop_attention:refine:1:review:needs_human") || hasReason(view, "loop_exhausted:") {
+	if !hasReason(view, "loop_attention:refine=1:review:needs_human") || hasReason(view, "loop_exhausted:") {
 		t.Fatalf("needs_attention action must take precedence over succeed exhaustion: %v", view.AttentionReasons)
 	}
 }
@@ -347,7 +347,7 @@ func TestExhaustionSucceedCompletesAtCapPreservingVerdict(t *testing.T) {
 	if view.Loops[0].State != domain.WorkflowLoopDone {
 		t.Fatalf("succeed exhaustion must complete the loop: %+v", view.Loops[0])
 	}
-	if view.Loops[0].LastConditionVerdict != "issues_found" {
+	if len(view.Decisions) != 1 || view.Decisions[0].Verdict.Value != "issues_found" {
 		t.Fatalf("succeed must preserve the condition verdict: %+v", view.Loops[0])
 	}
 	if len(fx.exec.liveRunIDs()) != 1 {
@@ -364,7 +364,7 @@ func TestExtendReleasesExhaustionHoldAndIsIdempotent(t *testing.T) {
 	}
 	runIteration(t, fx, queue, "issues_found")
 	fx.pump()
-	if view := mustView2(t, fx.managerFixture); !hasReason(view, "loop_exhausted:refine:1") {
+	if view := mustView2(t, fx.managerFixture); !hasReason(view, "loop_exhausted:refine=1") {
 		t.Fatalf("precondition: exhaustion hold expected: %v", view.AttentionReasons)
 	}
 
@@ -500,7 +500,7 @@ func TestExtendSaveFailureLeavesNoPhantomEffect(t *testing.T) {
 	fx.st.mu.Unlock()
 
 	// The failed attempt must not have raised the live cap or left a replay record.
-	if view := mustView2(t, fx); view.Loops[0].EffectiveMaxIterations != 0 {
+	if view := mustView2(t, fx); view.Loops[0].EffectiveMaxIterations != 1 {
 		t.Fatalf("a failed extend must leave no in-memory cap increase: %+v", view.Loops[0])
 	}
 	// Replaying the same request is now treated as new and succeeds durably.
@@ -591,15 +591,16 @@ func TestStopFinishesCurrentIterationWithoutAnother(t *testing.T) {
 
 func TestStopResolvesOwnExhaustionHoldDespiteSiblingHold(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "sibling-holds", MaxParallel: 2, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "sibling-holds", MaxParallel: 2, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{
-			"left": {MaxIterations: 1, UntilTask: "lreview", OnVerdict: map[string]string{
-				"pass": domain.WorkflowLoopActionBreak, "again": domain.WorkflowLoopActionContinue}},
+			"left":  {MaxIterations: 1},
 			"right": {MaxIterations: 1},
 		},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
-			"limpl":   {Agent: "a1", Prompt: "p", Loop: "left"},
-			"lreview": {Agent: "a2", Prompt: "review", Loop: "left", Needs: []string{"limpl"}, Verdicts: map[string]string{"pass": "", "again": ""}},
+			"limpl": {Agent: "a1", Prompt: "p", Loop: "left"},
+			"lreview": {Agent: "a2", Prompt: "review", Loop: "left", Needs: []string{"limpl"}, Verdicts: map[string]string{"pass": "", "again": ""}, Control: map[string]string{
+				"pass": domain.WorkflowLoopActionBreak, "again": domain.WorkflowLoopActionContinue},
+			},
 			"rfailer": {Agent: "a3", Prompt: "p", Loop: "right"},
 		},
 	}
@@ -618,7 +619,7 @@ func TestStopResolvesOwnExhaustionHoldDespiteSiblingHold(t *testing.T) {
 	fx.exec.releaseSuccess(mustFindRunForTask(t, fx.managerFixture, "lreview"), "review")
 	if !fx.pumpUntil(3*time.Second, func() bool {
 		view, _ := fx.m.View("wf_000001")
-		return hasReason(view, "loop_exhausted:left:1")
+		return hasReason(view, "loop_exhausted:left=1")
 	}) {
 		t.Fatalf("left loop must exhaust: %v", mustView2(t, fx.managerFixture).AttentionReasons)
 	}
@@ -626,7 +627,7 @@ func TestStopResolvesOwnExhaustionHoldDespiteSiblingHold(t *testing.T) {
 	fx.pump()
 	if !fx.pumpUntil(3*time.Second, func() bool {
 		view, _ := fx.m.View("wf_000001")
-		return hasReason(view, "loop_exhausted:left:1") && hasReason(view, "loop_failure:right:1:rfailer")
+		return hasReason(view, "loop_exhausted:left=1") && hasReason(view, "loop_failure:right=1:rfailer")
 	}) {
 		t.Fatalf("both loops must hold simultaneously: %v", mustView2(t, fx.managerFixture).AttentionReasons)
 	}
@@ -662,16 +663,17 @@ func loopIndex(view domain.WorkflowExecutionView, name string) int {
 
 func TestRetryPermittedUnderConditionHolds(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "retry-under-hold", MaxParallel: 2, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "retry-under-hold", MaxParallel: 2, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"broken": {MaxIterations: 2},
-			"held": {MaxIterations: 1, UntilTask: "hreview", OnVerdict: map[string]string{
-				"again": domain.WorkflowLoopActionContinue, "done": domain.WorkflowLoopActionBreak}},
+			"held":   {MaxIterations: 1},
 		},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
-			"failer":  {Agent: "a1", Prompt: "p", Loop: "broken"},
-			"himpl":   {Agent: "a2", Prompt: "p", Loop: "held"},
-			"hreview": {Agent: "a3", Prompt: "review", Loop: "held", Needs: []string{"himpl"}, Verdicts: map[string]string{"again": "", "done": ""}},
+			"failer": {Agent: "a1", Prompt: "p", Loop: "broken"},
+			"himpl":  {Agent: "a2", Prompt: "p", Loop: "held"},
+			"hreview": {Agent: "a3", Prompt: "review", Loop: "held", Needs: []string{"himpl"}, Verdicts: map[string]string{"again": "", "done": ""}, Control: map[string]string{
+				"again": domain.WorkflowLoopActionContinue, "done": domain.WorkflowLoopActionBreak},
+			},
 		},
 	}
 	fx := newJudgedFixture(t, def, "a1", "a2", "a3")
@@ -720,7 +722,7 @@ func TestConditionedLoopViewsExposeConditionState(t *testing.T) {
 
 	view := mustView2(t, fx.managerFixture)
 	loop := view.Loops[0]
-	if loop.UntilTask != "review" || loop.EffectiveMaxIterations != 1 || loop.LastConditionVerdict != "issues_found" {
+	if len(loop.ControlTasks) != 1 || loop.ControlTasks[0] != "review" || loop.IterationsStarted != 1 || len(view.Decisions) != 1 || view.Decisions[0].Verdict.Value != "issues_found" {
 		t.Fatalf("held-on-exhaustion view: %+v", loop)
 	}
 	if _, _, err := fx.m.ExtendLoop("wf_000001", "refine", ExtendRequest{RequestID: "ext-v", AddIterations: 1}); err != nil {
@@ -754,12 +756,12 @@ func TestRecoveryReDerivesConditionHoldWithoutDispatch(t *testing.T) {
 	var view domain.WorkflowExecutionView
 	for time.Now().Before(deadline) {
 		view, _ = second.m.View("wf_000001")
-		if view.State == domain.WorkflowNeedsAttention && hasReason(view, "loop_attention:refine:1:review:needs_human") {
+		if view.State == domain.WorkflowNeedsAttention && hasReason(view, "loop_attention:refine=1:review:needs_human") {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_attention:refine:1:review:needs_human") {
+	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_attention:refine=1:review:needs_human") {
 		t.Fatalf("recovery must re-derive the condition hold: %v (%v)", view.State, view.AttentionReasons)
 	}
 	if got := len(second.exec.dispatched()); got != 0 {

@@ -620,3 +620,40 @@ func TestWorkflowLoopStopRoute(t *testing.T) {
 		t.Fatalf("missing request id status = %d", rr.Code)
 	}
 }
+
+func TestWorkflowV2ObservationPreservesSkipAndDecisionIdentity(t *testing.T) {
+	path := []domain.IterationEntry{{Loop: "queue", Iteration: 1}}
+	view := domain.WorkflowExecutionView{ExecutionID: "wf_000001", State: domain.WorkflowSucceeded, TaskCounts: domain.WorkflowTaskCounts{Skipped: 1},
+		Tasks:     []domain.WorkflowTaskView{{TaskID: "review", State: domain.WorkflowTaskSkipped, Attempts: []domain.WorkflowAttemptView{}, Skips: []domain.WorkflowTaskSkip{{IterationPath: path, Reason: "loop_break", DecisionID: "lcd_1"}}, ResultUnavailableReason: "loop_break:lcd_1"}},
+		Loops:     []domain.WorkflowLoopView{{Name: "queue", Iteration: 1, IterationPath: path, State: domain.WorkflowLoopDone, ControlTasks: []string{"select"}, WorkflowLoopProgress: &domain.WorkflowLoopProgress{Entered: true, Admitted: true, IterationsStarted: 1, Closed: true, CloseReason: "break", DecisionID: "lcd_1"}}},
+		Decisions: []domain.WorkflowControlDecision{{ID: "lcd_1", TaskID: "select", Attempt: 1, OutcomeRevision: 1, IterationPath: path, MappedAction: "break", EffectiveAction: "break", Status: "closed"}},
+	}
+	wf := &scriptedWorkflows{view: map[string]domain.WorkflowExecutionView{"wf_000001": view}, waitView: view}
+	srv := newWorkflowTestServer(t, wf)
+	for _, url := range []string{"/workflows/wf_000001", "/workflows/wf_000001?wait=1"} {
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, url, nil))
+		if rr.Code != 200 {
+			t.Fatalf("%s: %d %s", url, rr.Code, rr.Body.String())
+		}
+		var wire map[string]json.RawMessage
+		if e := json.Unmarshal(rr.Body.Bytes(), &wire); e != nil {
+			t.Fatal(e)
+		}
+		// The route envelope varies between observation and wait only in timing;
+		// both must retain the skip's causal identity and omit fabricated outcomes.
+		body := rr.Body.String()
+		for _, want := range []string{`"skipped":1`, `"decision_id":"lcd_1"`, `"iterations_started":1`, `"control_tasks":["select"]`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("missing %s: %s", want, body)
+			}
+		}
+		var tasks []map[string]json.RawMessage
+		if e := json.Unmarshal(wire["tasks"], &tasks); e != nil {
+			t.Fatal(e)
+		}
+		if _, ok := tasks[0]["result"]; ok {
+			t.Fatal("skipped task returned a result")
+		}
+	}
+}

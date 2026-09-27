@@ -56,7 +56,7 @@ func runnableAgents(snapshot *domain.WorkflowSnapshot) []string {
 		unfinished := false
 		for _, loopName := range def.LoopAncestry(taskDef.Loop) {
 			loop := snapshot.Loops[loopName]
-			if loop == nil || loop.State != domain.WorkflowLoopDone {
+			if loop == nil || !loop.State.Settled() {
 				unfinished = true
 				break
 			}
@@ -133,8 +133,12 @@ func (m *Manager) preflightTargetFailureLocked(snapshot *domain.WorkflowSnapshot
 	if !errors.As(err, &report) || report.Report == nil {
 		return
 	}
-	issues := make([]domain.PreflightIssue, 0, len(report.Report.Issues)+len(snapshot.BackendPreflight.Issues))
-	for _, issue := range snapshot.BackendPreflight.Issues {
+	var previous []domain.PreflightIssue
+	if snapshot.BackendPreflight != nil {
+		previous = snapshot.BackendPreflight.Issues
+	}
+	issues := make([]domain.PreflightIssue, 0, len(report.Report.Issues)+len(previous))
+	for _, issue := range previous {
 		for _, agent := range issue.Agents {
 			if agent != target {
 				issues = append(issues, issue)

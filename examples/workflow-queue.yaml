@@ -1,0 +1,47 @@
+# A head selector, parallel reviews, and a tail consolidation control.
+# An empty queue skips both reviews and consolidation without backend attempts.
+# The final report consumes select, because the final reviews may be skipped.
+session_name: workflow-queue
+workspace_dir: .
+defaults:
+  yolo: false
+agents:
+  - {name: selector, backend: fake, startup_prompt: "Select one MR or report an empty queue."}
+  - {name: correctness, backend: fake, startup_prompt: "Review correctness."}
+  - {name: security, backend: fake, startup_prompt: "Review security."}
+  - {name: consolidator, backend: fake, startup_prompt: "Consolidate both reviews."}
+  - {name: reporter, backend: fake, startup_prompt: "Report queue status."}
+workflow:
+  version: 2
+  name: review-queue
+  max_parallel: 2
+  loops:
+    queue: {max_iterations: 10}
+  tasks:
+    select:
+      agent: selector
+      loop: queue
+      prompt: "Select the next unreviewed MR; use prior-pass outcomes to track progress."
+      verdicts: {ready: "One MR selected", empty: "Queue finished", human: "Human decision required"}
+      control: {ready: proceed, empty: break, human: needs_attention}
+    correctness:
+      agent: correctness
+      loop: queue
+      needs: [select]
+      prompt: "Review the selected MR for correctness."
+    security:
+      agent: security
+      loop: queue
+      needs: [select]
+      prompt: "Review the selected MR for security."
+    consolidate:
+      agent: consolidator
+      loop: queue
+      needs: [correctness, security]
+      prompt: "Consolidate findings; continue to the next MR unless human input is required."
+      verdicts: {next: "Review complete", human: "Human decision required"}
+      control: {next: continue, human: needs_attention}
+    report:
+      agent: reporter
+      needs: [select]
+      prompt: "Summarize the final selector outcome."

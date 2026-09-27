@@ -23,7 +23,7 @@ agents:
     backend: fake
     startup_prompt: "Summarize the final outcome for the user."
 workflow:
-  version: 1
+  version: 2
   name: refine-loop
   max_parallel: 1
   task_timeout_seconds: 1800

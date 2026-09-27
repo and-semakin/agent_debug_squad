@@ -4,12 +4,11 @@ import "time"
 
 const (
 	// WorkflowDefinitionVersion is the version of a resolved workflow YAML
-	// definition. Loops are additive, so the definition version stays 1.
-	WorkflowDefinitionVersion = 1
+	// definition. Version 2 introduces task-owned loop controls.
+	WorkflowDefinitionVersion = 2
 	// WorkflowSnapshotSchemaVersion is the newest persisted snapshot layout
-	// this binary writes. Version 3 adds nested-loop iteration paths; it is
-	// selected only for executions whose definition declares a loop parent.
-	WorkflowSnapshotSchemaVersion = 3
+	// this binary writes. Version 4 is required by all version-2 definitions.
+	WorkflowSnapshotSchemaVersion = 4
 	// WorkflowSnapshotNonNestedSchemaVersion is the layout written for newly
 	// saved executions without nesting, matching the pre-nesting wire format.
 	WorkflowSnapshotNonNestedSchemaVersion = 2
@@ -41,6 +40,7 @@ const (
 // Loop condition actions: the mapped meaning of a condition verdict at an
 // acceptable iteration settlement.
 const (
+	WorkflowLoopActionProceed        = "proceed"
 	WorkflowLoopActionBreak          = "break"
 	WorkflowLoopActionContinue       = "continue"
 	WorkflowLoopActionNeedsAttention = "needs_attention"
@@ -103,11 +103,13 @@ const (
 	WorkflowLoopRunning        WorkflowLoopState = "running"
 	WorkflowLoopNeedsAttention WorkflowLoopState = "needs_attention"
 	WorkflowLoopDone           WorkflowLoopState = "done"
+	WorkflowLoopSkipped        WorkflowLoopState = "skipped"
 )
 
 type WorkflowTaskState string
 
 const (
+	WorkflowTaskSkipped     WorkflowTaskState = "skipped"
 	WorkflowTaskPending     WorkflowTaskState = "pending"
 	WorkflowTaskReady       WorkflowTaskState = "ready"
 	WorkflowTaskDispatching WorkflowTaskState = "dispatching"
@@ -121,7 +123,7 @@ const (
 
 func (s WorkflowTaskState) Settled() bool {
 	switch s {
-	case WorkflowTaskSucceeded, WorkflowTaskFailed, WorkflowTaskBlocked, WorkflowTaskCancelled:
+	case WorkflowTaskSkipped, WorkflowTaskSucceeded, WorkflowTaskFailed, WorkflowTaskBlocked, WorkflowTaskCancelled:
 		return true
 	default:
 		return false
@@ -205,15 +207,12 @@ type WorkflowTaskDefinition struct {
 	// map routes completed attempts through the judging phase. Unset must
 	// marshal identically to tasks parsed before verdicts existed.
 	Verdicts map[string]string `json:"verdicts,omitempty" yaml:"-"`
+	Control  map[string]string `json:"control,omitempty" yaml:"-"`
 }
 
-// WorkflowLoopDefinition is a bounded loop: exactly MaxIterations is required
-// and must be positive. Condition fields are optional; a loop with none of
-// them stays fully static. When present, UntilTask names the loop's single
-// condition task (the unique body sink), OnVerdict maps each of its declared
-// verdicts to a continuation action, and OnExhaustion selects the policy for a
-// continue action at the effective cap. Unset condition fields must marshal
-// byte-identically to definitions parsed before conditions existed.
+// WorkflowLoopDefinition declares a bounded invocation and optional parent.
+// UntilTask and OnVerdict exist only for decoding/hashing read-only legacy
+// snapshots; new definitions are rejected if either field is present.
 type WorkflowLoopDefinition struct {
 	MaxIterations int `json:"max_iterations" yaml:"max_iterations"`
 	// Parent names the enclosing declared loop; it is parsed from YAML with a
@@ -269,6 +268,8 @@ type WorkflowSnapshot struct {
 	// Loops is the runtime state of each declared loop, keyed by loop name.
 	// Absent for loopless executions, including those loaded from schema 1.
 	Loops         map[string]*WorkflowLoopExecution `json:"loops,omitempty"`
+	Decisions     []WorkflowControlDecision         `json:"decisions,omitempty"`
+	LoopHistory   []WorkflowLoopHistory             `json:"loop_history,omitempty"`
 	NextRunSeq    int                               `json:"next_run_seq"`
 	RetryRequests map[string]WorkflowRetryRecord    `json:"retry_requests,omitempty"`
 	Controls      []WorkflowControlEvent            `json:"controls,omitempty"`
@@ -282,11 +283,12 @@ type WorkflowSnapshot struct {
 }
 
 type WorkflowTaskExecution struct {
-	TaskID        string            `json:"task_id"`
-	Agent         string            `json:"agent"`
-	State         WorkflowTaskState `json:"state"`
-	BlockedReason string            `json:"blocked_reason,omitempty"`
-	Attempts      []WorkflowAttempt `json:"attempts"`
+	TaskID        string             `json:"task_id"`
+	Agent         string             `json:"agent"`
+	State         WorkflowTaskState  `json:"state"`
+	BlockedReason string             `json:"blocked_reason,omitempty"`
+	Attempts      []WorkflowAttempt  `json:"attempts"`
+	Skips         []WorkflowTaskSkip `json:"skips,omitempty"`
 }
 
 func (t *WorkflowTaskExecution) LastAttempt() *WorkflowAttempt {
@@ -302,6 +304,7 @@ func (t *WorkflowTaskExecution) LastAttempt() *WorkflowAttempt {
 // counter and stop flag are additive (omitempty) so pre-condition snapshots
 // and static loops persist byte-identically.
 type WorkflowLoopExecution struct {
+	*WorkflowLoopProgress
 	Iteration int               `json:"iteration"`
 	State     WorkflowLoopState `json:"state"`
 	// IterationPath is the complete root-to-owner path of this loop's current
@@ -442,14 +445,16 @@ type WorkflowAncestorIteration struct {
 type WorkflowDependencyInput struct {
 	TaskID    string `json:"task_id"`
 	Agent     string `json:"agent"`
-	Attempt   int    `json:"attempt"`
+	Attempt   int    `json:"attempt,omitempty"`
 	Iteration int    `json:"iteration,omitempty"`
 	// IterationPath is the complete root-to-owner path of the referenced
 	// producer attempt in a nested (schema 3) execution, including a one-entry
 	// path for a root-owned producer. It is omitted for workflow-scope
 	// producers and for every entry in a nonnested execution.
 	IterationPath []IterationEntry `json:"iteration_path,omitempty"`
-	RunID         string           `json:"run_id"`
+	RunID         string           `json:"run_id,omitempty"`
+	DecisionID    string           `json:"decision_id,omitempty"`
+	Reason        string           `json:"reason,omitempty"`
 	Status        string           `json:"status"`
 	Error         string           `json:"error,omitempty"`
 	Verdict       *AttemptVerdict  `json:"verdict,omitempty"`
@@ -508,15 +513,18 @@ type WorkflowAttemptView struct {
 }
 
 type WorkflowTaskView struct {
-	TaskID        string                `json:"task_id"`
-	Agent         string                `json:"agent"`
-	State         WorkflowTaskState     `json:"state"`
-	BlockedReason string                `json:"blocked_reason,omitempty"`
-	Attempts      []WorkflowAttemptView `json:"attempts"`
-	Result        *WorkflowResultRef    `json:"result,omitempty"`
+	Skips                   []WorkflowTaskSkip    `json:"skips,omitempty"`
+	ResultUnavailableReason string                `json:"result_unavailable_reason,omitempty"`
+	TaskID                  string                `json:"task_id"`
+	Agent                   string                `json:"agent"`
+	State                   WorkflowTaskState     `json:"state"`
+	BlockedReason           string                `json:"blocked_reason,omitempty"`
+	Attempts                []WorkflowAttemptView `json:"attempts"`
+	Result                  *WorkflowResultRef    `json:"result,omitempty"`
 }
 
 type WorkflowTaskCounts struct {
+	Skipped     int `json:"skipped,omitempty"`
 	Pending     int `json:"pending"`
 	Ready       int `json:"ready"`
 	Active      int `json:"active"`
@@ -538,6 +546,8 @@ type WorkflowPendingPermission struct {
 // fields are populated only for conditioned or extended loops so static-loop
 // views remain byte-identical to pre-condition releases.
 type WorkflowLoopView struct {
+	*WorkflowLoopProgress
+	ControlTasks  []string          `json:"control_tasks,omitempty"`
 	Name          string            `json:"name"`
 	Iteration     int               `json:"iteration"`
 	MaxIterations int               `json:"max_iterations"`
@@ -571,22 +581,26 @@ type BackendPreflightView struct {
 }
 
 type WorkflowExecutionView struct {
-	ExecutionID        string                      `json:"execution_id"`
-	Definition         WorkflowDefinition          `json:"definition"`
-	DefinitionHash     string                      `json:"definition_hash"`
-	RequestID          string                      `json:"request_id"`
-	Revision           int64                       `json:"revision"`
-	State              WorkflowState               `json:"state"`
-	Mode               WorkflowMode                `json:"mode"`
-	AttentionReasons   []string                    `json:"attention_reasons,omitempty"`
-	LastError          *string                     `json:"last_error,omitempty"`
-	BackendPreflight   *BackendPreflightView       `json:"backend_preflight,omitempty"`
-	TaskCounts         WorkflowTaskCounts          `json:"task_counts"`
-	Tasks              []WorkflowTaskView          `json:"tasks"`
-	Loops              []WorkflowLoopView          `json:"loops,omitempty"`
-	PendingPermissions []WorkflowPendingPermission `json:"pending_permissions,omitempty"`
-	CreatedAt          time.Time                   `json:"created_at"`
-	UpdatedAt          time.Time                   `json:"updated_at"`
+	CompatibilityGuidance string                      `json:"compatibility_guidance,omitempty"`
+	Decisions             []WorkflowControlDecision   `json:"decisions,omitempty"`
+	LoopHistory           []WorkflowLoopHistory       `json:"loop_history,omitempty"`
+	ExecutionSupported    *bool                       `json:"execution_supported,omitempty"`
+	ExecutionID           string                      `json:"execution_id"`
+	Definition            WorkflowDefinition          `json:"definition"`
+	DefinitionHash        string                      `json:"definition_hash"`
+	RequestID             string                      `json:"request_id"`
+	Revision              int64                       `json:"revision"`
+	State                 WorkflowState               `json:"state"`
+	Mode                  WorkflowMode                `json:"mode"`
+	AttentionReasons      []string                    `json:"attention_reasons,omitempty"`
+	LastError             *string                     `json:"last_error,omitempty"`
+	BackendPreflight      *BackendPreflightView       `json:"backend_preflight,omitempty"`
+	TaskCounts            WorkflowTaskCounts          `json:"task_counts"`
+	Tasks                 []WorkflowTaskView          `json:"tasks"`
+	Loops                 []WorkflowLoopView          `json:"loops,omitempty"`
+	PendingPermissions    []WorkflowPendingPermission `json:"pending_permissions,omitempty"`
+	CreatedAt             time.Time                   `json:"created_at"`
+	UpdatedAt             time.Time                   `json:"updated_at"`
 }
 
 type WorkflowExecutionSummary struct {

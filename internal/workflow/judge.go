@@ -183,6 +183,16 @@ func (m *Manager) settleVerdictLocked(snapshot *domain.WorkflowSnapshot, task *d
 			return
 		}
 	}
+	if snapshot.Definition.Version == 2 {
+		updated, err := cloneWorkflowSnapshot(snapshot)
+		if err != nil {
+			m.setStorageErrorLocked(err)
+			return
+		}
+		snapshot = updated
+		task = snapshot.Tasks[task.TaskID]
+		attempt = findAttempt(snapshot, task.TaskID, attempt.Attempt)
+	}
 	now := m.now()
 	attempt.State = domain.WorkflowAttemptSucceeded
 	attempt.Reason = ""
@@ -196,6 +206,17 @@ func (m *Manager) settleVerdictLocked(snapshot *domain.WorkflowSnapshot, task *d
 		Source:        verdictSourceJudge,
 		Truncated:     j.truncated,
 		JudgedAt:      now,
+	}
+	if snapshot.Definition.Version == 2 {
+		if err := applyTaskControl(snapshot, task.TaskID, attempt, now); err != nil {
+			m.setStorageErrorLocked(err)
+			return
+		}
+		if err := m.commitControlLocked(snapshot.ExecutionID, snapshot); err != nil {
+			return
+		}
+		m.Notify()
+		return
 	}
 	snapshot.Revision++
 	snapshot.UpdatedAt = now

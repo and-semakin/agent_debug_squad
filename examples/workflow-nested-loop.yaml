@@ -42,7 +42,7 @@ agents:
     backend: fake
     startup_prompt: "Confirm the delivery is complete; end with exactly one verdict."
 workflow:
-  version: 1
+  version: 2
   name: nested-delivery
   max_parallel: 1
   task_timeout_seconds: 1800
@@ -51,10 +51,6 @@ workflow:
     review_loop:
       max_iterations: 3
       parent: test_loop
-      until_task: consolidate
-      on_verdict:
-        ready: break
-        revise: continue
       on_exhaustion: needs_attention
     # Middle loop: run the review subtree, then test it. A `failed` verdict is a
     # negative verdict that re-arms the loop (re-running the whole inner review
@@ -62,18 +58,10 @@ workflow:
     test_loop:
       max_iterations: 2
       parent: delivery_loop
-      until_task: test
-      on_verdict:
-        passed: break
-        failed: continue
       on_exhaustion: needs_attention
     # Root loop: gate final acceptance on the test result for this delivery.
     delivery_loop:
       max_iterations: 2
-      until_task: accept
-      on_verdict:
-        accepted: break
-        reject: continue
       on_exhaustion: needs_attention
   tasks:
     implement:
@@ -88,6 +76,9 @@ workflow:
     # The review_loop condition task: directly owned, declares verdicts, is
     # mandatory, and is the unique sink of the review_loop subtree.
     consolidate:
+      control:
+        ready: break
+        revise: continue
       agent: consolidator
       loop: review_loop
       needs: [review]
@@ -98,6 +89,9 @@ workflow:
     # The test_loop condition task: it consumes the inner subtree's final result
     # and its negative `failed` verdict re-arms the whole nested review subtree.
     test:
+      control:
+        passed: break
+        failed: continue
       agent: tester
       loop: test_loop
       needs: [consolidate]
@@ -108,6 +102,9 @@ workflow:
     # The root delivery_loop condition task: its `reject` verdict repeats the
     # outer loop; `accepted` completes the delivery.
     accept:
+      control:
+        accepted: break
+        reject: continue
       agent: acceptor
       loop: delivery_loop
       needs: [test]

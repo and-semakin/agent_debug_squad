@@ -280,6 +280,9 @@ func (m *Manager) beginRecoveryPreflight() {
 }
 
 func (m *Manager) recoverExecution(snapshot *domain.WorkflowSnapshot) error {
+	if snapshot.LegacyLoops() {
+		return fmt.Errorf("legacy loop execution %s cannot be recovered; finish or cancel it with the previous binary before upgrading", snapshot.ExecutionID)
+	}
 	// Reject a saved definition using the removed "hold" uncertainty policy
 	// before any scheduling or mutation: there is no alias, fallback, or
 	// automatic migration, and the saved definition is neither rewritten nor
@@ -521,9 +524,6 @@ func (m *Manager) create(ctx context.Context, requestID string, oneShot bool) (d
 		return domain.WorkflowExecutionView{}, false, ErrNoDefinition
 	}
 	def := *m.cfg.Workflow
-	if err := config.ValidateWorkflowDefinition(def, m.cfg.Agents); err != nil {
-		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
-	}
 	agents := resolvedAgents(m.cfg, def)
 	hash := HashWorkflowDefinition(def, agents)
 
@@ -552,6 +552,11 @@ func (m *Manager) create(ctx context.Context, requestID string, oneShot bool) (d
 		}
 		m.mu.Unlock()
 		return domain.WorkflowExecutionView{}, false, ErrDefinitionChanged
+	}
+
+	if err := config.ValidateWorkflowDefinition(def, m.cfg.Agents); err != nil {
+		m.mu.Unlock()
+		return domain.WorkflowExecutionView{}, false, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 
 	// An identical in-flight request waits for the owner's admission and then

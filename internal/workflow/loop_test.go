@@ -19,7 +19,7 @@ import (
 // consumes the final iteration's review result.
 func loopReviewDefinition(maxIterations int) domain.WorkflowDefinition {
 	return domain.WorkflowDefinition{
-		Version: 1, Name: "loop-review", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "loop-review", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: maxIterations}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"implement": {Agent: "a1", Prompt: "Implement.", Loop: "refine"},
@@ -139,7 +139,7 @@ func TestLoopRunsExactlyMaxIterationsWithNumberedAttempts(t *testing.T) {
 		t.Fatalf("iteration-2 attempt must carry its number and iteration: %+v", last)
 	}
 	if report := findTaskView(view, "report"); report.State != domain.WorkflowTaskPending ||
-		report.BlockedReason != "waiting_loop:refine" {
+		!strings.HasPrefix(report.BlockedReason, "waiting_loop:refine=") {
 		t.Fatalf("outside consumer must wait with a loop reason: %+v", report)
 	}
 
@@ -198,14 +198,14 @@ func TestLoopHardFailureHoldsAndRetryRepairsCurrentIteration(t *testing.T) {
 	if view.State != domain.WorkflowNeedsAttention {
 		t.Fatalf("hard failure must hold, got %v", view.State)
 	}
-	if !hasReason(view, "loop_failure:refine:1:implement:retry_or_cancel") {
+	if !hasReason(view, "loop_failure:refine=1:implement:retry_or_cancel") {
 		t.Fatalf("attention reasons must name loop/iteration/task: %v", view.AttentionReasons)
 	}
 	if view.Loops[0].State != domain.WorkflowLoopNeedsAttention || view.Loops[0].Iteration != 1 {
 		t.Fatalf("loop must hold at iteration 1: %+v", view.Loops[0])
 	}
 	if report := findTaskView(view, "report"); report.State != domain.WorkflowTaskPending ||
-		report.BlockedReason != "waiting_loop:refine" {
+		!strings.HasPrefix(report.BlockedReason, "waiting_loop:refine=") {
 		t.Fatalf("outside consumer must stay pending: %+v", report)
 	}
 	if len(fx.exec.liveRunIDs()) != 0 || len(fx.exec.dispatched()) != 1 {
@@ -221,7 +221,7 @@ func TestLoopHardFailureHoldsAndRetryRepairsCurrentIteration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume during a loop hold must be accepted: %v", err)
 	}
-	if resumed.State != domain.WorkflowNeedsAttention || !hasReason(resumed, "loop_failure:refine:1:implement") {
+	if resumed.State != domain.WorkflowNeedsAttention || !hasReason(resumed, "loop_failure:refine=1:implement") {
 		t.Fatalf("resume must preserve the unresolved hold: %+v", resumed.AttentionReasons)
 	}
 	fx.pump()
@@ -299,7 +299,7 @@ func TestToleratedFailureReRunsNextIterationWithoutHold(t *testing.T) {
 
 func TestBlockedBodyTaskHoldsLoopUntilOutsidePrerequisiteRepaired(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "loop-prereq", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "loop-prereq", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 1}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"seed":      {Agent: "a1", Prompt: "Seed."},
@@ -319,7 +319,7 @@ func TestBlockedBodyTaskHoldsLoopUntilOutsidePrerequisiteRepaired(t *testing.T) 
 	if view.State != domain.WorkflowNeedsAttention {
 		t.Fatalf("blocked body task must hold, got %v", view.State)
 	}
-	if !hasReason(view, "loop_blocked:refine:1:implement:retry_or_cancel") {
+	if !hasReason(view, "loop_blocked:refine=1:implement:retry_or_cancel") {
 		t.Fatalf("blocking hold must name loop/iteration/task: %v", view.AttentionReasons)
 	}
 	if impl := findTaskView(view, "implement"); impl.State != domain.WorkflowTaskBlocked ||
@@ -337,7 +337,7 @@ func TestBlockedBodyTaskHoldsLoopUntilOutsidePrerequisiteRepaired(t *testing.T) 
 
 func TestHoldStopsIndependentWorkAndAnyLoopAdvance(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "hold-siblings", MaxParallel: 2, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "hold-siblings", MaxParallel: 2, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{
 			"left":  {MaxIterations: 2},
 			"right": {MaxIterations: 1},
@@ -363,7 +363,7 @@ func TestHoldStopsIndependentWorkAndAnyLoopAdvance(t *testing.T) {
 	fx.pump()
 
 	view := mustView2(t, fx)
-	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_failure:left:1:failer") {
+	if view.State != domain.WorkflowNeedsAttention || !hasReason(view, "loop_failure:left=1:failer") {
 		t.Fatalf("left loop must hold: %v (%v)", view.State, view.AttentionReasons)
 	}
 	if len(fx.exec.dispatched()) != 2 {
@@ -396,7 +396,7 @@ func TestHoldStopsIndependentWorkAndAnyLoopAdvance(t *testing.T) {
 
 func TestExplicitRetriesStayInSingleIterationAndNeverAdvance(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "single-iter", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "single-iter", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"once": {MaxIterations: 1}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo": {Agent: "a1", Prompt: "Once."},
@@ -444,7 +444,7 @@ func TestExplicitRetriesStayInSingleIterationAndNeverAdvance(t *testing.T) {
 
 func TestManifestsResolveSameIterationAndStableOutsideDependencies(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "loop-handoff", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "loop-handoff", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"refine": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"seed":      {Agent: "a1", Prompt: "Seed."},
@@ -513,7 +513,7 @@ func TestCarryOverReachesUpstreamBodyTask(t *testing.T) {
 	}
 	for _, want := range []string{
 		"--- Previous iteration outcomes ---",
-		"Loop iteration 2",
+		"Loop iteration refine=2",
 		"review: succeeded",
 		"tasks/review/attempts/1/response.txt",
 	} {
@@ -544,7 +544,7 @@ func TestCarryOverReachesUpstreamBodyTask(t *testing.T) {
 
 func TestDamagedCarryOverArtifactHoldsNextIteration(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "carryover-verify", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "carryover-verify", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"again": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo": {Agent: "a1", Prompt: "Again.", Loop: "again"},
@@ -588,7 +588,7 @@ func TestDamagedCarryOverArtifactHoldsNextIteration(t *testing.T) {
 
 func TestPauseMidIterationDrainsAndResumeReArms(t *testing.T) {
 	def := domain.WorkflowDefinition{
-		Version: 1, Name: "loop-pause", MaxParallel: 1, TaskTimeoutSeconds: 300,
+		Version: 2, Name: "loop-pause", MaxParallel: 1, TaskTimeoutSeconds: 300,
 		Loops: map[string]domain.WorkflowLoopDefinition{"again": {MaxIterations: 2}},
 		Tasks: map[string]domain.WorkflowTaskDefinition{
 			"solo": {Agent: "a1", Prompt: "Again.", Loop: "again"},
