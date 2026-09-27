@@ -138,6 +138,10 @@ func TestRuntimeHelper(t *testing.T) {
 			fmt.Fprint(w, `{"healthy":true}`)
 		case "/config":
 			_ = json.NewEncoder(w).Encode(cfg)
+		case "/provider":
+			fmt.Fprint(w, `{"all":[],"connected":[],"default":{}}`)
+		case "/config/providers":
+			fmt.Fprint(w, `{"providers":[],"default":{}}`)
 		case "/session":
 			fmt.Fprintf(w, `{"id":"session-%d"}`, sessions.Add(1))
 		case "/event":

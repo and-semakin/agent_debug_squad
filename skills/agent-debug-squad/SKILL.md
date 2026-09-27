@@ -19,6 +19,43 @@ Use Agent Debug Squad as a local REST-controlled coordinator for named coding ag
 
 Do not assume that agent output is broadcast to other agents. Each agent has its own backend session. Parallel runs are allowed for different agents; a second run for an already-busy agent returns `409 Conflict`.
 
+## Discover model selections before authoring
+
+Before composing agent YAML, run `agent-debug-squad models --all --json --workspace <workspace>`
+or filter with repeatable `--backend`; use `--config <file>` to inspect the exact
+existing agent environments. Discovery needs no running squad or conversation.
+Capture the exit code: 0 is complete success; **1 includes useful partial catalogs
+and total failure**. Inspect `status`, each result's `complete`, `diagnostics`, and
+`models` even on exit 1. `--all` includes unsupported ZCode and therefore exits 1
+while that interface remains unsupported. Do not use an `&&` chain to parse output.
+
+```sh
+status=0
+agent-debug-squad models --all --json > models.json || status=$?
+case "$status" in
+  0|1) jq '{status, results}' models.json ;;
+  *) cat models.json; exit "$status" ;;
+esac
+```
+
+Match the user's request against returned metadata, then copy the exact supported
+`selection.backend` and `selection.options`. For an illustrative returned Astra
+choice, use `gpt-6-astra` only if that exact ID was returned, and set `reasoning`
+only to a returned value with an implemented `squad_option` mapping. Never maintain
+a hardcoded model-name translation table. Show multiple backend/provider matches
+for an explicit choice; preserve an already explicit user choice. Opaque IDs and
+Kimi aliases must not be normalized. Unsupported or incomplete discovery does not
+invalidate an explicitly supplied model.
+
+Freshness, configured/connected membership and inference access are different:
+unknown stays unknown, and listing performs no inference. Rerun to refresh; there
+is no Squad catalog cache or REST discovery route. Kimi effort and OpenCode variant
+metadata currently have no executable option mapping. Kimi `options.model` now
+forwards `--model`; replace previously ignored stale values with a returned alias
+or omit the option. This does not verify the broader Kimi run protocol. ZCode
+returns `unsupported/read_only_catalog_unavailable` until a session-free read-only
+bootstrap is verified; never create a conversation merely to obtain its catalog.
+
 ## Configuration
 
 Use a portable config shape such as:

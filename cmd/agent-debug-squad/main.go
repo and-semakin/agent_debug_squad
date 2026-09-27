@@ -18,6 +18,7 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/judge"
+	"github.com/and-semakin/agent_debug_squad/internal/modeldiscovery"
 	"github.com/and-semakin/agent_debug_squad/internal/oneshot"
 	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 	"github.com/and-semakin/agent_debug_squad/internal/selfupdate"
@@ -100,6 +101,10 @@ func run(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return serve(ctx, args[1:])
+	case "models":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return &exitError{code: modeldiscovery.Main(ctx, args[1:], os.Stdout, os.Stderr)}
 	case "run":
 		code, argErr := oneshot.Main(args[1:], os.Stdout, os.Stderr)
 		if argErr != nil {
@@ -289,6 +294,7 @@ func restart() error {
 
 func usage(out *os.File) {
 	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  agent-debug-squad models [--all | --backend NAME] [--config FILE] [--workspace DIR] [--json]")
 	fmt.Fprintln(out, "  agent-debug-squad serve --config squad.yaml [--no-auto-update]")
 	fmt.Fprintln(out, "  agent-debug-squad run --config squad.yaml --request-id <id>")
 	fmt.Fprintln(out, "  agent-debug-squad version")

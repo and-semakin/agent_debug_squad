@@ -73,6 +73,88 @@ agent-debug-squad serve --config squad.yaml --no-auto-update
 
 Automatic replacement is supported on macOS and Linux. Development builds report version `dev` and skip update checks.
 
+## Discover models before writing YAML
+
+Use the installed backend catalogs to choose exact agent options before creating a squad:
+
+```sh
+agent-debug-squad models --all --workspace .
+agent-debug-squad models --backend codex --backend cursor --json
+agent-debug-squad models --config squad.yaml --json
+```
+
+Without selectors or a config, `models` queries the five real backends. With a config,
+no selector means every distinct effective agent context; `--all` also adds missing
+real backends. Repeated `--backend` filters select matching agents, falling back to
+machine settings when that backend is absent. Equivalent reviewers share a query.
+`fake` is included only when explicitly selected or configured; judge is excluded.
+A conflicting `--workspace` and config workspace is an error. Machine settings and
+environment restrictions are the same as execution.
+
+Inspect useful partial reports even when the command exits nonzero:
+
+```sh
+status=0
+agent-debug-squad models --all --json > models.json || status=$?
+case "$status" in
+  0|1) jq '{status, results: [.results[] | {backend, status, complete, models, diagnostics}]}' models.json ;;
+  *) cat models.json; exit "$status" ;;
+esac
+```
+
+Exit 0 means every target is complete (`ok` or `empty`); exit 1 covers both
+`partial` and `failed`, distinguished by JSON `status` and `results`. Exit 2 is an
+argument/config error; cancellation exits 130 with collected results. **`--all`
+returns exit 1 while ZCode discovery is unsupported**, even if all other backends
+succeed. Do not hide the report behind an `&&` success chain.
+
+Copy `selection.backend` and exact `selection.options` from a supported returned
+row. For example, **if the current catalog returns** `gpt-6-astra` for Codex and
+lists `high` with `squad_option: reasoning`, those values can become:
+
+```yaml
+backend: codex
+options:
+  model: gpt-6-astra
+  reasoning: high
+```
+
+This is an illustration, not a model lookup table. Preserve opaque IDs, including
+Cursor bracketed parameters and Kimi aliases. Resolve multiple backend/provider
+matches explicitly instead of silently choosing one. Kimi effort metadata and
+OpenCode variants currently have no executable Squad option mapping. Unknown or
+unlisted explicit YAML models remain structurally valid: discovery is not a run gate.
+
+`--include-hidden` requests hidden records where supported; every source reports
+requested/applied policy. `configured`, `connected`, source freshness and inference
+access are separate evidence; `null` means unknown. Listing sends no inference,
+creates no Squad/conversation state and never proves paid-model access. There is no
+Squad catalog cache: run the command again to refresh. No REST route is provided.
+
+At most three targets run concurrently. `--backend-timeout` defaults to 30s and
+starts when a worker starts. Overall `--timeout` defaults to
+`max(60s, ceil(targets/3) * (backend-timeout + 5s) + 5s)` (75s for five targets,
+110s for seven); explicit shorter timeouts win. Cleanup has at most five additional
+seconds. Limits are 8 MiB per frame/response, 32 MiB total source bytes, 100 pages,
+and 10,000 rows; incomplete data is never labelled complete.
+
+| Backend | Discovery interface | Selection / limitations |
+| --- | --- | --- |
+| Codex | Private App Server `model/list` | Native model ID; returned reasoning maps to `reasoning`; no thread or turn |
+| Cursor | `--list-models` text | Opaque exact ID; verified header/rows/footer; format drift is explicit |
+| Kimi | `provider list --json` | Configured alias; provider secrets and unknown fields are excluded |
+| OpenCode | Classic `/provider` and `/config/providers` | Provider/model; managed owned runtime or configured external endpoint |
+| ZCode | No verified read-only bootstrap | `unsupported`, `read_only_catalog_unavailable`; no session workaround |
+| fake | Fixed synthetic `fake` record | Explicit test fixture; arbitrary manually configured models still work |
+
+**Kimi compatibility:** explicit `options.model` is now passed unchanged as
+`--model`. Stale values previously ignored can therefore fail at execution; choose
+a returned configured alias or omit `model` to use Kimi's default. There is no
+silent fallback. Discovery does not certify Kimi's broader run protocol.
+
+See [compatibility evidence](docs/model-discovery.md) for observed versions, smoke
+outcomes and the ZCode boundary. Observed versions are not guaranteed support ranges.
+
 ## Configuration
 
 A squad is a YAML file with session storage, a loopback address, and one or more named agents:
@@ -234,7 +316,7 @@ Options:
 - `yolo`: inherits squad defaults. True selects native `yolo`; false explicitly selects `build`. This also updates ZCode's workspace permission preference. False is permission-controlled, **not a read-only sandbox**.
 - `env` / `inherit_env`: the same explicit environment rules as other CLI adapters. Inherit `HOME` and `PATH` for the existing login and tools.
 
-**Model discovery:** the current account catalog is captured from `session/create` or `session/resume` as a `zcode.models` record in `<agent>.diagnostics.jsonl` before each prompt. For example:
+**Session diagnostics (separate from `models`):** the current account catalog is captured from `session/create` or `session/resume` as a `zcode.models` record in `<agent>.diagnostics.jsonl` before each prompt. For example:
 
 ```sh
 jq 'select(.type == "zcode.models") | .model.available[] | {ref, reasoning}' \

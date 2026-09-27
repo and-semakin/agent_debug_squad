@@ -89,6 +89,9 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	}
 
 	args := buildArgs(promptfmt.WithStartupPrompt(a.startupPrompt(state), run.Message))
+	if model := a.spec.StringOptions["model"]; model != "" {
+		args = append(args, "--model", model)
+	}
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = state.WorkspaceDir

@@ -42,8 +42,13 @@ type Runtime struct {
 }
 
 func NewRuntime(ctx context.Context, workspace string, settings *domain.MachineBackendSettings) *Runtime {
+	return NewRuntimeWithEnv(ctx, workspace, settings, os.Environ())
+}
+
+// NewRuntimeWithEnv binds checks and startup to one captured environment.
+func NewRuntimeWithEnv(ctx context.Context, workspace string, settings *domain.MachineBackendSettings, ambient []string) *Runtime {
 	ctx, cancel := context.WithCancel(ctx)
-	r := &Runtime{ctx: ctx, cancel: cancel, workspace: workspace, ambient: os.Environ(), startTimeout: 30 * time.Second, stopTimeout: 3 * time.Second}
+	r := &Runtime{ctx: ctx, cancel: cancel, workspace: workspace, ambient: append([]string{}, ambient...), startTimeout: 30 * time.Second, stopTimeout: 3 * time.Second}
 	if settings != nil {
 		r.settings = *settings
 		r.settings.InheritEnv = append([]string(nil), settings.InheritEnv...)
