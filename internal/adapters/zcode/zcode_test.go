@@ -392,14 +392,26 @@ func TestProtocolHelper(t *testing.T) {
 			}
 		case "session/read":
 			sessionReads++
-			jobs := []any{}
-			if sessionReads == 1 && scenario == "quota-continuation" {
-				jobs = append(jobs, map[string]any{"id": "bg-old", "kind": "bash"})
+			var sessionState map[string]any
+			switch {
+			case scenario == "background-malformed":
+				// The strict refresh must reject a snapshot without the
+				// backgroundJobs surface.
+				sessionState = map[string]any{"sessionId": "session"}
+			case scenario == "background-foreign":
+				sessionState = map[string]any{"sessionId": "other-session", "backgroundJobs": []any{}}
+			case sessionReads == 1 && (scenario == "quota-continuation" || scenario == "background-still-running"):
+				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "running"}}}
+			case sessionReads >= 2 && scenario == "background-still-running":
+				// ZCode keeps finished tasks listed with an updated status; a
+				// task that is still running must block the continuation.
+				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "running"}}}
+			default:
+				// A finished task stays listed with a terminal status: that
+				// must count as stopped.
+				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "completed"}}}
 			}
-			if sessionReads == 1 && scenario == "background-refresh" {
-				jobs = append(jobs, map[string]any{"id": "bg-turn", "kind": "bash"})
-			}
-			result = map[string]any{"session": map[string]any{"sessionId": "session", "backgroundJobs": jobs}}
+			result = map[string]any{"session": sessionState}
 		case "session/subagents":
 			items := []map[string]string{}
 			var params struct{ SessionID string }
@@ -459,14 +471,15 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			emit(map[string]any{"id": m.ID, "result": map[string]bool{"accepted": scenario != "rejected"}})
 			sent = true
-			if scenario == "quota-continuation" && continuations == 0 {
+			quotaScenario := scenario == "quota-continuation" || scenario == "background-still-running" || scenario == "background-malformed" || scenario == "background-foreign"
+			if quotaScenario && continuations == 0 {
 				continuations++
 				event("turn.started", "turn", map[string]string{"inputId": input})
 				event("turn.failed", "turn", map[string]any{"inputId": input, "error": map[string]any{"code": "start_plan_quota_exhausted", "type": "quota_exhaustion"}})
 				continue
 			}
 			if continuations > 0 {
-				if scenario == "quota-continuation" && (len(cancelledTasks) != 1 || cancelledTasks[0] != "bg-old") {
+				if quotaScenario && (len(cancelledTasks) != 1 || cancelledTasks[0] != "bg-old") {
 					os.Exit(17)
 				}
 				continuations++

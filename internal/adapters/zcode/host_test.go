@@ -3,6 +3,8 @@ package zcode
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +59,9 @@ function storeFactory(e={}){let t=e.env??process.env,n=credPath(e);return{filePa
 Kat=Y(()=>{pUs="ZCODE_DATA_BASE_DIR";r(storeFactory,"createSharedZCodeCredentialStore")})
 RC=class{static{r(this,"NodeProviderRegistryRuntime")}}
 function registryFactory(e){return new RC(e)}
-ukt=Y(()=>{ckt=require("node:path");r(registryFactory,"startProcessProviderRegistryRuntime")})`
+ukt=Y(()=>{ckt=require("node:path");r(registryFactory,"startProcessProviderRegistryRuntime")})
+function snapParser(e){return {revision:e.revision}}
+Zq=Y(()=>{r(snapParser,"parseProcessAccountProviderConfigSnapshot")})`
 
 func discoverFixture(t *testing.T, node, host, bundle string) string {
 	t.Helper()
@@ -94,7 +98,7 @@ func TestHostDiscovery(t *testing.T) {
 	if found.Credentials != "storeFactory" || found.Registry != "registryFactory" {
 		t.Fatalf("wrong exports: %s", out)
 	}
-	if len(found.Thunks) != 2 || found.Thunks[0] != "Kat" || found.Thunks[1] != "ukt" {
+	if len(found.Thunks) != 3 || found.Thunks[0] != "Kat" || found.Thunks[1] != "ukt" || found.Thunks[2] != "Zq" {
 		t.Fatalf("wrong module thunks: %s", out)
 	}
 	if !strings.Contains(found.Patched, "q9t();async function vtc()") || strings.Contains(found.Patched, "vtc();async function") {
@@ -253,5 +257,65 @@ process.stdout.write(JSON.stringify(out));`
 		if parsed[key] != want {
 			t.Fatalf("%s = %v, want %v", key, parsed[key], want)
 		}
+	}
+}
+
+// A proxy that answers CONNECT with 200 and then speaks plaintext HTTP used to
+// receive the Authorization header in the clear and have its fake response
+// accepted. With TLS inside the tunnel the read must fail instead.
+func TestHostProxiedReadRejectsPlaintextTunnel(t *testing.T) {
+	node := requireNode(t)
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host.cjs")
+	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("cannot hijack")
+				return
+			}
+			conn, buf, err := hijacker.Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+			buf.Flush()
+			// Plaintext HTTP where TLS is expected: the read must fail.
+			buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"stolen\":true}")
+			buf.Flush()
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	})}
+	go server.Serve(listener)
+	defer func() { _ = server.Close() }()
+
+	script := `const h=require(process.argv[1]);
+process.env.ZCODE_HTTP_PROXY=process.argv[2];
+h.performRead('https://api.z.ai/api/biz/subscription/list','synthetic-secret').then(r=>process.stdout.write(JSON.stringify(r)));`
+	cmd := exec.Command(node, "-e", script, host, "http://"+listener.Addr().String())
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(out, &response); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	if response["ok"] == true {
+		t.Fatalf("plaintext tunnel accepted: %s", out)
+	}
+	if strings.Contains(string(out), "synthetic-secret") {
+		t.Fatal("the authorization header leaked into the diagnostic")
 	}
 }

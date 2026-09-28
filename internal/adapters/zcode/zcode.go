@@ -591,7 +591,7 @@ func (r *activeRun) transitionToIndividual(ctx context.Context, a *Adapter, fail
 	// Confirm the known tasks actually left the runtime before dispatching
 	// overlapping work under the other provider.
 	confirmCtx, confirmCancel := context.WithTimeout(ctx, rpcTimeout)
-	confirmErr := confirmBackgroundTasksGone(confirmCtx, r.c.call, session, r.background)
+	confirmErr := confirmBackgroundTasksStopped(confirmCtx, r.c.call, session, r.background)
 	confirmCancel()
 	if confirmErr != nil {
 		return fmt.Errorf("old-attempt background work could not be confirmed stopped: %w", confirmErr)

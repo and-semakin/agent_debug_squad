@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const tls = require('node:tls');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
@@ -73,9 +74,14 @@ function discover(source) {
   if (classAt < 0) fail('provider registry runtime class declaration');
   const cls = ident((/([A-Za-z_$][\w$]*)\s*$/.exec(source.slice(Math.max(0, classAt - 200), classAt)) || [])[1]);
   const registry = precedingFunction(exactlyOne(new RegExp(`new ${cls}\\(`, 'g'), 'provider registry construction').index, 'provider registry factory');
-  // 4. Module init thunks: esbuild registers each function's keep-name inside
+  // 4. Account snapshot parser: the exported function that turns the wire
+  // account overlay into the typed snapshot the registry's account source
+  // consumes. It lets the shim's own registry instance apply the same
+  // evidence-based account rights the runtime receives.
+  const snapshotParser = precedingFunction(exactlyOne(/r\(([A-Za-z_$][\w$]*),"parseProcessAccountProviderConfigSnapshot"\)/g, 'account snapshot parser').index, 'account snapshot parser');
+  // 5. Module init thunks: esbuild registers each function's keep-name inside
   // its module's init thunk, which also runs the module's dependencies. Run the
-  // two owning thunks so the factories' constants and classes are defined.
+  // owning thunks so the factories' constants and classes are defined.
   const owner = name => {
     const registration = exactlyOne(new RegExp(`r\\(${name},"`, 'g'), `keep-name registration of ${name}`);
     const thunkRe = /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\(\)=>\{/g;
@@ -84,8 +90,8 @@ function discover(source) {
     if (!last) fail(`${name} module init thunk`);
     return ident(last[1]);
   };
-  const thunks = [...new Set([owner(store[1]), owner(registry)])];
-  return {hash, patched, credentials: store[1], registry, thunks};
+  const thunks = [...new Set([owner(store[1]), owner(registry), owner(snapshotParser)])];
+  return {hash, patched, credentials: store[1], registry, snapshotParser, thunks};
 }
 // Lazy esbuild modules define their vars only when their init thunk runs; map a
 // missing name back to the thunk whose var list declares it ("var ckt,ukt=Y(()=>{").
@@ -240,8 +246,10 @@ function caCertificates() {
 }
 
 // requestViaProxy tunnels one HTTPS request through an HTTP proxy with
-// CONNECT, then speaks TLS over the tunnel with the custom CA when present.
-function requestViaProxy(target, proxyUrl, cb) {
+// CONNECT and then establishes TLS INSIDE the tunnel with server-name
+// verification and the custom CA when present. The tunnel socket is never
+// spoken to in the clear.
+function requestViaProxy(target, proxyUrl, ca, cb) {
   const proxy = new URL(proxyUrl);
   const connectReq = http.request({
     host: proxy.hostname, port: proxy.port || 80, method: 'CONNECT',
@@ -254,7 +262,23 @@ function requestViaProxy(target, proxyUrl, cb) {
       socket.destroy();
       return cb(Error(`proxy CONNECT failed with status ${response.statusCode}`));
     }
-    cb(null, socket);
+    const tlsSocket = tls.connect({
+      socket,
+      servername: target.hostname,
+      host: target.hostname,
+      port: target.port || 443,
+      ca,
+      rejectUnauthorized: true,
+    });
+    tlsSocket.setTimeout(READ_TIMEOUT_MS, () => tlsSocket.destroy(Error('TLS handshake through the proxy timed out')));
+    tlsSocket.once('secureConnect', () => {
+      tlsSocket.setTimeout(0);
+      cb(null, tlsSocket);
+    });
+    tlsSocket.once('error', error => {
+      tlsSocket.destroy();
+      cb(error);
+    });
   });
   connectReq.on('error', error => cb(error));
   connectReq.end();
@@ -311,9 +335,9 @@ function performRead(url, authorization) {
       req.end();
     };
     if (useProxy) {
-      requestViaProxy(target, proxyUrl.trim(), (error, socket) => {
-        if (error) return finish({ok: false, kind: 'network', message: 'The account read could not establish the proxy tunnel.'});
-        send(socket);
+      requestViaProxy(target, proxyUrl.trim(), ca, (error, tlsSocket) => {
+        if (error) return finish({ok: false, kind: 'network', message: 'The account read could not establish the TLS tunnel through the proxy.'});
+        send(tlsSocket);
       });
     } else {
       send(null);
@@ -383,26 +407,39 @@ async function readIndividualSubscription(individualApiKey) {
 
 // readRegistryView projects the live registry view onto the bounded
 // selectability evidence. The service must start() before getView(): the view
-// is materialized from the builtin sources with the account data applied. This
-// host deliberately has no disabledReason source, so none is invented;
-// reasoning values come from each model's own option spec. Shapes the
-// projection cannot interpret stay unknown instead of being guessed, and the
-// registry runtime is always disposed.
-async function readRegistryView(pick, found, ensure, env) {
+// is materialized from the builtin sources WITH the account data applied, so
+// the account evidence Go resolved (provider, entitled, current) is applied to
+// this registry instance through the source's own account snapshot parser —
+// the same wire shape the runtime's updateAccountConfig consumes. The view is
+// read through the same guarded registry runtime the bootstrap uses and is
+// always disposed.
+async function readRegistryView(pick, found, ensure, env, request) {
   let registry;
   try {
-    registry = await ensure(() => pick(found.registry)(env));
+    registry = await ensure(() => pick(found.registry)({
+      env,
+      createAccountSource: () => ({
+        read: async () => pick(found.snapshotParser)({
+          revision: 'squad-' + Date.now(),
+          basedOnZCodeBuiltinRevision: request.basedOnZCodeBuiltinRevision,
+          providers: {[request.provider]: {access: {type: 'zhipu-account', entitled: Boolean(request.entitled)}}},
+          states: {[request.provider]: {availability: request.entitled ? 'available' : 'unavailable', entitled: Boolean(request.entitled), current: Boolean(request.current)}},
+        }),
+        onDidChange: () => () => {},
+      }),
+    }));
   } catch {
     return {ok: false, kind: 'schema', message: 'The ZCode provider registry interface is unavailable; update the adapter.'};
   }
-  const service = registry && registry.registryService;
+  const runtime = registry && registry.runtime;
+  const service = runtime && runtime.registryService;
   if (!service || typeof service.start !== 'function' || typeof service.getView !== 'function' ||
-      !registry.runtime?.configService || typeof registry.runtime.configService.read !== 'function' ||
+      !runtime.configService || typeof runtime.configService.read !== 'function' ||
       typeof registry.dispose !== 'function') {
     return {ok: false, kind: 'schema', message: 'ZCode provider registry interface unavailable; update the adapter.'};
   }
   try {
-    const config = await registry.runtime.configService.read();
+    const config = await runtime.configService.read();
     const revision = config && typeof config.zcodeBuiltinRevision === 'string' ? config.zcodeBuiltinRevision.trim() : '';
     if (revision === '') {
       return {ok: false, kind: 'schema', message: 'The registry view carried no native builtin revision.'};
@@ -619,7 +656,13 @@ async function main() {
     } else if (msg.method === 'squad/readIndividualSubscription') {
       envelope = await readIndividualSubscription(authMaterial.subscription);
     } else {
-      envelope = await readRegistryView(pick, found, ensure, env);
+      const request = msg.params && typeof msg.params === 'object' ? msg.params : {};
+      envelope = await readRegistryView(pick, found, ensure, env, {
+        provider: request.provider,
+        entitled: Boolean(request.entitled),
+        current: Boolean(request.current),
+        basedOnZCodeBuiltinRevision: revision,
+      });
     }
     respondToSquad(msg.id, {result: envelope});
   };
@@ -670,4 +713,4 @@ async function main() {
   }).on('close', () => { if (child) child.stdin.end(); });
 }
 if (!module.parent) main().catch(error => fatal(error.message));
-module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope};
+module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope, performRead};
