@@ -36,6 +36,7 @@ var requiredWireMethods = []string{
 	"session/stop",
 	"session/close",
 	"session/subagents",
+	"session/read",
 	"session/cancelBackgroundTask",
 }
 

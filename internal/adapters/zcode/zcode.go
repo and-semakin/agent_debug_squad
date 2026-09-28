@@ -567,6 +567,15 @@ func (r *activeRun) transitionToIndividual(ctx context.Context, a *Adapter, fail
 	r.stateMu.Unlock()
 	r.publish()
 
+	// Refresh the background state first: tasks the failed attempt started
+	// during the turn must join the owned set before the drain.
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, rpcTimeout)
+	refreshErr := refreshBackgroundTasks(refreshCtx, r.c.call, session, r.background)
+	refreshCancel()
+	if refreshErr != nil {
+		return fmt.Errorf("old-attempt background state could not be refreshed: %w", refreshErr)
+	}
+
 	// Drain positively owned descendant/background work from the failed
 	// attempt; uncertainty fails the run rather than overlapping attempts.
 	r.stateMu.Lock()
@@ -578,6 +587,14 @@ func (r *activeRun) transitionToIndividual(ctx context.Context, a *Adapter, fail
 	sort.Strings(descendants)
 	if err := runTerminalCleanup(r.c.call, cleanupSpec{session: session, descendants: descendants, background: r.background, stopRoot: false}); err != nil {
 		return fmt.Errorf("old-attempt cleanup could not be established: %w", err)
+	}
+	// Confirm the known tasks actually left the runtime before dispatching
+	// overlapping work under the other provider.
+	confirmCtx, confirmCancel := context.WithTimeout(ctx, rpcTimeout)
+	confirmErr := confirmBackgroundTasksGone(confirmCtx, r.c.call, session, r.background)
+	confirmCancel()
+	if confirmErr != nil {
+		return fmt.Errorf("old-attempt background work could not be confirmed stopped: %w", confirmErr)
 	}
 
 	// Fresh eligibility for the same account, model, and reasoning; cached

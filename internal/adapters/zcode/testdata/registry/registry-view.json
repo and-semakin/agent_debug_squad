@@ -1,7 +1,7 @@
 {
   "provenance": {
     "source_commit": "29628c9acdb81b703bbd4080c207a0e7ce5e276e",
-    "source_path": "config/provider/zcode-builtin.json + guarded registry service view",
+    "source_path": "packages/provider/src/registry.ts ProviderRegistryService.getView() + zcodeBuiltinRevision",
     "dialect": "squad-registry-view-v1",
     "captured": "source-derived"
   },
@@ -15,7 +15,7 @@
       {"providerId": "account:zai-start-plan", "models": [
         {"modelId": "GLM-5.3-Flash", "reasoningLevels": ["low", "high"]},
         {"modelId": "GLM-5.2", "reasoningLevels": ["low"]},
-        {"modelId": "GLM-5-Turbo", "reasoningLevels": ["low"], "disabledReason": "deprecated"}
+        {"modelId": "GLM-5-Turbo", "reasoningLevels": ["low"]}
       ]}
     ]
   }

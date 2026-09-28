@@ -156,12 +156,28 @@ func TestRegistryViewFixture(t *testing.T) {
 	if flash.supportsReasoning("max") {
 		t.Fatal("unsupported reasoning accepted")
 	}
+	// This host deliberately has no disabledReason source: the view lists
+	// exactly what validates by construction.
 	turbo := view.Models[registrySelectionKey(ProviderStart, "GLM-5-Turbo")]
-	if !turbo.Disabled {
-		t.Fatal("disabled model read as selectable")
+	if turbo.Disabled {
+		t.Fatal("view model marked disabled without a source")
 	}
 	if _, ok := view.Models[registrySelectionKey(ProviderStart, "GLM-5.3")]; ok {
 		t.Fatal("Start plan falsely offers GLM-5.3")
+	}
+	// A model whose option spec carries no reasoning values cannot support the
+	// requested level: unknown reasoning is never treated as supported.
+	bare := registryModel{ProviderID: ProviderIndividual, ModelID: "GLM-5.3"}
+	if bare.supportsReasoning("low") {
+		t.Fatal("absent reasoning values treated as supported")
+	}
+	// The disabledReason decode path stays additive for future sources.
+	synthetic, err := decodeRegistryView(json.RawMessage(`{"revision":"r","providers":[{"providerId":"p","models":[{"modelId":"m","reasoningLevels":["low"],"disabledReason":"x"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !synthetic.Models[registrySelectionKey("p", "m")].Disabled {
+		t.Fatal("explicit disabledReason not honored")
 	}
 }
 

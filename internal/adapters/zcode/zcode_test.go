@@ -244,6 +244,8 @@ func TestProtocolHelper(t *testing.T) {
 	continuations := 0
 	balanceReads := 0
 	subscriptionReads := 0
+	sessionReads := 0
+	cancelledTasks := []string{}
 
 	balancePayload := map[string]any{"data": map[string]any{
 		"server_time": 1700000000,
@@ -388,6 +390,16 @@ func TestProtocolHelper(t *testing.T) {
 				// rejected by the adapter.
 				emit(map[string]any{"id": "pref1", "method": "session/requestRuntimePreferences", "params": map[string]any{"sessionId": "foreign-session"}})
 			}
+		case "session/read":
+			sessionReads++
+			jobs := []any{}
+			if sessionReads == 1 && scenario == "quota-continuation" {
+				jobs = append(jobs, map[string]any{"id": "bg-old", "kind": "bash"})
+			}
+			if sessionReads == 1 && scenario == "background-refresh" {
+				jobs = append(jobs, map[string]any{"id": "bg-turn", "kind": "bash"})
+			}
+			result = map[string]any{"session": map[string]any{"sessionId": "session", "backgroundJobs": jobs}}
 		case "session/subagents":
 			items := []map[string]string{}
 			var params struct{ SessionID string }
@@ -454,6 +466,9 @@ func TestProtocolHelper(t *testing.T) {
 				continue
 			}
 			if continuations > 0 {
+				if scenario == "quota-continuation" && (len(cancelledTasks) != 1 || cancelledTasks[0] != "bg-old") {
+					os.Exit(17)
+				}
 				continuations++
 				event("turn.started", "turn-2", map[string]string{"inputId": input})
 				event("turn.completed", "turn-2", map[string]any{"inputId": input, "response": "continued-pong", "resultType": "success"})
@@ -488,6 +503,13 @@ func TestProtocolHelper(t *testing.T) {
 				complete()
 			}
 			continue
+		case "session/cancelBackgroundTask":
+			var p struct {
+				TaskID string `json:"taskId"`
+			}
+			_ = json.Unmarshal(m.Params, &p)
+			cancelledTasks = append(cancelledTasks, p.TaskID)
+			result = map[string]any{"ok": true}
 		case "session/close":
 			var params struct{ SessionID string }
 			_ = json.Unmarshal(m.Params, &params)

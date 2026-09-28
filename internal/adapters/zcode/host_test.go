@@ -208,3 +208,50 @@ func mustJSON(t *testing.T, value any) string {
 	}
 	return string(raw)
 }
+
+func TestHostGuardedReadHelpers(t *testing.T) {
+	node := requireNode(t)
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host.cjs")
+	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `const h=require(process.argv[1]);
+const out = {
+  noProxyExact: h.noProxyMatches('api.z.ai', 'api.z.ai,example.com'),
+  noProxySuffix: h.noProxyMatches('sub.api.z.ai', '.api.z.ai'),
+  noProxyMiss: h.noProxyMatches('api.z.ai', 'example.com,.bigmodel.cn'),
+  noProxyWildcard: h.noProxyMatches('api.z.ai', '*'),
+  noProxyEmpty: h.noProxyMatches('api.z.ai', ''),
+  keyBare: h.normalizeApiKeyForHeader('abc12345.xyz98765'),
+  keyBearer: h.normalizeApiKeyForHeader('Bearer abc12345.xyz98765'),
+  keyPadded: h.normalizeApiKeyForHeader('  abc12345.xyz98765 notes'),
+  envOk: h.readSuccessfulEnvelope({code: 200, success: true, data: {a: 1}}).ok,
+  envOmittedCode: h.readSuccessfulEnvelope({data: []}).ok,
+  envZero: h.readSuccessfulEnvelope({code: 0, data: []}).ok,
+  envSuccessFalse: h.readSuccessfulEnvelope({success: false, code: 200, data: {x: 1}}).ok,
+  envBusinessError: h.readSuccessfulEnvelope({success: true, code: 500, data: {y: 2}}).ok,
+  envNonObject: h.readSuccessfulEnvelope('nope').ok,
+};
+process.stdout.write(JSON.stringify(out));`
+	out, err := exec.Command(node, "-e", script, host).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	expect := map[string]any{
+		"noProxyExact": true, "noProxySuffix": true, "noProxyMiss": false,
+		"noProxyWildcard": true, "noProxyEmpty": false,
+		"keyBare": "abc12345.xyz98765", "keyBearer": "abc12345.xyz98765", "keyPadded": "abc12345.xyz98765",
+		"envOk": true, "envOmittedCode": true, "envZero": true,
+		"envSuccessFalse": false, "envBusinessError": false, "envNonObject": false,
+	}
+	for key, want := range expect {
+		if parsed[key] != want {
+			t.Fatalf("%s = %v, want %v", key, parsed[key], want)
+		}
+	}
+}

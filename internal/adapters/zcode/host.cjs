@@ -3,6 +3,8 @@
 // sessions, run policy, routing, and the runtime preferences answers.
 'use strict';
 const fs = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
@@ -209,78 +211,183 @@ function appVersion(runtime) {
 
 // readEnvelope is the bounded result contract for account reads: a normalized
 // allowlisted payload or a typed failure. No credential or raw body ever
-// reaches Go; messages are fixed templates.
-async function guardedRead(url, authorization, parse) {
-  if (typeof fetch !== 'function') {
-    return {ok: false, kind: 'schema', message: 'The Node runtime lacks fetch; the account read is unavailable.'};
+// reaches Go; messages are fixed templates. The request itself runs on the
+// same network context as the integration: ZCODE_HTTP_PROXY with ZCODE_NO_PROXY
+// bypass rules and ZCODE_AGENT_CA_CERT for the custom CA, exactly the keys the
+// runtime's own network stack consumes.
+const READ_TIMEOUT_MS = 5000;
+const MAX_READ_BYTES = 4 * 1024 * 1024;
+
+function noProxyMatches(host, noProxyValue) {
+  if (!noProxyValue || noProxyValue.trim() === '') return false;
+  for (let entry of noProxyValue.split(',')) {
+    entry = entry.trim().toLowerCase();
+    if (entry === '') continue;
+    if (entry === '*') return true;
+    if (entry.startsWith('.')) {
+      if (host === entry.slice(1) || host.endsWith(entry)) return true;
+    } else if (host === entry || host.endsWith(`.${entry}`)) {
+      return true;
+    }
   }
-  if (!authorization) {
-    return {ok: false, kind: 'auth', message: 'No usable account credential for the guarded read; sign in or refresh the plan in ZCode.'};
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const response = await fetch(url, {method: 'GET', headers: {Authorization: `Bearer ${authorization}`}, redirect: 'manual', signal: controller.signal});
-    if (response.status >= 300 && response.status < 400) {
-      return {ok: false, kind: 'schema', message: 'The account read redirected to an unverified origin; refusing to follow it.'};
-    }
-    const text = await response.text();
-    if (text.length > 4 * 1024 * 1024) {
-      return {ok: false, kind: 'schema', message: 'The account read response exceeded its size bound.'};
-    }
-    if (response.status === 401 || response.status === 403) {
-      return {ok: false, kind: 'auth', message: 'The account read was rejected as unauthenticated; sign in or refresh the plan in ZCode.'};
-    }
-    if (response.status !== 200) {
-      return {ok: false, kind: 'network', httpCode: response.status, message: 'The account read endpoint returned an error status.'};
-    }
-    let parsed;
-    try { parsed = JSON.parse(text); } catch {
-      return {ok: false, kind: 'schema', message: 'The account read response was not valid JSON.'};
-    }
-    const payload = parse(parsed);
-    if (!payload) {
-      return {ok: false, kind: 'schema', message: 'The account read response could not be projected onto the allowlisted evidence.'};
-    }
-    return {ok: true, payload};
-  } catch (error) {
-    return {ok: false, kind: 'network', message: 'The account read failed at the transport level.'};
-  } finally {
-    clearTimeout(timer);
-  }
+  return false;
 }
 
-// Account reads use the pinned source-defined endpoints. Origins are fixed;
-// redirects are never followed to an unverified origin.
+function caCertificates() {
+  const caFile = process.env.ZCODE_AGENT_CA_CERT;
+  if (!caFile || caFile.trim() === '') return undefined;
+  try { return fs.readFileSync(caFile.trim()); } catch { return undefined; }
+}
+
+// requestViaProxy tunnels one HTTPS request through an HTTP proxy with
+// CONNECT, then speaks TLS over the tunnel with the custom CA when present.
+function requestViaProxy(target, proxyUrl, cb) {
+  const proxy = new URL(proxyUrl);
+  const connectReq = http.request({
+    host: proxy.hostname, port: proxy.port || 80, method: 'CONNECT',
+    path: `${target.hostname}:443`,
+    headers: {host: `${target.hostname}:443`},
+  });
+  connectReq.setTimeout(READ_TIMEOUT_MS, () => connectReq.destroy(Error('proxy connect timed out')));
+  connectReq.on('connect', (response, socket) => {
+    if (response.statusCode !== 200) {
+      socket.destroy();
+      return cb(Error(`proxy CONNECT failed with status ${response.statusCode}`));
+    }
+    cb(null, socket);
+  });
+  connectReq.on('error', error => cb(error));
+  connectReq.end();
+}
+
+function performRead(url, authorization) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => { if (!settled) { settled = true; resolve(value); } };
+    const target = new URL(url);
+    const ca = caCertificates();
+    const proxyUrl = process.env.ZCODE_HTTP_PROXY;
+    const useProxy = proxyUrl && proxyUrl.trim() !== '' && !noProxyMatches(target.hostname, process.env.ZCODE_NO_PROXY);
+    const headers = {Authorization: authorization, host: target.host, accept: 'application/json'};
+    const send = socket => {
+      const req = https.request({
+        hostname: target.hostname, port: target.port || 443, path: `${target.pathname}${target.search}`,
+        method: 'GET', headers,
+        ca,
+        ...(socket ? {createConnection: () => socket} : {}),
+      }, response => {
+        if (response.statusCode >= 300 && response.statusCode < 400) {
+          response.resume();
+          return finish({ok: false, kind: 'schema', message: 'The account read redirected to an unverified origin; refusing to follow it.'});
+        }
+        let size = 0;
+        const chunks = [];
+        response.on('data', chunk => {
+          size += chunk.length;
+          if (size > MAX_READ_BYTES) {
+            response.destroy();
+            return finish({ok: false, kind: 'schema', message: 'The account read response exceeded its size bound.'});
+          }
+          chunks.push(chunk);
+        });
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          if (response.statusCode === 401 || response.statusCode === 403) {
+            return finish({ok: false, kind: 'auth', message: 'The account read was rejected as unauthenticated; sign in or refresh the plan in ZCode.'});
+          }
+          if (response.statusCode !== 200) {
+            return finish({ok: false, kind: 'network', httpCode: response.statusCode, message: 'The account read endpoint returned an error status.'});
+          }
+          let parsed;
+          try { parsed = JSON.parse(text); } catch {
+            return finish({ok: false, kind: 'schema', message: 'The account read response was not valid JSON.'});
+          }
+          finish({ok: true, payload: parsed});
+        });
+        response.on('error', () => finish({ok: false, kind: 'network', message: 'The account read failed while reading the response.'}));
+      });
+      req.setTimeout(READ_TIMEOUT_MS, () => req.destroy(Error('account read timed out')));
+      req.on('error', () => finish({ok: false, kind: 'network', message: 'The account read failed at the transport level.'}));
+      req.end();
+    };
+    if (useProxy) {
+      requestViaProxy(target, proxyUrl.trim(), (error, socket) => {
+        if (error) return finish({ok: false, kind: 'network', message: 'The account read could not establish the proxy tunnel.'});
+        send(socket);
+      });
+    } else {
+      send(null);
+    }
+  });
+}
+
+// readSuccessfulEnvelope applies the inspected upstream business-envelope
+// contract before any projection: success:false or a failed business code is
+// an error even when a data body rides along.
+function readSuccessfulEnvelope(parsed) {
+  if (!parsed || typeof parsed !== 'object') return {ok: false};
+  if (parsed.success === false) return {ok: false};
+  if (parsed.code !== undefined && parsed.code !== 0 && parsed.code !== 200) return {ok: false};
+  return {ok: true, data: parsed.data};
+}
+
+// Account reads use the pinned source-defined endpoints with the confirmed
+// authorization source per plan: the Start balance takes the ZCode JWT, and
+// the Individual subscription list takes the Individual plan API key itself,
+// exactly like the upstream availability readers. Origins are fixed; redirects
+// are never followed to an unverified origin.
 const balanceOrigin = 'https://zcode.z.ai';
 const subscriptionOrigin = 'https://api.z.ai';
 
-function readStartBalance(runtime, jwt) {
+async function readStartBalance(runtime, jwt) {
   const version = appVersion(runtime);
   if (!version) {
-    return Promise.resolve({ok: false, kind: 'schema', message: 'The ZCode app version could not be resolved; the Start balance read is unavailable.'});
+    return {ok: false, kind: 'schema', message: 'The ZCode app version could not be resolved; the Start balance read is unavailable.'};
+  }
+  if (!jwt) {
+    return {ok: false, kind: 'auth', message: 'No usable Start Plan credential for the guarded read; sign in or refresh the plan in ZCode.'};
   }
   const url = `${balanceOrigin}/api/v1/zcode-plan/billing/balance?app_version=${encodeURIComponent(version)}`;
-  return guardedRead(url, jwt, parsed => {
-    if (!parsed || typeof parsed !== 'object' || !parsed.data || typeof parsed.data !== 'object') return null;
-    return {data: parsed.data};
-  });
+  const response = await performRead(url, `Bearer ${jwt}`);
+  if (!response.ok) return response;
+  const envelope = readSuccessfulEnvelope(response.payload);
+  if (!envelope.ok || !envelope.data || typeof envelope.data !== 'object') {
+    return {ok: false, kind: 'schema', message: 'The Start balance read returned a business error or unreadable evidence.'};
+  }
+  return {ok: true, payload: {data: envelope.data}};
 }
 
-function readIndividualSubscription(credential) {
-  const url = `${subscriptionOrigin}/api/biz/subscription/list`;
-  return guardedRead(url, credential, parsed => {
-    if (!parsed || typeof parsed !== 'object' || !parsed.data) return null;
-    return {data: parsed.data};
-  });
+// normalizeApiKeyForHeader mirrors the upstream header normalization: strip a
+// pasted Bearer prefix and send the bare structured key.
+function normalizeApiKeyForHeader(value) {
+  const trimmed = String(value || '').trim().replace(/^Bearer\s+/i, '').trim();
+  const structured = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/.exec(trimmed);
+  if (structured) return structured[0];
+  const ascii = /^[\x21-\x7e]+/.exec(trimmed);
+  return ascii ? ascii[0].trim() : '';
 }
 
-// readRegistryView projects the live registry service view onto the bounded
-// selectability evidence: the native builtin revision plus, per provider, the
-// exact model identities, their reasoning values when the view carries them,
-// and the observed disabled reasons. Shapes the projection cannot interpret
-// stay unknown instead of being guessed; the view is read through the same
-// guarded registry runtime the bootstrap uses, and it is always disposed.
+async function readIndividualSubscription(individualApiKey) {
+  const key = normalizeApiKeyForHeader(individualApiKey);
+  if (!key) {
+    return {ok: false, kind: 'auth', message: 'No usable Individual credential for the guarded read; sign in or refresh the plan in ZCode.'};
+  }
+  const response = await performRead(`${subscriptionOrigin}/api/biz/subscription/list`, key);
+  if (!response.ok) return response;
+  const envelope = readSuccessfulEnvelope(response.payload);
+  if (!envelope.ok) {
+    return {ok: false, kind: 'schema', message: 'The Individual subscription read returned a business error.'};
+  }
+  return {ok: true, payload: {data: envelope.data}};
+}
+
+// readRegistryView projects the live registry view onto the bounded
+// selectability evidence. The service must start() before getView(): the view
+// is materialized from the builtin sources with the account data applied. This
+// host deliberately has no disabledReason source, so none is invented;
+// reasoning values come from each model's own option spec. Shapes the
+// projection cannot interpret stay unknown instead of being guessed, and the
+// registry runtime is always disposed.
 async function readRegistryView(pick, found, ensure, env) {
   let registry;
   try {
@@ -288,53 +395,41 @@ async function readRegistryView(pick, found, ensure, env) {
   } catch {
     return {ok: false, kind: 'schema', message: 'The ZCode provider registry interface is unavailable; update the adapter.'};
   }
-  if (!registry || typeof registry.runtime?.configService?.read !== 'function' || typeof registry.dispose !== 'function') {
+  const service = registry && registry.registryService;
+  if (!service || typeof service.start !== 'function' || typeof service.getView !== 'function' ||
+      !registry.runtime?.configService || typeof registry.runtime.configService.read !== 'function' ||
+      typeof registry.dispose !== 'function') {
     return {ok: false, kind: 'schema', message: 'ZCode provider registry interface unavailable; update the adapter.'};
   }
   try {
     const config = await registry.runtime.configService.read();
-    if (!config || typeof config !== 'object' || typeof config.zcodeBuiltinRevision !== 'string' || config.zcodeBuiltinRevision.trim() === '') {
+    const revision = config && typeof config.zcodeBuiltinRevision === 'string' ? config.zcodeBuiltinRevision.trim() : '';
+    if (revision === '') {
       return {ok: false, kind: 'schema', message: 'The registry view carried no native builtin revision.'};
     }
-    const providers = [];
-    const rawProviders = config.providers;
-    const pushProvider = (providerId, entry) => {
-      if (typeof providerId !== 'string' || providerId === '' || !entry || typeof entry !== 'object') return;
-      const state = config.states && typeof config.states === 'object' ? config.states[providerId] : null;
-      const providerUnavailable = Boolean(state && typeof state === 'object' && state.availability && state.availability !== 'available');
-      const models = [];
-      const rawModels = entry.models;
-      const pushModel = model => {
-        if (typeof model === 'string' && model.trim() !== '') {
-          models.push({modelId: model.trim(), reasoningLevels: null, disabledReason: providerUnavailable ? 'provider unavailable' : null});
-          return;
-        }
-        if (!model || typeof model !== 'object') return;
-        const modelId = typeof model.id === 'string' && model.id.trim() !== '' ? model.id.trim()
-          : (typeof model.modelId === 'string' && model.modelId.trim() !== '' ? model.modelId.trim() : null);
-        if (!modelId) return;
-        const levels = Array.isArray(model.reasoningLevels) && model.reasoningLevels.every(v => typeof v === 'string')
-          ? model.reasoningLevels
-          : null;
-        const disabledReason = providerUnavailable ? 'provider unavailable'
-          : (typeof model.disabledReason === 'string' && model.disabledReason.trim() !== '' ? model.disabledReason : null);
-        models.push({modelId, reasoningLevels: levels, disabledReason});
-      };
-      if (Array.isArray(rawModels)) rawModels.forEach(pushModel);
-      providers.push({providerId, models});
-    };
-    if (Array.isArray(rawProviders)) {
-      for (const entry of rawProviders) {
-        pushProvider(entry && entry.id, entry);
-      }
-    } else if (rawProviders && typeof rawProviders === 'object') {
-      for (const [providerId, entry] of Object.entries(rawProviders)) {
-        pushProvider(providerId, entry && typeof entry === 'object' ? {...entry, id: entry.id ?? providerId} : null);
-      }
-    } else {
+    await service.start();
+    const view = service.getView();
+    if (!view || !Array.isArray(view.providers)) {
       return {ok: false, kind: 'schema', message: 'The registry view carried no interpretable provider surface.'};
     }
-    return {ok: true, payload: {revision: config.zcodeBuiltinRevision.trim(), providers}};
+    const providers = [];
+    for (const provider of view.providers) {
+      if (!provider || typeof provider.providerId !== 'string' || provider.providerId === '') continue;
+      const models = [];
+      for (const model of Array.isArray(provider.models) ? provider.models : []) {
+        if (!model || typeof model.modelId !== 'string' || model.modelId.trim() === '') continue;
+        const values = model.config?.optionSpecs?.reasoningLevel?.values;
+        models.push({
+          modelId: model.modelId.trim(),
+          reasoningLevels: Array.isArray(values) && values.every(v => typeof v === 'string') ? values : null,
+          disabledReason: null,
+        });
+      }
+      providers.push({providerId: provider.providerId, models});
+    }
+    return {ok: true, payload: {revision, providers}};
+  } catch {
+    return {ok: false, kind: 'schema', message: 'The registry view could not be materialized; update the adapter.'};
   } finally {
     try { registry.dispose(); } catch {}
   }
@@ -426,17 +521,11 @@ async function main() {
     } catch {}
     if (!secret) return failBootstrap(msg.id, 'ZCode credential is unavailable; sign in again in ZCode.');
     setSecret(secret);
-    // The subscription read is account-scoped; prefer the Z.AI OAuth access
-    // token, then the Start JWT, then the Individual key. All stay in the
+    // The subscription read uses the confirmed authorization source for the
+    // Individual plan: the plan's own API key, like the upstream availability
+    // reader. No other stored token is consulted. All secrets stay in the
     // shim; Go only ever sees the normalized evidence.
-    let subscriptionCredential = null;
-    for (const key of [...names.filter(key => key.startsWith('oauth:') && key.endsWith(':access_token')), ...credentialKeys().filter(key => key.startsWith('oauth:') && key.endsWith(':access_token')), 'zcodejwttoken', names[0]]) {
-      try {
-        const candidate = await ensure(() => store.load(key));
-        if (candidate) { subscriptionCredential = candidate; setSecret(candidate); break; }
-      } catch {}
-    }
-    authMaterial = {individual: secret, start: identity.jwt, subscription: subscriptionCredential || secret};
+    authMaterial = {individual: secret, start: identity.jwt, subscription: secret};
     // Registry entry point first: interface-checked and disposed after the
     // builtin revision is read; the credential store was interface-checked
     // before any credential value was read.
@@ -581,4 +670,4 @@ async function main() {
   }).on('close', () => { if (child) child.stdin.end(); });
 }
 if (!module.parent) main().catch(error => fatal(error.message));
-module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment};
+module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope};

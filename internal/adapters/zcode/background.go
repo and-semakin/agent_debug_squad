@@ -3,6 +3,8 @@ package zcode
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -59,6 +61,52 @@ func (b *backgroundTasks) observeSessionSnapshot(raw json.RawMessage) {
 			b.observe(job.JobID)
 		}
 	}
+}
+
+// refreshBackgroundTasks re-reads the session snapshot and folds the current
+// backgroundJobs surface into the owned set: tasks the attempt started during
+// the turn join before the drain, so cleanup cannot pass with an empty list
+// while old work still runs.
+func refreshBackgroundTasks(ctx context.Context, call func(ctx context.Context, method string, params any, result any) error, session string, tasks *backgroundTasks) error {
+	var raw json.RawMessage
+	if err := call(ctx, "session/read", map[string]any{"sessionId": session}, &raw); err != nil {
+		return err
+	}
+	var envelope struct {
+		Session json.RawMessage `json:"session"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return errors.New("zcode session snapshot could not be decoded")
+	}
+	tasks.observeSessionSnapshot(envelope.Session)
+	return nil
+}
+
+// confirmBackgroundTasksGone verifies with one fresh session read that every
+// owned task left the backgroundJobs surface after cancellation. A task that
+// lingers keeps the drain uncertain.
+func confirmBackgroundTasksGone(ctx context.Context, call func(ctx context.Context, method string, params any, result any) error, session string, tasks *backgroundTasks) error {
+	if tasks == nil || tasks.count() == 0 {
+		return nil
+	}
+	var raw json.RawMessage
+	if err := call(ctx, "session/read", map[string]any{"sessionId": session}, &raw); err != nil {
+		return err
+	}
+	var envelope struct {
+		Session json.RawMessage `json:"session"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return errors.New("zcode session snapshot could not be decoded")
+	}
+	remaining := newBackgroundTasks()
+	remaining.observeSessionSnapshot(envelope.Session)
+	for _, id := range tasks.order {
+		if remaining.ids[id] {
+			return fmt.Errorf("background task %s is still present after cancellation", id)
+		}
+	}
+	return nil
 }
 
 // cleanupDeadline is the shared terminal cleanup budget for every final
