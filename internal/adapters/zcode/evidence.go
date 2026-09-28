@@ -50,6 +50,10 @@ type startBalance struct {
 	ServerTime time.Time
 	Plans      []startPlan
 	Buckets    []startBucket
+	// hasPlans and hasBalances distinguish an authoritative empty list from a
+	// missing one: a payload without the arrays stays unknown.
+	hasPlans    bool
+	hasBalances bool
 }
 
 // decodeStartBalance projects the bounded balance response onto the
@@ -74,6 +78,8 @@ func decodeStartBalance(raw json.RawMessage) (startBalance, error) {
 	if wire.Data.ServerTime != nil && *wire.Data.ServerTime >= 0 && !math.IsInf(*wire.Data.ServerTime, 0) {
 		out.ServerTime = time.Unix(int64(*wire.Data.ServerTime), 0).UTC()
 	}
+	out.hasPlans = wire.Data.Plans != nil
+	out.hasBalances = wire.Data.Balances != nil
 	decodeNumber := func(raw json.RawMessage) (float64, bool) {
 		if len(raw) == 0 || string(raw) == "null" {
 			return 0, false

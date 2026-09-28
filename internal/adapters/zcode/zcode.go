@@ -72,24 +72,58 @@ type activeRun struct {
 	background *backgroundTasks
 	// stateMu guards the mutable run maps and identity fields, which the
 	// dispatcher goroutine and the Send loop now touch concurrently.
-	stateMu               sync.Mutex
-	generation            uint64
-	workspace             string
-	provider              string
-	model                 string
-	preferencesAssociated bool
-	continued             bool
-	decision              routingDecision
-	lastActivity          time.Time
+	stateMu    sync.Mutex
+	generation uint64
+	workspace  string
+	provider   string
+	model      string
+	// preferencesSessionID records the one bootstrap association granted while
+	// the create/resume result is outstanding; the returned snapshot's session
+	// ID must agree with it. preferencesGranted counts granted associations.
+	preferencesSessionID string
+	preferencesGranted   int
+	continued            bool
+	decision             routingDecision
+	lastActivity         time.Time
 }
 type snapshot struct {
-	Session struct {
+	// SessionRaw keeps the verified session surface (including the
+	// backgroundJobs list) for ownership tracking; SessionID is the decoded
+	// identity used for correlation.
+	SessionRaw json.RawMessage `json:"-"`
+	Session    struct {
 		SessionID string `json:"sessionId"`
 	} `json:"session"`
 	Settings struct {
 		Model json.RawMessage `json:"model"`
 	} `json:"settings"`
 }
+
+// decodeSnapshot decodes a create/resume snapshot and preserves the raw
+// session object for background job tracking.
+func decodeSnapshot(raw []byte, snap *snapshot) error {
+	var envelope struct {
+		Session struct {
+			SessionID string `json:"sessionId"`
+		} `json:"session"`
+		Settings struct {
+			Model json.RawMessage `json:"model"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return err
+	}
+	snap.Session = envelope.Session
+	snap.Settings = envelope.Settings
+	var full struct {
+		Session json.RawMessage `json:"session"`
+	}
+	if err := json.Unmarshal(raw, &full); err == nil {
+		snap.SessionRaw = full.Session
+	}
+	return nil
+}
+
 type event struct {
 	Type      string `json:"type"`
 	SessionID string `json:"sessionId"`
@@ -327,15 +361,19 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	if a.spec.Yolo != nil && !*a.spec.Yolo {
 		mode = "build"
 	}
-	var snap snapshot
+	var snapRaw json.RawMessage
 	fresh := state.BackendSessionID == ""
 	if fresh {
-		err = c.call(ctx, "session/create", map[string]any{"workspace": map[string]string{"workspaceKey": state.WorkspaceDir, "workspacePath": state.WorkspaceDir}, "mode": mode, "model": a.selection(decision.Provider), "titleGenerationEnabled": false}, &snap)
+		err = c.call(ctx, "session/create", map[string]any{"workspace": map[string]string{"workspaceKey": state.WorkspaceDir, "workspacePath": state.WorkspaceDir}, "mode": mode, "model": a.selection(decision.Provider), "titleGenerationEnabled": false}, &snapRaw)
 	} else {
-		err = c.call(ctx, "session/resume", map[string]any{"sessionId": state.BackendSessionID}, &snap)
+		err = c.call(ctx, "session/resume", map[string]any{"sessionId": state.BackendSessionID}, &snapRaw)
 	}
 	if err != nil {
 		return result, next, err
+	}
+	var snap snapshot
+	if err = decodeSnapshot(snapRaw, &snap); err != nil {
+		return result, next, fmt.Errorf("zcode returned an unreadable session snapshot: %w", err)
 	}
 	r.stateMu.Lock()
 	r.session = snap.Session.SessionID
@@ -347,8 +385,11 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	if !fresh && session != state.BackendSessionID {
 		return result, next, errors.New("zcode resumed a different session")
 	}
+	if err = r.reconcilePreferences(session); err != nil {
+		return result, next, err
+	}
 	next.BackendSessionID = session
-	r.background.observeSnapshot(snap.Settings.Model)
+	r.background.observeSessionSnapshot(snap.SessionRaw)
 	if len(snap.Settings.Model) > 0 {
 		record, _ := json.Marshal(map[string]any{"type": "zcode.models", "model": snap.Settings.Model})
 		domain.ReportRunDiagnostic(sink, string(record))
@@ -443,7 +484,6 @@ func (r *activeRun) awaitTurn(ctx context.Context, a *Adapter) (domain.RunResult
 			}
 			r.stateMu.Lock()
 			r.lastActivity = time.Now().UTC()
-			r.background.observeEvent(&e)
 			if e.Type == "permission.resolved" {
 				if _, ok := r.pending[e.Payload.RequestID]; ok {
 					delete(r.pending, e.Payload.RequestID)
@@ -654,21 +694,58 @@ func (r *activeRun) preferences(msg wireMessage) {
 		SessionID string `json:"sessionId"`
 	}
 	_ = json.Unmarshal(msg.Params, &params)
+	respond := func() {
+		// Current Squad policy: no native search enhancements, no memory, and
+		// no automatic question resolution. Upstream fallback defaults that
+		// enable question auto-resolution are never used.
+		_ = r.c.respond(context.Background(), map[string]any{"id": msg.ID, "result": map[string]any{"nativeSearchEnhancementsEnabled": false, "memoryEnabled": false, "askUserQuestionAutoResolutionEnabled": false}})
+	}
+	reject := func() {
+		_ = r.c.respond(context.Background(), map[string]any{"id": msg.ID, "error": wireError{Code: -32602, Message: "Runtime preferences do not belong to the active Squad session"}})
+	}
 	r.stateMu.Lock()
 	session := r.session
-	associated := r.preferencesAssociated
-	if params.SessionID == "" && session == "" && !associated {
-		r.preferencesAssociated = true
-	}
-	r.stateMu.Unlock()
-	if params.SessionID != "" && params.SessionID != session {
-		_ = r.c.respond(context.Background(), map[string]any{"id": msg.ID, "error": wireError{Code: -32602, Message: "Runtime preferences do not belong to the active Squad session"}})
+	if session != "" {
+		// Session known: the request must carry the active session identity.
+		// A foreign identity is a hard protocol violation that fails the run,
+		// not merely a rejected request.
+		matches := params.SessionID == "" || params.SessionID == session
+		r.stateMu.Unlock()
+		if !matches {
+			reject()
+			return
+		}
+		respond()
 		return
 	}
-	// Current Squad policy: no native search enhancements, no memory, and no
-	// automatic question resolution. Upstream fallback defaults that enable
-	// question auto-resolution are never used.
-	_ = r.c.respond(context.Background(), map[string]any{"id": msg.ID, "result": map[string]any{"nativeSearchEnhancementsEnabled": false, "memoryEnabled": false, "askUserQuestionAutoResolutionEnabled": false}})
+	// Bootstrap window: the runtime names the new sessionId while the
+	// create/resume result is outstanding. Exactly one association is
+	// permitted per outstanding operation; a repeated request with the same
+	// identity is answered identically, a different identity is rejected.
+	if r.preferencesGranted == 0 || (r.preferencesSessionID != "" && r.preferencesSessionID == params.SessionID) {
+		r.preferencesSessionID = params.SessionID
+		r.preferencesGranted++
+		r.stateMu.Unlock()
+		respond()
+		return
+	}
+	r.stateMu.Unlock()
+	reject()
+}
+
+// reconcilePreferences verifies the bootstrap association against the
+// returned snapshot identity. A mismatch fails the run before any turn work.
+func (r *activeRun) reconcilePreferences(returnedSession string) error {
+	r.stateMu.Lock()
+	associated := r.preferencesSessionID
+	granted := r.preferencesGranted
+	r.preferencesSessionID = ""
+	r.preferencesGranted = 0
+	r.stateMu.Unlock()
+	if granted > 0 && associated != "" && associated != returnedSession {
+		return errors.New("zcode preference association does not match the returned session identity")
+	}
+	return nil
 }
 
 // authorizeHeaders validates a reverse auth request against the current

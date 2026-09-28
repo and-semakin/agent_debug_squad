@@ -271,6 +271,11 @@ type eligibility struct {
 // confirmed absence, expiry, or exhaustion may fall back to Individual; every
 // unknown or ambiguous state fails closed without spending Individual quota.
 func (e *routingEngine) decideStartFirst(ctx context.Context, in eligibility) (routingDecision, error) {
+	// One budget bounds the whole decision: Start read, busy recheck,
+	// Individual evidence, and registry projection all draw from the same
+	// fifteen seconds (or the caller's earlier deadline).
+	ctx, cancel := context.WithTimeout(ctx, routingDecisionBudget)
+	defer cancel()
 	var counter endpointAttempts
 	balanceOutcome := e.readEndpoint(ctx, "start-balance", &counter, func(callCtx context.Context) readOutcome {
 		return e.host.readStartBalance(callCtx)
@@ -300,6 +305,14 @@ func (e *routingEngine) decideStartFirst(ctx context.Context, in eligibility) (r
 	spendable, busy, exhausted, expired := false, false, false, false
 	sawModel := len(candidates) > 0
 	for _, bucket := range candidates {
+		// Expiry evidence counts regardless of plan ownership: an ended
+		// promotion must fall back to Individual, not read as incomplete data.
+		if bucket.hasExpiry && !bucket.ExpiresAt.IsZero() && !bucket.ExpiresAt.After(now) {
+			expired = true
+		}
+		if owningPlan(balance, bucket) != nil && !owningPlan(balance, bucket).active(now) {
+			expired = true
+		}
 		if !bucketOwnedByActivePlan(balance, bucket, now) {
 			continue
 		}
@@ -311,9 +324,6 @@ func (e *routingEngine) decideStartFirst(ctx context.Context, in eligibility) (r
 		}
 		if ok, known := bucket.exhausted(); known && ok {
 			exhausted = true
-		}
-		if bucket.hasExpiry && !bucket.ExpiresAt.IsZero() && !bucket.ExpiresAt.After(now) {
-			expired = true
 		}
 	}
 	if spendable {
@@ -387,7 +397,7 @@ func (e *routingEngine) recheckBusy(ctx context.Context, in eligibility, modelKe
 // to confirm that a model is authoritatively absent from Start. A truncated
 // or ambiguous payload must stay unknown.
 func completeEligibility(balance startBalance) bool {
-	if balance.ServerTime.IsZero() {
+	if balance.ServerTime.IsZero() || !balance.hasPlans || !balance.hasBalances {
 		return false
 	}
 	for _, bucket := range balance.Buckets {
@@ -398,11 +408,28 @@ func completeEligibility(balance startBalance) bool {
 	return true
 }
 
+// startProvider resolves the Start-side provider of the routing family. An
+// explicit start-first provider ID designates the family, never a pinned
+// plan: an explicit Individual provider still routes through Start whenever
+// Start has the spendable allowance.
 func (e *routingEngine) startProvider(in eligibility) string {
-	if in.provider == ProviderIndividual || in.provider == ProviderStart {
-		return in.provider
-	}
+	_ = in
 	return ProviderStart
+}
+
+// owningPlan returns the plan instance that owns a bucket, matched the way
+// the source pairs them: user_plan_id first, then an unowned bucket falls to
+// any listed plan. Nil means no owning plan record.
+func owningPlan(balance startBalance, bucket startBucket) *startPlan {
+	for i, plan := range balance.Plans {
+		if bucket.UserPlanID != "" && plan.UserPlanID != "" && bucket.UserPlanID == plan.UserPlanID {
+			return &balance.Plans[i]
+		}
+	}
+	if bucket.UserPlanID == "" && bucket.EntitlementID == "" && len(balance.Plans) > 0 {
+		return &balance.Plans[0]
+	}
+	return nil
 }
 
 // bucketOwnedByActivePlan associates a bucket with an active plan instance.
@@ -412,18 +439,8 @@ func bucketOwnedByActivePlan(balance startBalance, bucket startBucket, now time.
 	if balance.ServerTime.IsZero() {
 		return false
 	}
-	for _, plan := range balance.Plans {
-		if !plan.active(now) {
-			continue
-		}
-		if bucket.UserPlanID != "" && plan.UserPlanID != "" && bucket.UserPlanID == plan.UserPlanID {
-			return true
-		}
-		if bucket.UserPlanID == "" && bucket.EntitlementID == "" {
-			return true
-		}
-	}
-	return false
+	plan := owningPlan(balance, bucket)
+	return plan != nil && plan.active(now)
 }
 
 // decideFixed enforces the tightened fixed-mode gates: fresh Individual
@@ -438,6 +455,10 @@ func (e *routingEngine) decideFixed(ctx context.Context, in eligibility) (routin
 // provider/model/reasoning in the live selectable registry view. Unknown
 // evidence fails closed without dispatching.
 func (e *routingEngine) decideIndividual(ctx context.Context, in eligibility, startReason string) (routingDecision, error) {
+	// The subscription read, the registry projection, and any upstream
+	// caller's remaining decision budget share one bounded context.
+	ctx, cancel := context.WithTimeout(ctx, routingDecisionBudget)
+	defer cancel()
 	var counter endpointAttempts
 	subOutcome := e.readEndpoint(ctx, "individual-subscription", &counter, func(callCtx context.Context) readOutcome {
 		return e.host.readIndividualSubscription(callCtx)

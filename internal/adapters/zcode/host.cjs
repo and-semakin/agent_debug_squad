@@ -275,6 +275,71 @@ function readIndividualSubscription(credential) {
   });
 }
 
+// readRegistryView projects the live registry service view onto the bounded
+// selectability evidence: the native builtin revision plus, per provider, the
+// exact model identities, their reasoning values when the view carries them,
+// and the observed disabled reasons. Shapes the projection cannot interpret
+// stay unknown instead of being guessed; the view is read through the same
+// guarded registry runtime the bootstrap uses, and it is always disposed.
+async function readRegistryView(pick, found, ensure, env) {
+  let registry;
+  try {
+    registry = await ensure(() => pick(found.registry)(env));
+  } catch {
+    return {ok: false, kind: 'schema', message: 'The ZCode provider registry interface is unavailable; update the adapter.'};
+  }
+  if (!registry || typeof registry.runtime?.configService?.read !== 'function' || typeof registry.dispose !== 'function') {
+    return {ok: false, kind: 'schema', message: 'ZCode provider registry interface unavailable; update the adapter.'};
+  }
+  try {
+    const config = await registry.runtime.configService.read();
+    if (!config || typeof config !== 'object' || typeof config.zcodeBuiltinRevision !== 'string' || config.zcodeBuiltinRevision.trim() === '') {
+      return {ok: false, kind: 'schema', message: 'The registry view carried no native builtin revision.'};
+    }
+    const providers = [];
+    const rawProviders = config.providers;
+    const pushProvider = (providerId, entry) => {
+      if (typeof providerId !== 'string' || providerId === '' || !entry || typeof entry !== 'object') return;
+      const state = config.states && typeof config.states === 'object' ? config.states[providerId] : null;
+      const providerUnavailable = Boolean(state && typeof state === 'object' && state.availability && state.availability !== 'available');
+      const models = [];
+      const rawModels = entry.models;
+      const pushModel = model => {
+        if (typeof model === 'string' && model.trim() !== '') {
+          models.push({modelId: model.trim(), reasoningLevels: null, disabledReason: providerUnavailable ? 'provider unavailable' : null});
+          return;
+        }
+        if (!model || typeof model !== 'object') return;
+        const modelId = typeof model.id === 'string' && model.id.trim() !== '' ? model.id.trim()
+          : (typeof model.modelId === 'string' && model.modelId.trim() !== '' ? model.modelId.trim() : null);
+        if (!modelId) return;
+        const levels = Array.isArray(model.reasoningLevels) && model.reasoningLevels.every(v => typeof v === 'string')
+          ? model.reasoningLevels
+          : null;
+        const disabledReason = providerUnavailable ? 'provider unavailable'
+          : (typeof model.disabledReason === 'string' && model.disabledReason.trim() !== '' ? model.disabledReason : null);
+        models.push({modelId, reasoningLevels: levels, disabledReason});
+      };
+      if (Array.isArray(rawModels)) rawModels.forEach(pushModel);
+      providers.push({providerId, models});
+    };
+    if (Array.isArray(rawProviders)) {
+      for (const entry of rawProviders) {
+        pushProvider(entry && entry.id, entry);
+      }
+    } else if (rawProviders && typeof rawProviders === 'object') {
+      for (const [providerId, entry] of Object.entries(rawProviders)) {
+        pushProvider(providerId, entry && typeof entry === 'object' ? {...entry, id: entry.id ?? providerId} : null);
+      }
+    } else {
+      return {ok: false, kind: 'schema', message: 'The registry view carried no interpretable provider surface.'};
+    }
+    return {ok: true, payload: {revision: config.zcodeBuiltinRevision.trim(), providers}};
+  } finally {
+    try { registry.dispose(); } catch {}
+  }
+}
+
 async function main() {
   if (process.env.SQUAD_PROBE === '1') {
     probe(process.argv[1], process.argv[2]);
@@ -448,6 +513,28 @@ async function main() {
     });
   };
 
+  // Squad-owned account reads. They run in the shim with native credentials
+  // and answer with the bounded envelope; they never reach the App Server.
+  const requireBootstrap = () => {
+    if (!bootstrapped || !authMaterial) {
+      return {ok: false, kind: 'auth', message: 'The guarded account read ran before bootstrap completed.'};
+    }
+    return null;
+  };
+  const handleRead = async msg => {
+    const missing = requireBootstrap();
+    if (missing) return respondToSquad(msg.id, {result: missing});
+    let envelope;
+    if (msg.method === 'squad/readStartBalance') {
+      envelope = await readStartBalance(runtime, authMaterial.start);
+    } else if (msg.method === 'squad/readIndividualSubscription') {
+      envelope = await readIndividualSubscription(authMaterial.subscription);
+    } else {
+      envelope = await readRegistryView(pick, found, ensure, env);
+    }
+    respondToSquad(msg.id, {result: envelope});
+  };
+
   readline.createInterface({input: process.stdin}).on('line', async line => {
     let msg;
     try { msg = JSON.parse(line); } catch { return fatal('Malformed Squad host request.'); }
@@ -459,6 +546,14 @@ async function main() {
     }
     if (msg.method === 'squad/applyAccountOverlay') {
       return applyOverlay(msg);
+    }
+    if (msg.method === 'squad/readStartBalance' || msg.method === 'squad/readIndividualSubscription' || msg.method === 'squad/readRegistryView') {
+      try {
+        await handleRead(msg);
+      } catch (error) {
+        respondToSquad(msg.id, {result: {ok: false, kind: 'schema', message: 'The guarded account read failed inside the shim.'}});
+      }
+      return;
     }
     if (msg.id !== undefined && msg.method === undefined) {
       // A Squad response: either the authorization verdict for a pending

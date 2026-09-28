@@ -17,7 +17,7 @@
       {"note": "terminal failure", "frame": {"method": "session/event", "params": {"type": "turn.failed", "sessionId": "s1", "turnId": "t1", "payload": {"inputId": "in-1", "error": {"code": "start_plan_quota_exhausted", "type": "quota_exhaustion"}}}}},
       {"note": "admission busy failure is not exhaustion", "frame": {"method": "session/event", "params": {"type": "turn.failed", "sessionId": "s1", "turnId": "t1", "payload": {"inputId": "in-1", "error": {"code": "3010", "type": "admission_busy"}}}}},
       {"note": "subagent pagination page", "frame": {"id": "squad-11", "result": {"running": [{"childSessionId": "c1", "status": "running"}], "ended": {"items": [{"childSessionId": "c2", "status": "success"}], "nextCursor": "cur-2"}}}},
-      {"note": "background task event", "frame": {"method": "session/event", "params": {"type": "background_task.started", "sessionId": "s1", "turnId": "t1", "payload": {"taskId": "bg-1"}}}}
+      {"note": "session snapshot background jobs", "frame": {"id": "squad-12", "result": {"session": {"sessionId": "s1", "backgroundJobs": [{"id": "bg-1", "kind": "bash"}]}}}}
     ]
   }
 }

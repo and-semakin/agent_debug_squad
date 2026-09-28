@@ -297,7 +297,19 @@ func TestProtocolHelper(t *testing.T) {
 				}
 				complete()
 			case id == "pref1":
-				if answer["nativeSearchEnhancementsEnabled"] != false || answer["memoryEnabled"] != false || answer["askUserQuestionAutoResolutionEnabled"] != false {
+				if scenario == "preferences-foreign" {
+					if m.Error == nil {
+						os.Exit(16)
+					}
+					continue
+				}
+				if scenario == "preferences-mismatch" {
+					// Both fail-closed outcomes are legitimate: the
+					// association mismatch fails the run, and a late-dispatched
+					// foreign identity is rejected outright.
+					continue
+				}
+				if m.Error != nil || answer["nativeSearchEnhancementsEnabled"] != false || answer["memoryEnabled"] != false || answer["askUserQuestionAutoResolutionEnabled"] != false {
 					os.Exit(9)
 				}
 			case strings.HasPrefix(id, "squad-auth-"):
@@ -357,14 +369,25 @@ func TestProtocolHelper(t *testing.T) {
 			result = map[string]any{"allow": true}
 		case "session/create", "session/resume":
 			fresh = m.Method == "session/create"
-			if scenario == "preferences-during-create" && fresh {
-				emit(map[string]any{"id": "pref1", "method": "session/requestRuntimePreferences", "params": map[string]any{}})
+			// The runtime names the new sessionId in the preferences request
+			// while the create result is outstanding.
+			if fresh && (scenario == "preferences-during-create" || scenario == "preferences-mismatch") {
+				sessionID := "session"
+				if scenario == "preferences-mismatch" {
+					sessionID = "other-session"
+				}
+				emit(map[string]any{"id": "pref1", "method": "session/requestRuntimePreferences", "params": map[string]any{"sessionId": sessionID}})
 			}
 			result = map[string]any{"session": map[string]string{"sessionId": "session"}, "settings": map[string]any{"model": map[string]any{"available": []string{"Flash"}}}}
 		case "session/setMode":
 			var p struct{ Mode string }
 			_ = json.Unmarshal(m.Params, &p)
 			mode = p.Mode
+			if scenario == "preferences-foreign" {
+				// A preference request naming a foreign session must be
+				// rejected by the adapter.
+				emit(map[string]any{"id": "pref1", "method": "session/requestRuntimePreferences", "params": map[string]any{"sessionId": "foreign-session"}})
+			}
 		case "session/subagents":
 			items := []map[string]string{}
 			var params struct{ SessionID string }

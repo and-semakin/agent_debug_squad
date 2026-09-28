@@ -9,7 +9,8 @@ import (
 // Background work tracking. Background bash/work tasks are independent of
 // child sessions: parent completion does not imply background completion, and
 // a stop acknowledgement alone never establishes cleanup completion. Task
-// identities come from allowlisted snapshot/event fields only.
+// identities come from the verified session snapshot fields only; shapes the
+// source does not define are never guessed.
 type backgroundTasks struct {
 	ids   map[string]bool
 	order []string
@@ -19,7 +20,7 @@ func newBackgroundTasks() *backgroundTasks {
 	return &backgroundTasks{ids: map[string]bool{}}
 }
 
-// observe records a task identity from an allowlisted wire field. Unknown or
+// observe records a task identity from a verified wire field. Unknown or
 // malformed shapes are ignored rather than guessed.
 func (b *backgroundTasks) observe(taskID string) {
 	if taskID == "" || b.ids[taskID] {
@@ -31,39 +32,31 @@ func (b *backgroundTasks) observe(taskID string) {
 
 func (b *backgroundTasks) count() int { return len(b.order) }
 
-// backgroundTaskEventTypes lists the event kinds that carry background task
-// identity at this baseline. The payload field is allowlisted; anything else
-// is ignored.
-var backgroundTaskEventTypes = map[string]bool{
-	"background_task.started":   true,
-	"background_task.completed": true,
-	"background_task.failed":    true,
-}
-
-// observeEvent tracks background task identity from a session event.
-func (b *backgroundTasks) observeEvent(e *event) {
-	if !backgroundTaskEventTypes[e.Type] {
+// observeSessionSnapshot tracks background job identity from the verified
+// session.backgroundJobs surface of a session snapshot. Anything else is
+// ignored.
+func (b *backgroundTasks) observeSessionSnapshot(raw json.RawMessage) {
+	if len(raw) == 0 {
 		return
 	}
-	b.observe(e.Payload.TaskID)
-}
-
-// observeSnapshot tracks background task identity from a session snapshot.
-func (b *backgroundTasks) observeSnapshot(raw json.RawMessage) {
-	var snap struct {
-		BackgroundTasks []struct {
-			TaskID string `json:"taskId"`
+	var session struct {
+		BackgroundJobs []struct {
 			ID     string `json:"id"`
-		} `json:"backgroundTasks"`
+			TaskID string `json:"taskId"`
+			JobID  string `json:"jobId"`
+		} `json:"backgroundJobs"`
 	}
-	if json.Unmarshal(raw, &snap) != nil {
+	if json.Unmarshal(raw, &session) != nil {
 		return
 	}
-	for _, task := range snap.BackgroundTasks {
-		if task.TaskID != "" {
-			b.observe(task.TaskID)
-		} else {
-			b.observe(task.ID)
+	for _, job := range session.BackgroundJobs {
+		switch {
+		case job.ID != "":
+			b.observe(job.ID)
+		case job.TaskID != "":
+			b.observe(job.TaskID)
+		case job.JobID != "":
+			b.observe(job.JobID)
 		}
 	}
 }

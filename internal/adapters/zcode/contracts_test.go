@@ -229,18 +229,18 @@ func TestLegacyWireFixtureShapes(t *testing.T) {
 	if classifyQuotaExhaustion(mustRaw(t, busy.Params.Payload.Error)) {
 		t.Fatal("admission busy classified as exhaustion")
 	}
-	var background wireMessage
-	if err := json.Unmarshal(byNote["background task event"], &background); err != nil {
+	var snapshotResponse struct {
+		Result struct {
+			Session json.RawMessage `json:"session"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(byNote["session snapshot background jobs"], &snapshotResponse); err != nil {
 		t.Fatal(err)
 	}
 	tasks := newBackgroundTasks()
-	var e event
-	if err := json.Unmarshal(background.Params, &e); err != nil {
-		t.Fatal(err)
-	}
-	tasks.observeEvent(&e)
+	tasks.observeSessionSnapshot(snapshotResponse.Result.Session)
 	if tasks.count() != 1 {
-		t.Fatal("background task identity lost")
+		t.Fatal("background job identity lost")
 	}
 }
 
@@ -655,5 +655,178 @@ func TestCursorRepeatFailsOwnership(t *testing.T) {
 	_, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
 	if err == nil || !contains(err.Error(), "repeated a cursor") {
 		t.Fatalf("expected an incomplete-ownership failure, got %v", err)
+	}
+}
+
+func TestBackgroundJobsFromSessionSnapshot(t *testing.T) {
+	tasks := newBackgroundTasks()
+	tasks.observeSessionSnapshot(json.RawMessage(`{"sessionId":"s1","backgroundJobs":[{"id":"job-1","kind":"bash"},{"taskId":"task-2"}]}`))
+	if tasks.count() != 2 {
+		t.Fatalf("background jobs lost: %v", tasks.order)
+	}
+	// A snapshot without the surface, or with an unreadable one, stays silent.
+	before := tasks.count()
+	tasks.observeSessionSnapshot(json.RawMessage(`{"sessionId":"s1"}`))
+	tasks.observeSessionSnapshot(json.RawMessage(`not json`))
+	tasks.observeSessionSnapshot(nil)
+	if tasks.count() != before {
+		t.Fatal("unverified shapes contributed identities")
+	}
+}
+
+// stubHost answers the guarded read methods with fixed payloads; every
+// unmatched method fails as schema so missing evidence cannot pass silently.
+func stubHost(payloads map[string]json.RawMessage) *hostBridge {
+	return &hostBridge{call: func(ctx context.Context, method string, params any, result any) error {
+		var env readEnvelope
+		if raw, ok := payloads[method]; ok {
+			env = readEnvelope{OK: true, Payload: raw}
+		} else {
+			env = readEnvelope{OK: false, Kind: "schema", Message: "no fixture for " + method}
+		}
+		raw, err := json.Marshal(env)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, result)
+	}}
+}
+
+func fixtureBalance(t *testing.T, name string) json.RawMessage {
+	t.Helper()
+	return fixturePayload(t, filepath.Join("billing", name))
+}
+
+func fixtureRegistry(t *testing.T) json.RawMessage {
+	t.Helper()
+	return fixturePayload(t, filepath.Join("registry", "registry-view.json"))
+}
+
+func TestStartFirstExplicitIndividualPrefersStart(t *testing.T) {
+	// An explicit Individual provider under start-first designates the
+	// routing family, not a pinned plan: a spendable Start bucket wins.
+	spec := domain.AgentSpec{Name: "test", Backend: "zcode", StartupPrompt: "startup marker", StringOptions: map[string]string{"plan_policy": PlanPolicyStartFirst, "provider": ProviderIndividual}, ListOptions: map[string][]string{"env": {"GO_WANT_ZCODE_HELPER=1"}}}
+	a := New(spec)
+	a.command = func() *exec.Cmd {
+		return exec.Command(os.Args[0], "-test.run=^TestProtocolHelper$", "--", "quota-continuation")
+	}
+	state, err := a.Init(context.Background(), spec, domain.AgentState{WorkspaceDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FinalMessage != "continued-pong" {
+		t.Fatalf("unexpected result %q", res.FinalMessage)
+	}
+}
+
+func TestIncompleteBalanceStaysUnknown(t *testing.T) {
+	// A response with no plans/balances arrays is truncated evidence, never
+	// authoritative absence.
+	balance, err := decodeStartBalance(json.RawMessage(`{"data":{"server_time":1770000000}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completeEligibility(balance) {
+		t.Fatal("missing arrays read as complete")
+	}
+	// Present-but-empty arrays with paired server time are authoritative.
+	empty, err := decodeStartBalance(json.RawMessage(`{"data":{"server_time":1770000000,"plans":[],"balances":[]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completeEligibility(empty) {
+		t.Fatal("authoritative empty list read as unknown")
+	}
+}
+
+func TestExpiredPromotionFallsBackToIndividual(t *testing.T) {
+	engine := newRoutingEngine(stubHost(map[string]json.RawMessage{
+		"squad/readStartBalance":           fixtureBalance(t, "start-balance-expired.json"),
+		"squad/readIndividualSubscription": fixtureBalance(t, "subscription-list.json"),
+		"squad/readRegistryView":           fixtureRegistry(t),
+	}))
+	decision, err := engine.decideStartFirst(context.Background(), eligibility{requestedModel: "GLM-5.3-Flash", requestedLevel: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Provider != ProviderIndividual || decision.ReasonCode != CodeRoutingStartExpired {
+		t.Fatalf("expired promotion routed %+v", decision)
+	}
+}
+
+func TestDecisionBudgetSharedAcrossReads(t *testing.T) {
+	// Each guarded read takes 4.5 seconds. With one shared decision budget a
+	// parent deadline of twelve seconds must fail the third read; with per-end
+	// budgets all three would succeed at 13.5 seconds.
+	slow := map[string]json.RawMessage{
+		"squad/readStartBalance":           json.RawMessage(`{"data":{"server_time":1770000000,"plans":[],"balances":[]}}`),
+		"squad/readIndividualSubscription": fixtureBalance(t, "subscription-list.json"),
+		"squad/readRegistryView":           fixtureRegistry(t),
+	}
+	engine := newRoutingEngine(&hostBridge{call: func(ctx context.Context, method string, params any, result any) error {
+		env := readEnvelope{OK: false, Kind: "schema", Message: "no fixture"}
+		if raw, ok := slow[method]; ok {
+			env = readEnvelope{OK: true, Payload: raw}
+		}
+		select {
+		case <-time.After(4500 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		raw, err := json.Marshal(env)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, result)
+	}})
+	parent, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := engine.decideStartFirst(parent, eligibility{requestedModel: "GLM-5.3-Flash", requestedLevel: "low"})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("the decision exceeded its shared budget")
+	}
+	if elapsed >= 14*time.Second {
+		t.Fatalf("decision ran %s without a shared budget", elapsed)
+	}
+	if !contains(err.Error(), "registry view") {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+}
+
+func TestPreferenceForeignSessionRejected(t *testing.T) {
+	// A preference request naming a foreign session after the session is
+	// known is rejected explicitly, and the run continues normally.
+	a, state := fakeAdapter(t, "preferences-foreign")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	res, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FinalMessage != "pong" {
+		t.Fatalf("unexpected result %q", res.FinalMessage)
+	}
+}
+
+func TestPreferenceAssociationMismatchFails(t *testing.T) {
+	// The one bootstrap association binds to the returned snapshot identity;
+	// a mismatch fails the run before any turn work.
+	a, state := fakeAdapter(t, "preferences-mismatch")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	_, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+	// Both fail-closed outcomes are legitimate depending on dispatch timing:
+	// the recorded association mismatches the returned session, or the late
+	// foreign identity is rejected outright and fails the run.
+	if err == nil || (!contains(err.Error(), "does not match the returned session") && !contains(err.Error(), "foreign session")) {
+		t.Fatalf("expected an association mismatch failure, got %v", err)
 	}
 }

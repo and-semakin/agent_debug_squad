@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -117,13 +118,11 @@ type headerAuthorizer interface {
 }
 
 // processGeneration increments for every spawned host process so stale
-// requests from a previous generation can never authorize.
-var generationCounter uint64
+// requests from a previous generation can never authorize. The counter is
+// atomic because parallel agent runs spawn hosts concurrently.
+var generationCounter atomic.Uint64
 
-func nextGeneration() uint64 {
-	generationCounter++
-	return generationCounter
-}
+func nextGeneration() uint64 { return generationCounter.Add(1) }
 
 // authRequestDeadline bounds how long the runtime may wait for the host to
 // supply provider runtime headers; the source uses 180 seconds, but Squad

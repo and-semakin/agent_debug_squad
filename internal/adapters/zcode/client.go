@@ -35,6 +35,9 @@ type wireMessage struct {
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *wireError      `json:"error,omitempty"`
+	// seq is the transport-local order of a queued reverse request; it is not
+	// part of the wire format.
+	seq uint64
 }
 type wireError struct {
 	Code    int    `json:"code"`
@@ -63,6 +66,14 @@ type client struct {
 	handler     func(wireMessage)
 	handlerOnce sync.Once
 	readers     sync.WaitGroup
+	// inboundSeq counts queued reverse requests and dispatchedSeq tracks how
+	// many the dispatcher has finished. A response that arrived after N
+	// queued requests is only delivered once the dispatcher caught up, so a
+	// bootstrap association is always reconciled against the create/resume
+	// result it preceded.
+	inboundSeq    uint64
+	dispatchedSeq uint64
+	dispatchStep  chan struct{}
 }
 
 // setHandler installs the reverse-request dispatcher target. It must be
@@ -84,8 +95,36 @@ func (c *client) dispatchLoop() {
 			if c.handler != nil {
 				c.handler(msg)
 			}
+			c.mu.Lock()
+			c.dispatchedSeq = msg.seq
+			c.mu.Unlock()
+			select {
+			case c.dispatchStep <- struct{}{}:
+			default:
+			}
 		case <-c.done:
 			return
+		}
+	}
+}
+
+// awaitDispatched blocks until every reverse request queued before the given
+// sequence has been dispatched, or the context ends. It bounds response
+// delivery, never request handling.
+func (c *client) awaitDispatched(ctx context.Context, seq uint64) error {
+	for {
+		c.mu.Lock()
+		dispatched := c.dispatchedSeq
+		c.mu.Unlock()
+		if dispatched >= seq {
+			return nil
+		}
+		select {
+		case <-c.dispatchStep:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.done:
+			return c.failure()
 		}
 	}
 }
@@ -110,7 +149,7 @@ func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
 	if err = cmd.Start(); err != nil {
 		return nil, err
 	}
-	c := &client{cmd: cmd, input: in, pending: map[string]chan wireMessage{}, done: make(chan struct{}), exited: make(chan struct{}), events: make(chan wireMessage, eventQueueBound), requests: make(chan wireMessage, requestQueueBound)}
+	c := &client{cmd: cmd, input: in, pending: map[string]chan wireMessage{}, done: make(chan struct{}), exited: make(chan struct{}), events: make(chan wireMessage, eventQueueBound), requests: make(chan wireMessage, requestQueueBound), dispatchStep: make(chan struct{}, 1)}
 	c.readers.Add(2)
 	go func() {
 		defer c.readers.Done()
@@ -136,6 +175,7 @@ func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
 			if len(msg.ID) > 0 && msg.Method == "" {
 				c.mu.Lock()
 				ch := c.pending[string(msg.ID)]
+				msg.seq = c.inboundSeq
 				c.mu.Unlock()
 				if ch != nil {
 					select {
@@ -155,6 +195,10 @@ func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
 			} else if msg.Method != "" {
 				// Inbound requests and notifications go to the dispatcher; an
 				// overfull queue is a hard failure, never a dropped request.
+				c.mu.Lock()
+				c.inboundSeq++
+				msg.seq = c.inboundSeq
+				c.mu.Unlock()
 				select {
 				case c.requests <- msg:
 				case <-c.done:
@@ -248,6 +292,9 @@ func (c *client) call(ctx context.Context, method string, params any, result any
 	}
 	select {
 	case msg := <-ch:
+		if err := c.awaitDispatched(ctx, msg.seq); err != nil {
+			return err
+		}
 		return callResult(method, msg, result)
 	case <-ctx.Done():
 		return ctx.Err()
@@ -255,6 +302,9 @@ func (c *client) call(ctx context.Context, method string, params any, result any
 		// A final response may have arrived immediately before EOF.
 		select {
 		case msg := <-ch:
+			if err := c.awaitDispatched(ctx, msg.seq); err != nil {
+				return err
+			}
 			return callResult(method, msg, result)
 		default:
 			return c.failure()
