@@ -246,6 +246,8 @@ func TestProtocolHelper(t *testing.T) {
 	subscriptionReads := 0
 	sessionReads := 0
 	cancelledTasks := []string{}
+	bootstrapGeneration := uint64(0)
+	bootstrapWorkspace := ""
 
 	balancePayload := map[string]any{"data": map[string]any{
 		"server_time": 1700000000,
@@ -337,6 +339,13 @@ func TestProtocolHelper(t *testing.T) {
 				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "auth", "message": "The ZCode Start Plan token is missing or expired; refresh the sign-in in ZCode."}})
 				continue
 			}
+			var p struct {
+				Generation uint64
+				Workspace  string
+			}
+			_ = json.Unmarshal(m.Params, &p)
+			bootstrapGeneration = p.Generation
+			bootstrapWorkspace = p.Workspace
 			result = map[string]any{"ok": true, "revision": "rev-1", "hasStart": true, "hasIndividual": true, "identityMatch": true}
 		case "squad/readStartBalance":
 			balanceReads++
@@ -486,7 +495,16 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			emit(map[string]any{"id": m.ID, "result": map[string]bool{"accepted": scenario != "rejected"}})
 			sent = true
-			quotaScenario := scenario == "quota-continuation" || scenario == "background-still-running" || scenario == "background-malformed" || scenario == "background-foreign" || scenario == "background-unknown-status"
+			if scenario == "auth-before-ack" && continuations == 1 {
+				// The runtime asks for the new provider's credentials between
+				// the send write and its acknowledgement; the binding must
+				// already name Individual.
+				emit(map[string]any{"id": "squad-auth-1", "method": "squad/authorizeProviderHeaders", "params": map[string]any{
+					"requestId": "req-1", "sessionId": "session", "providerId": p.ModelSelection.ProviderID,
+					"modelId": p.ModelSelection.ModelID, "workspace": bootstrapWorkspace, "generation": bootstrapGeneration,
+				}})
+			}
+			quotaScenario := scenario == "quota-continuation" || scenario == "background-still-running" || scenario == "background-malformed" || scenario == "background-foreign" || scenario == "background-unknown-status" || scenario == "auth-before-ack"
 			if quotaScenario && continuations == 0 {
 				continuations++
 				event("turn.started", "turn", map[string]string{"inputId": input})

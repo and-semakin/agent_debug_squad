@@ -319,3 +319,37 @@ h.performRead('https://api.z.ai/api/biz/subscription/list','synthetic-secret').t
 		t.Fatal("the authorization header leaked into the diagnostic")
 	}
 }
+
+func TestHostProviderHeaderRequestExtraction(t *testing.T) {
+	node := requireNode(t)
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host.cjs")
+	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The wire shape from the inspected source: the model rides in
+	// params.modelSelection, and there is no top-level modelId.
+	script := `const h=require(process.argv[1]);
+process.stdout.write(JSON.stringify([
+  h.providerHeaderRequest({requestId:'r1', sessionId:'s1', turnId:'t1', providerId:'account:zai-individual-coding-plan', modelSelection:{providerId:'account:zai-individual-coding-plan', modelId:'GLM-5.3-Flash'}, reason:'model-request'}),
+  h.providerHeaderRequest({providerId:'p', modelId:'WRONG'}),
+  h.providerHeaderRequest(undefined),
+]));`
+	out, err := exec.Command(node, "-e", script, host).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	var parsed []map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	if parsed[0]["modelId"] != "GLM-5.3-Flash" || parsed[0]["sessionId"] != "s1" || parsed[0]["reason"] != "model-request" {
+		t.Fatalf("wire shape lost: %v", parsed[0])
+	}
+	if parsed[1]["modelId"] != "" {
+		t.Fatalf("top-level modelId must be ignored: %v", parsed[1])
+	}
+	if parsed[2]["providerId"] != "" {
+		t.Fatalf("missing params must degrade safely: %v", parsed[2])
+	}
+}

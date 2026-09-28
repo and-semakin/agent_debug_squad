@@ -644,6 +644,17 @@ func (r *activeRun) transitionToIndividual(ctx context.Context, a *Adapter, fail
 		return err
 	}
 	continuationInput := fmt.Sprintf("%s-continuation", input)
+	// Bind the new attempt's identity before dispatching: the runtime may ask
+	// for the provider credentials between the send write and its
+	// acknowledgement, and that request must validate against Individual. The
+	// one-transition flag and the no-retry rule already cover unknown send
+	// outcomes; a failed send fails the run, so the early binding never
+	// enables a second dispatch.
+	r.stateMu.Lock()
+	r.input = continuationInput
+	r.turn = ""
+	r.provider = ProviderIndividual
+	r.stateMu.Unlock()
 	sendCtx, sendCancel := context.WithTimeout(ctx, rpcTimeout)
 	err = runContinuation(sendCtx, r.c.call, session, continuationInput, a.selection(ProviderIndividual))
 	sendCancel()
@@ -654,11 +665,6 @@ func (r *activeRun) transitionToIndividual(ctx context.Context, a *Adapter, fail
 		}, CodeRoutingContinuationFailed)
 		return err
 	}
-	r.stateMu.Lock()
-	r.input = continuationInput
-	r.turn = ""
-	r.provider = ProviderIndividual
-	r.stateMu.Unlock()
 	emitContinuationDiagnostic(r.sink, quotaExhaustionEvidence{
 		FromProvider: ProviderStart, ToProvider: ProviderIndividual,
 		Reason: CodeRoutingStartExhausted, AttemptID: r.id, InputID: continuationInput,

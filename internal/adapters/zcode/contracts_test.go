@@ -887,6 +887,18 @@ func TestBackgroundJobStatusesGateContinuation(t *testing.T) {
 			t.Fatalf("expected a refresh failure, got %v", err)
 		}
 	})
+	t.Run("auth request before the continuation acknowledgement binds the new provider", func(t *testing.T) {
+		a, state := startFirstAdapter(t, "auth-before-ack")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		res, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.FinalMessage != "continued-pong" {
+			t.Fatalf("unexpected result %q", res.FinalMessage)
+		}
+	})
 	t.Run("unknown status blocks continuation", func(t *testing.T) {
 		a, state := startFirstAdapter(t, "background-unknown-status")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

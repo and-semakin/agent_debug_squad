@@ -355,6 +355,22 @@ function readSuccessfulEnvelope(parsed) {
   return {ok: true, data: parsed.data};
 }
 
+// providerHeaderRequest extracts the binding fields of a provider runtime
+// headers request. The model rides in params.modelSelection — the wire has no
+// top-level modelId.
+function providerHeaderRequest(params) {
+  const p = params && typeof params === 'object' ? params : {};
+  const selection = p.modelSelection && typeof p.modelSelection === 'object' ? p.modelSelection : {};
+  return {
+    requestId: typeof p.requestId === 'string' ? p.requestId : '',
+    sessionId: typeof p.sessionId === 'string' ? p.sessionId : '',
+    turnId: typeof p.turnId === 'string' ? p.turnId : '',
+    providerId: typeof p.providerId === 'string' ? p.providerId : '',
+    modelId: typeof selection.modelId === 'string' ? selection.modelId : '',
+    reason: typeof p.reason === 'string' ? p.reason : '',
+  };
+}
+
 // Account reads use the pinned source-defined endpoints with the confirmed
 // authorization source per plan: the Start balance takes the ZCode JWT, and
 // the Individual subscription list takes the Individual plan API key itself,
@@ -598,9 +614,9 @@ async function main() {
   };
 
   const requestHeaders = msg => {
-    const params = msg.params || {};
-    const provider = params.providerId;
-    if (params.reason !== 'model-request' || (provider !== individualProvider && provider !== startProvider)) {
+    const request = providerHeaderRequest(msg.params);
+    const provider = request.providerId;
+    if (request.reason !== 'model-request' || (provider !== individualProvider && provider !== startProvider)) {
       return send({id: msg.id, result: {headersApplied: false, errorMessage: 'Unsupported provider or authentication challenge; resolve it in ZCode.'}});
     }
     const internalId = `squad-auth-${nextInternalId++}`;
@@ -610,8 +626,8 @@ async function main() {
       send({id: msg.id, result: {headersApplied: false, errorMessage: 'The account authorization round-trip timed out.'}});
     }, 60000)});
     emit({id: internalId, method: 'squad/authorizeProviderHeaders', params: {
-      requestId: msg.id, sessionId: params.sessionId, turnId: params.turnId,
-      providerId: provider, modelId: params.modelId, workspace, generation
+      requestId: msg.id, sessionId: request.sessionId, turnId: request.turnId,
+      providerId: provider, modelId: request.modelId, workspace, generation
     }});
   };
 
@@ -714,4 +730,4 @@ async function main() {
   }).on('close', () => { if (child) child.stdin.end(); });
 }
 if (!module.parent) main().catch(error => fatal(error.message));
-module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope, performRead};
+module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope, performRead, providerHeaderRequest};
