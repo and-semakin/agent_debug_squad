@@ -414,26 +414,17 @@ async function readIndividualSubscription(individualApiKey) {
 // read through the same guarded registry runtime the bootstrap uses and is
 // always disposed.
 async function readRegistryView(pick, found, ensure, env, request) {
+  // The factory takes the env directly: it resolves the config paths from it.
   let registry;
   try {
-    registry = await ensure(() => pick(found.registry)({
-      env,
-      createAccountSource: () => ({
-        read: async () => pick(found.snapshotParser)({
-          revision: 'squad-' + Date.now(),
-          basedOnZCodeBuiltinRevision: request.basedOnZCodeBuiltinRevision,
-          providers: {[request.provider]: {access: {type: 'zhipu-account', entitled: Boolean(request.entitled)}}},
-          states: {[request.provider]: {availability: request.entitled ? 'available' : 'unavailable', entitled: Boolean(request.entitled), current: Boolean(request.current)}},
-        }),
-        onDidChange: () => () => {},
-      }),
-    }));
+    registry = await ensure(() => pick(found.registry)(env));
   } catch {
     return {ok: false, kind: 'schema', message: 'The ZCode provider registry interface is unavailable; update the adapter.'};
   }
   const runtime = registry && registry.runtime;
   const service = runtime && runtime.registryService;
-  if (!service || typeof service.start !== 'function' || typeof service.getView !== 'function' ||
+  if (!service || typeof service.getView !== 'function' ||
+      typeof registry.syncAccountProviderConfig !== 'function' ||
       !runtime.configService || typeof runtime.configService.read !== 'function' ||
       typeof registry.dispose !== 'function') {
     return {ok: false, kind: 'schema', message: 'ZCode provider registry interface unavailable; update the adapter.'};
@@ -444,7 +435,17 @@ async function readRegistryView(pick, found, ensure, env, request) {
     if (revision === '') {
       return {ok: false, kind: 'schema', message: 'The registry view carried no native builtin revision.'};
     }
-    await service.start();
+    // Apply the account evidence Go resolved through the supported account
+    // entry point: the typed snapshot from the source's own parser, then the
+    // registry refresh inside syncAccountProviderConfig. Without this the
+    // fail-closed account source lists no entitled models at all.
+    const snapshot = pick(found.snapshotParser)({
+      revision: 'squad-' + Date.now(),
+      basedOnZCodeBuiltinRevision: revision,
+      providers: {[request.provider]: {access: {type: 'zhipu-account', entitled: Boolean(request.entitled)}}},
+      states: {[request.provider]: {availability: request.entitled ? 'available' : 'unavailable', entitled: Boolean(request.entitled), current: Boolean(request.current)}},
+    });
+    await registry.syncAccountProviderConfig(snapshot);
     const view = service.getView();
     if (!view || !Array.isArray(view.providers)) {
       return {ok: false, kind: 'schema', message: 'The registry view carried no interpretable provider surface.'};

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -37,18 +38,20 @@ func (b *backgroundTasks) observe(taskID, status string) {
 	b.statuses[taskID] = status
 }
 
-// backgroundTaskRunning reports whether a status proves the task is still
-// executing. The upstream status set is cancelled, completed, failed, lost,
-// running, spawn_error, and timed_out, and terminal means anything but
-// running; an absent status proves nothing and must not count as terminal.
-func backgroundTaskRunning(status string) bool {
-	if status == "" {
-		// Unknown status: assume running for cleanup decisions, never
-		// silently confirm completion.
-		return true
-	}
-	return status == "running"
+// backgroundTerminalStatuses is the explicit terminal set from the inspected
+// upstream status mapping (cancelled, completed, failed, lost, spawn_error,
+// timed_out). Anything outside the allowlist — running, empty, or an unknown
+// value — proves nothing and never confirms completion.
+var backgroundTerminalStatuses = map[string]bool{
+	"cancelled":   true,
+	"completed":   true,
+	"failed":      true,
+	"lost":        true,
+	"spawn_error": true,
+	"timed_out":   true,
 }
+
+func backgroundTaskTerminal(status string) bool { return backgroundTerminalStatuses[status] }
 
 // observeSessionSnapshot tracks background job identity from the verified
 // session.backgroundJobs surface of a session snapshot. Anything else is
@@ -117,14 +120,22 @@ func readSessionBackgroundJobs(ctx context.Context, call func(ctx context.Contex
 	}
 	statuses := map[string]string{}
 	for _, job := range jobs {
-		switch {
-		case job.TaskID != "":
-			statuses[job.TaskID] = job.Status
-		case job.ID != "":
-			statuses[job.ID] = job.Status
-		case job.JobID != "":
-			statuses[job.JobID] = job.Status
+		id := job.TaskID
+		if id == "" {
+			id = job.ID
 		}
+		if id == "" {
+			id = job.JobID
+		}
+		// A record without identity cannot be tracked or confirmed; one
+		// without status proves nothing. Both are damaged evidence.
+		if id == "" {
+			return nil, errors.New("zcode backgroundJobs entry carries no task identity")
+		}
+		if strings.TrimSpace(job.Status) == "" {
+			return nil, errors.New("zcode backgroundJobs entry carries no status")
+		}
+		statuses[id] = job.Status
 	}
 	return statuses, nil
 }
@@ -158,8 +169,8 @@ func confirmBackgroundTasksStopped(ctx context.Context, call func(ctx context.Co
 		return err
 	}
 	for _, id := range tasks.order {
-		if status, ok := jobs[id]; ok && backgroundTaskRunning(status) {
-			return fmt.Errorf("background task %s is still running after cancellation", id)
+		if status, ok := jobs[id]; ok && !backgroundTaskTerminal(status) {
+			return fmt.Errorf("background task %s has not reached a terminal status after cancellation", id)
 		}
 	}
 	return nil

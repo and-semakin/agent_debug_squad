@@ -479,7 +479,7 @@ func (e *routingEngine) decideIndividual(ctx context.Context, in eligibility, st
 	}
 	var viewCounter endpointAttempts
 	viewOutcome := e.readEndpoint(ctx, "registry-view", &viewCounter, func(callCtx context.Context) readOutcome {
-		return e.host.readRegistryView(callCtx)
+		return e.host.readRegistryView(callCtx, overlayRequest{Provider: ProviderIndividual, Entitled: true, Current: true})
 	})
 	if !viewOutcome.ok {
 		return routingDecision{}, routingError{code: CodeRoutingIndividualUnknown, safe: "the live selectable registry view could not be read"}

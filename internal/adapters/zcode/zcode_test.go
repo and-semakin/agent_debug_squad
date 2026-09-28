@@ -355,6 +355,17 @@ func TestProtocolHelper(t *testing.T) {
 			respondEvidence(m, subscriptionPayload)
 			continue
 		case "squad/readRegistryView":
+			// The view request must carry the account evidence Go resolved:
+			// the Individual provider, entitled and current.
+			var p struct {
+				Provider string
+				Entitled bool
+				Current  bool
+			}
+			_ = json.Unmarshal(m.Params, &p)
+			if p.Provider != "account:zai-individual-coding-plan" || !p.Entitled || !p.Current {
+				os.Exit(18)
+			}
 			respondEvidence(m, registryPayload)
 			continue
 		case "squad/applyAccountOverlay":
@@ -406,6 +417,10 @@ func TestProtocolHelper(t *testing.T) {
 				// ZCode keeps finished tasks listed with an updated status; a
 				// task that is still running must block the continuation.
 				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "running"}}}
+			case sessionReads >= 2 && scenario == "background-unknown-status":
+				// A status outside the terminal set proves nothing: the
+				// continuation must not dispatch over it.
+				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "wat"}}}
 			default:
 				// A finished task stays listed with a terminal status: that
 				// must count as stopped.
@@ -471,7 +486,7 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			emit(map[string]any{"id": m.ID, "result": map[string]bool{"accepted": scenario != "rejected"}})
 			sent = true
-			quotaScenario := scenario == "quota-continuation" || scenario == "background-still-running" || scenario == "background-malformed" || scenario == "background-foreign"
+			quotaScenario := scenario == "quota-continuation" || scenario == "background-still-running" || scenario == "background-malformed" || scenario == "background-foreign" || scenario == "background-unknown-status"
 			if quotaScenario && continuations == 0 {
 				continuations++
 				event("turn.started", "turn", map[string]string{"inputId": input})

@@ -37,9 +37,9 @@ func failureKind(value string) routingFailureKind {
 	}
 }
 
-func (h *hostBridge) read(ctx context.Context, method string) readOutcome {
+func (h *hostBridge) read(ctx context.Context, method string, params any) readOutcome {
 	var envelope readEnvelope
-	if err := h.call(ctx, method, map[string]any{}, &envelope); err != nil {
+	if err := h.call(ctx, method, params, &envelope); err != nil {
 		kind := readFailureNetwork
 		if strings.Contains(err.Error(), "auth") {
 			kind = readFailureAuth
@@ -68,15 +68,19 @@ func safeReadFailure(message string) string {
 }
 
 func (h *hostBridge) readStartBalance(ctx context.Context) readOutcome {
-	return h.read(ctx, "squad/readStartBalance")
+	return h.read(ctx, "squad/readStartBalance", map[string]any{})
 }
 
 func (h *hostBridge) readIndividualSubscription(ctx context.Context) readOutcome {
-	return h.read(ctx, "squad/readIndividualSubscription")
+	return h.read(ctx, "squad/readIndividualSubscription", map[string]any{})
 }
 
-func (h *hostBridge) readRegistryView(ctx context.Context) readOutcome {
-	return h.read(ctx, "squad/readRegistryView")
+// readRegistryView carries the account evidence Go resolved in the subscription
+// decision: the shim applies exactly this entitlement to its guarded registry
+// instance before projecting the selectable view. Without it the fail-closed
+// account source enumerates no entitled models.
+func (h *hostBridge) readRegistryView(ctx context.Context, evidence overlayRequest) readOutcome {
+	return h.read(ctx, "squad/readRegistryView", evidence)
 }
 
 // overlayRequest carries the evidence-derived account overlay to the host.

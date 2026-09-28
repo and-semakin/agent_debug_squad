@@ -865,8 +865,8 @@ func TestBackgroundJobStatusesGateContinuation(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
-		if err == nil || !contains(err.Error(), "still running after cancellation") {
-			t.Fatalf("expected a still-running failure, got %v", err)
+		if err == nil || !contains(err.Error(), "terminal status after cancellation") {
+			t.Fatalf("expected an unconfirmed-stop failure, got %v", err)
 		}
 	})
 	t.Run("missing backgroundJobs surface blocks continuation", func(t *testing.T) {
@@ -885,6 +885,15 @@ func TestBackgroundJobStatusesGateContinuation(t *testing.T) {
 		_, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
 		if err == nil || !contains(err.Error(), "could not be refreshed") {
 			t.Fatalf("expected a refresh failure, got %v", err)
+		}
+	})
+	t.Run("unknown status blocks continuation", func(t *testing.T) {
+		a, state := startFirstAdapter(t, "background-unknown-status")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+		if err == nil || !contains(err.Error(), "terminal status after cancellation") {
+			t.Fatalf("expected an unconfirmed-stop failure, got %v", err)
 		}
 	})
 }
@@ -908,20 +917,28 @@ func TestReadSessionBackgroundJobsStrictness(t *testing.T) {
 	if _, err := readSessionBackgroundJobs(ctx, call(`{"session":{"sessionId":"session","backgroundJobs":"nope"}}`), "session"); err == nil {
 		t.Fatal("malformed backgroundJobs accepted")
 	}
+	if _, err := readSessionBackgroundJobs(ctx, call(`{"session":{"sessionId":"session","backgroundJobs":[{"status":"running"}]}}`), "session"); err == nil {
+		t.Fatal("identity-less running task accepted")
+	}
+	if _, err := readSessionBackgroundJobs(ctx, call(`{"session":{"sessionId":"session","backgroundJobs":[{"taskId":"t1"}]}}`), "session"); err == nil {
+		t.Fatal("status-less task accepted")
+	}
 	jobs, err := readSessionBackgroundJobs(ctx, call(`{"session":{"sessionId":"session","backgroundJobs":[{"taskId":"t1","status":"completed"}]}}`), "session")
 	if err != nil || jobs["t1"] != "completed" {
 		t.Fatalf("valid jobs lost: %v %v", jobs, err)
 	}
 }
 
-func TestBackgroundTaskRunningSemantics(t *testing.T) {
-	for status, running := range map[string]bool{
-		"running": true, "": true,
-		"completed": false, "cancelled": false, "failed": false,
-		"lost": false, "spawn_error": false, "timed_out": false,
+func TestBackgroundTaskTerminalSemantics(t *testing.T) {
+	// Only the explicit upstream terminal set confirms completion; running,
+	// empty, and unknown values prove nothing.
+	for status, terminal := range map[string]bool{
+		"cancelled": true, "completed": true, "failed": true,
+		"lost": true, "spawn_error": true, "timed_out": true,
+		"running": false, "": false, "wat": false,
 	} {
-		if backgroundTaskRunning(status) != running {
-			t.Fatalf("status %q running=%v", status, backgroundTaskRunning(status))
+		if backgroundTaskTerminal(status) != terminal {
+			t.Fatalf("status %q terminal=%v", status, backgroundTaskTerminal(status))
 		}
 	}
 }
