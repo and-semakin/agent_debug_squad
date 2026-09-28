@@ -238,7 +238,7 @@ The verdict must be one the task declares (`400` otherwise), and the request is 
 | `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
 | `opencode` | Owned `opencode serve` (default), or explicit external HTTP server | OpenCode session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
-| `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `model`, `reasoning`, `yolo` |
+| `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `plan_policy`, `model`, `reasoning`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `fake` | In process | Deterministic state | none |
 
@@ -311,10 +311,13 @@ Options:
 
 - `command`: Node executable, default `node`.
 - `runtime_path`: bundle location, default `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Other locations must contain a compatible bundle and its companion resources.
-- `provider`: currently only `account:zai-individual-coding-plan`.
-- `model`: default `GLM-5.3-Flash`; `reasoning`: `low` (default), `high`, or `max`. The full selection is sent on every turn.
+- `provider`: `account:zai-individual-coding-plan` (default). `start-first` additionally accepts `account:zai-start-plan` or an omitted provider, which routes within the Z.AI Start/Individual pair. Every other provider ID fails validation before preflight.
+- `plan_policy`: agent-only; the machine backend schema does not accept it. `fixed` (default) keeps the configured Individual provider. `start-first` re-resolves account-bound eligibility before every new turn and prefers the Start Plan allowance when the exact requested model has active, spendable quota; it falls back to Individual only on confirmed model absence, expiry, or exhaustion, never substitutes another model, and fails the turn when balance evidence is unknown instead of silently spending Individual quota. Removing the option restores fixed behavior on the next turn.
+- `model`: default `GLM-5.3-Flash`; `reasoning`: `low` (default), `high`, or `max`. The full selection is sent on every turn; plan switching never changes the requested model or reasoning.
 - `yolo`: inherits squad defaults. True selects native `yolo`; false explicitly selects `build`. This also updates ZCode's workspace permission preference. False is permission-controlled, **not a read-only sandbox**.
 - `env` / `inherit_env`: the same explicit environment rules as other CLI adapters. Inherit `HOME` and `PATH` for the existing login and tools.
+
+**Fail-closed account evidence (breaking):** every dispatch now requires fresh evidence instead of the old cached availability plus a hardcoded overlay. Fixed needs a resolvable Individual credential, an active Coding subscription (`status VALID`, current period) from the native subscription endpoint, and the exact model/reasoning in the live registry view; a readable key alone no longer suffices. `start-first` additionally requires the current ZCode token and the Individual credential to resolve to one account. A subscription-service outage therefore blocks any Individual selection — including fixed — even when the inference endpoint is healthy, and a Start-balance outage blocks start-first turns; eligibility adds up to fifteen seconds within the run deadline (fifteen-second decision budget, five-second attempts, at most two attempts per endpoint with a 250 ms retry on transport errors and HTTP 502/503/504). Start-first routing diagnostics (`zcode.routing` records in `<agent>.diagnostics.jsonl`) expose only the requested model, effective provider, reason code, and evidence timestamp — never balances or account data. When a start-first turn fails with a verified structured quota-exhaustion error, the adapter sends **one** short continuation message through Individual in the same conversation (a new native turn, never a replay of the original task); both attempts share the original run deadline and the continuation needs at least five seconds of it. This does not forbid explicit workflow retries, which start fresh conversations and may repeat effects. The exact upstream exhaustion marker still requires separately authorized live verification; unverified error shapes never trigger the continuation.
 
 **Session diagnostics (separate from `models`):** the current account catalog is captured from `session/create` or `session/resume` as a `zcode.models` record in `<agent>.diagnostics.jsonl` before each prompt. For example:
 

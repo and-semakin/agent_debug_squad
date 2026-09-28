@@ -1,0 +1,22 @@
+{
+  "provenance": {
+    "source_commit": "29628c9acdb81b703bbd4080c207a0e7ce5e276e",
+    "source_path": "config/provider/zcode-builtin.json + guarded registry service view",
+    "dialect": "squad-registry-view-v1",
+    "captured": "source-derived"
+  },
+  "payload": {
+    "revision": "3.14.3+build.29628c9",
+    "providers": [
+      {"providerId": "account:zai-individual-coding-plan", "models": [
+        {"modelId": "GLM-5.3", "reasoningLevels": ["low", "high", "max"]},
+        {"modelId": "GLM-5.3-Flash", "reasoningLevels": ["low", "high"]}
+      ]},
+      {"providerId": "account:zai-start-plan", "models": [
+        {"modelId": "GLM-5.3-Flash", "reasoningLevels": ["low", "high"]},
+        {"modelId": "GLM-5.2", "reasoningLevels": ["low"]},
+        {"modelId": "GLM-5-Turbo", "reasoningLevels": ["low"], "disabledReason": "deprecated"}
+      ]}
+    ]
+  }
+}

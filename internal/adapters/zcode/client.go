@@ -17,6 +17,18 @@ import (
 const maxFrame = 8 * 1024 * 1024
 const rpcTimeout = 15 * time.Second
 
+// The duplex client services reverse requests throughout startup,
+// create/resume, subscribe, send, polling, and shutdown: a dedicated
+// dispatcher consumes inbound requests/notifications so an ordinary pending
+// RPC never blocks host policy. Queues are bounded and overflow fails
+// visibly; a completion or permission event is never silently dropped.
+const (
+	// eventQueueBound bounds session events awaiting the run loop.
+	eventQueueBound = 256
+	// requestQueueBound bounds inbound host requests awaiting dispatch.
+	requestQueueBound = 64
+)
+
 type wireMessage struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
@@ -28,6 +40,13 @@ type wireError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+func (e *wireError) Error() string { return e.Message }
+
+// wireProbeError preserves the wire error code for the startup probes and
+// any other typed handling.
+type wireProbeError = wireError
+
 type client struct {
 	cmd     *exec.Cmd
 	input   io.WriteCloser
@@ -38,8 +57,37 @@ type client struct {
 	err     error
 	done    chan struct{}
 	exited  chan struct{}
-	inbox   chan wireMessage
-	readers sync.WaitGroup
+	events  chan wireMessage
+	// requests carries inbound host requests/notifications to the dispatcher.
+	requests    chan wireMessage
+	handler     func(wireMessage)
+	handlerOnce sync.Once
+	readers     sync.WaitGroup
+}
+
+// setHandler installs the reverse-request dispatcher target. It must be
+// called before the first RPC so create/resume preferences are serviced.
+func (c *client) setHandler(handler func(wireMessage)) {
+	c.handlerOnce.Do(func() {
+		c.handler = handler
+		go c.dispatchLoop()
+	})
+}
+
+// dispatchLoop services inbound requests for the life of the transport, never
+// waiting behind an ordinary RPC. Overflow fails the run visibly instead of
+// dropping a control event.
+func (c *client) dispatchLoop() {
+	for {
+		select {
+		case msg := <-c.requests:
+			if c.handler != nil {
+				c.handler(msg)
+			}
+		case <-c.done:
+			return
+		}
+	}
 }
 
 func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
@@ -62,7 +110,7 @@ func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
 	if err = cmd.Start(); err != nil {
 		return nil, err
 	}
-	c := &client{cmd: cmd, input: in, pending: map[string]chan wireMessage{}, done: make(chan struct{}), exited: make(chan struct{}), inbox: make(chan wireMessage, 256)}
+	c := &client{cmd: cmd, input: in, pending: map[string]chan wireMessage{}, done: make(chan struct{}), exited: make(chan struct{}), events: make(chan wireMessage, eventQueueBound), requests: make(chan wireMessage, requestQueueBound)}
 	c.readers.Add(2)
 	go func() {
 		defer c.readers.Done()
@@ -95,13 +143,24 @@ func startClient(cmd *exec.Cmd, stderr func(string)) (*client, error) {
 					default:
 					}
 				}
-			} else if msg.Method != "" {
+			} else if msg.Method == "session/event" || msg.Method == "interaction/requestPermission" {
+				// Turn events and permission requests share one FIFO so the
+				// run loop observes the wire order: a permission for a turn is
+				// never evaluated before its turn.started event.
 				select {
-				case c.inbox <- msg:
+				case c.events <- msg:
+				case <-c.done:
+					return
+				}
+			} else if msg.Method != "" {
+				// Inbound requests and notifications go to the dispatcher; an
+				// overfull queue is a hard failure, never a dropped request.
+				select {
+				case c.requests <- msg:
 				case <-c.done:
 					return
 				default:
-					c.fail(errors.New("zcode event queue overflow"))
+					c.fail(errors.New("zcode host request queue overflow"))
 					return
 				}
 			} else {
@@ -189,32 +248,32 @@ func (c *client) call(ctx context.Context, method string, params any, result any
 	}
 	select {
 	case msg := <-ch:
-		if msg.Error != nil {
-			return fmt.Errorf("zcode %s: %s", method, msg.Error.Message)
-		}
-		if result != nil {
-			if err := json.Unmarshal(msg.Result, result); err != nil {
-				return fmt.Errorf("zcode %s result: %w", method, err)
-			}
-		}
-		return nil
+		return callResult(method, msg, result)
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
 		// A final response may have arrived immediately before EOF.
 		select {
 		case msg := <-ch:
-			if msg.Error != nil {
-				return fmt.Errorf("zcode %s: %s", method, msg.Error.Message)
-			}
-			if result != nil {
-				return json.Unmarshal(msg.Result, result)
-			}
-			return nil
+			return callResult(method, msg, result)
 		default:
 			return c.failure()
 		}
 	}
+}
+
+// callResult converts a response into either the decoded result or the typed
+// wire error so probes and eligibility logic can inspect codes safely.
+func callResult(method string, msg wireMessage, result any) error {
+	if msg.Error != nil {
+		return &wireProbeError{Code: msg.Error.Code, Message: msg.Error.Message}
+	}
+	if result != nil {
+		if err := json.Unmarshal(msg.Result, result); err != nil {
+			return fmt.Errorf("zcode %s result: %w", method, err)
+		}
+	}
+	return nil
 }
 func (c *client) close() {
 	c.fail(errors.New("zcode client closed"))

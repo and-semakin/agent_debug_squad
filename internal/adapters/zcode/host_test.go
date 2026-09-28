@@ -1,6 +1,7 @@
 package zcode
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func requireNode(t *testing.T) string {
@@ -128,4 +130,81 @@ func discoverFailure(t *testing.T, node, host, bundle string) string {
 		t.Fatalf("expected discovery failure for %s: %s %v", bundle, out, err)
 	}
 	return string(out)
+}
+
+// b64url encodes a JWT segment the way issuers do.
+func b64url(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func jwt(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	return "eyJhbGciOiJIUzI1NiJ9." + b64url(t, payload) + ".c2ln"
+}
+
+func TestHostIdentityBinding(t *testing.T) {
+	node := requireNode(t)
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host.cjs")
+	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	individualKey := "account-provider:coding-plan:account:zai-individual-coding-plan:account:user-42:api-key"
+	script := `const h=require(process.argv[1]);
+const [policy, token, keys] = [process.argv[2], process.argv[3], JSON.parse(process.argv[4])];
+const identity = h.resolveIdentity(policy, keys, token);
+process.stdout.write(JSON.stringify(identity));`
+	run := func(policy, token string, keys []string) map[string]any {
+		out, err := exec.Command(node, "-e", script, host, policy, token, mustJSON(t, keys)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(out, &parsed); err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+		return parsed
+	}
+
+	current := jwt(t, map[string]any{"sub": "user-42", "exp": float64(time.Now().Add(time.Hour).Unix())})
+	expired := jwt(t, map[string]any{"sub": "user-42", "exp": float64(time.Now().Add(-time.Hour).Unix())})
+	foreign := jwt(t, map[string]any{"sub": "user-43", "exp": float64(time.Now().Add(time.Hour).Unix())})
+
+	cases := []struct {
+		name          string
+		policy        string
+		token         string
+		keys          []string
+		ok            bool
+		identityMatch bool
+	}{
+		{"fixed unique key", "fixed", "", []string{individualKey}, true, false},
+		{"fixed multiple keys rejected", "fixed", "", []string{individualKey, individualKey}, false, false},
+		{"start-first bound identity", "start-first", current, []string{individualKey}, true, true},
+		{"start-first foreign identity", "start-first", foreign, []string{individualKey}, false, false},
+		{"start-first expired token", "start-first", expired, []string{individualKey}, false, false},
+		{"start-first missing token", "start-first", "", []string{individualKey}, false, false},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			parsed := run(item.policy, item.token, item.keys)
+			if parsed["ok"] != item.ok || parsed["identityMatch"] != item.identityMatch {
+				t.Fatalf("%v", parsed)
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }

@@ -1,0 +1,19 @@
+{
+  "provenance": {
+    "source_commit": "29628c9acdb81b703bbd4080c207a0e7ce5e276e",
+    "source_path": "packages/services/src/model-provider/zaiStartPlanBilling.ts",
+    "dialect": "zai-start-plan-balance-v1",
+    "captured": "source-derived"
+  },
+  "payload": {
+    "data": {
+      "server_time": 1759000000,
+      "plans": [{"user_plan_id": "up-1", "status": "active"}],
+      "balances": [
+        {"bucket_id": "b-1", "user_plan_id": "up-1", "unit_type": "token",
+         "capabilities": ["model:GLM-5.3-Flash"],
+         "remaining_units": 60, "available_units": 0, "reserved_units": 60}
+      ]
+    }
+  }
+}

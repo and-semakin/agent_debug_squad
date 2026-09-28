@@ -227,6 +227,8 @@ func TestEnvironment(t *testing.T) {
 
 // A separate Go test process exercises real pipes, bidirectional callbacks,
 // response/event interleaving, and shutdown without Node or a paid account.
+// It plays the guarded host: bootstrap, wire probes, evidence reads, overlay,
+// and the session operations.
 func TestProtocolHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_ZCODE_HELPER") != "1" {
 		return
@@ -239,28 +241,72 @@ func TestProtocolHelper(t *testing.T) {
 	fresh := true
 	input := ""
 	mode := ""
+	continuations := 0
+	balanceReads := 0
+	subscriptionReads := 0
+
+	balancePayload := map[string]any{"data": map[string]any{
+		"server_time": 1700000000,
+		"plans":       []any{map[string]any{"user_plan_id": "p1", "status": "active"}},
+		"balances": []any{map[string]any{
+			"bucket_id": "b1", "user_plan_id": "p1", "unit_type": "token",
+			"capabilities":    []string{"model:GLM-5.3-Flash"},
+			"available_units": 5, "remaining_units": 10, "reserved_units": 5,
+		}},
+	}}
+	subscriptionPayload := map[string]any{"data": []any{map[string]any{"productId": "zcode-coding-plan-month", "status": "VALID", "inCurrentPeriod": true}}}
+	registryPayload := map[string]any{"revision": "rev-1", "providers": []any{map[string]any{
+		"providerId": "account:zai-individual-coding-plan",
+		"models":     []any{map[string]any{"modelId": "GLM-5.3-Flash", "reasoningLevels": []string{"low", "high", "max"}}},
+	}}}
+
 	event := func(kind, turn string, payload any) {
 		emit(map[string]any{"method": "session/event", "params": map[string]any{"type": kind, "sessionId": "session", "turnId": turn, "payload": payload}})
 	}
 	complete := func() {
 		event("turn.completed", "turn", map[string]any{"inputId": input, "response": "pong", "resultType": "success"})
 	}
+	respondEvidence := func(m wireMessage, payload map[string]any) {
+		raw, _ := json.Marshal(payload)
+		emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": true, "payload": json.RawMessage(raw)}})
+	}
 	for scanner.Scan() {
 		var m wireMessage
 		if json.Unmarshal(scanner.Bytes(), &m) != nil {
 			os.Exit(3)
 		}
+		// Wire probes send empty parameters to every required method and must
+		// be rejected with the invalid-params code, never a success.
+		if m.Method != "" && strings.HasPrefix(m.Method, "session/") {
+			var probeParams map[string]any
+			_ = json.Unmarshal(m.Params, &probeParams)
+			if len(probeParams) == 0 {
+				emit(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "Invalid params"}})
+				continue
+			}
+		}
 		result := any(map[string]any{})
 		if m.Method == "" {
-			if string(m.ID) != "\"host-permission\"" {
-				os.Exit(4)
-			}
+			id := strings.Trim(string(m.ID), "\"")
 			var answer map[string]any
 			_ = json.Unmarshal(m.Result, &answer)
-			if answer["decision"] != "allow" && answer["decision"] != "deny" {
-				os.Exit(5)
+			switch {
+			case id == "host-permission":
+				if answer["decision"] != "allow" && answer["decision"] != "deny" {
+					os.Exit(5)
+				}
+				complete()
+			case id == "pref1":
+				if answer["nativeSearchEnhancementsEnabled"] != false || answer["memoryEnabled"] != false || answer["askUserQuestionAutoResolutionEnabled"] != false {
+					os.Exit(9)
+				}
+			case strings.HasPrefix(id, "squad-auth-"):
+				if answer["allow"] != true {
+					os.Exit(15)
+				}
+			default:
+				os.Exit(4)
 			}
-			complete()
 			continue
 		}
 		switch m.Method {
@@ -273,8 +319,47 @@ func TestProtocolHelper(t *testing.T) {
 				fmt.Println(strings.Repeat("x", maxFrame+1))
 				continue
 			}
+			if scenario == "auth-fail" {
+				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "auth", "message": "The ZCode Start Plan token is missing or expired; refresh the sign-in in ZCode."}})
+				continue
+			}
+			result = map[string]any{"ok": true, "revision": "rev-1", "hasStart": true, "hasIndividual": true, "identityMatch": true}
+		case "squad/readStartBalance":
+			balanceReads++
+			if scenario == "balance-unknown" {
+				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "network", "httpCode": 503, "message": "The account read endpoint returned an error status."}})
+				continue
+			}
+			respondEvidence(m, balancePayload)
+			continue
+		case "squad/readIndividualSubscription":
+			subscriptionReads++
+			if scenario == "individual-unknown" {
+				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "network", "message": "The account read failed at the transport level."}})
+				continue
+			}
+			respondEvidence(m, subscriptionPayload)
+			continue
+		case "squad/readRegistryView":
+			respondEvidence(m, registryPayload)
+			continue
+		case "squad/applyAccountOverlay":
+			var p struct {
+				Provider string
+				Entitled bool
+			}
+			_ = json.Unmarshal(m.Params, &p)
+			if p.Provider == "" {
+				os.Exit(10)
+			}
+			result = map[string]any{"ok": true}
+		case "squad/authorizeProviderHeaders":
+			result = map[string]any{"allow": true}
 		case "session/create", "session/resume":
 			fresh = m.Method == "session/create"
+			if scenario == "preferences-during-create" && fresh {
+				emit(map[string]any{"id": "pref1", "method": "session/requestRuntimePreferences", "params": map[string]any{}})
+			}
 			result = map[string]any{"session": map[string]string{"sessionId": "session"}, "settings": map[string]any{"model": map[string]any{"available": []string{"Flash"}}}}
 		case "session/setMode":
 			var p struct{ Mode string }
@@ -293,20 +378,43 @@ func TestProtocolHelper(t *testing.T) {
 			if scenario == "child" && sent && params.SessionID == "session" {
 				items = append(items, map[string]string{"childSessionId": "child", "status": "running"})
 			}
-			result = map[string]any{"running": items, "ended": map[string]any{"items": []any{}}}
+			ended := map[string]any{"items": []any{}}
+			if scenario == "cursor-loop" {
+				ended["nextCursor"] = "c1"
+			}
+			result = map[string]any{"running": items, "ended": ended}
 		case "session/send":
 			var p struct {
 				Content        string
 				InputID        string
 				ModelSelection struct {
-					ModelID string
-					Options struct{ ReasoningLevel string }
+					ProviderID string
+					ModelID    string
+					Options    struct{ ReasoningLevel string }
 				}
 			}
 			_ = json.Unmarshal(m.Params, &p)
+			previousInput := input
 			input = p.InputID
-			if strings.Contains(p.Content, "startup marker") != fresh || p.ModelSelection.ModelID != "GLM-5.3-Flash" || p.ModelSelection.Options.ReasoningLevel != "low" {
-				os.Exit(6)
+			if continuations == 0 {
+				if strings.Contains(p.Content, "startup marker") != fresh || p.ModelSelection.ModelID != "GLM-5.3-Flash" || p.ModelSelection.Options.ReasoningLevel != "low" {
+					os.Exit(6)
+				}
+				if scenario == "quota-continuation" && p.ModelSelection.ProviderID != "account:zai-start-plan" {
+					os.Exit(11)
+				}
+			} else {
+				// The continuation: distinct input ID, fixed short message,
+				// same model and reasoning through Individual, no replay.
+				if p.InputID == previousInput {
+					os.Exit(12)
+				}
+				if !strings.HasSuffix(p.InputID, "-continuation") || strings.Contains(p.Content, "startup marker") || !strings.Contains(p.Content, "Please continue from where you stopped") || strings.Contains(p.Content, "ping") {
+					os.Exit(13)
+				}
+				if p.ModelSelection.ProviderID != "account:zai-individual-coding-plan" || p.ModelSelection.ModelID != "GLM-5.3-Flash" || p.ModelSelection.Options.ReasoningLevel != "low" {
+					os.Exit(14)
+				}
 			}
 			if scenario == "permission" && mode != "build" || scenario != "permission" && mode != "yolo" {
 				os.Exit(7)
@@ -316,6 +424,18 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			emit(map[string]any{"id": m.ID, "result": map[string]bool{"accepted": scenario != "rejected"}})
 			sent = true
+			if scenario == "quota-continuation" && continuations == 0 {
+				continuations++
+				event("turn.started", "turn", map[string]string{"inputId": input})
+				event("turn.failed", "turn", map[string]any{"inputId": input, "error": map[string]any{"code": "start_plan_quota_exhausted", "type": "quota_exhaustion"}})
+				continue
+			}
+			if continuations > 0 {
+				continuations++
+				event("turn.started", "turn-2", map[string]string{"inputId": input})
+				event("turn.completed", "turn-2", map[string]any{"inputId": input, "response": "continued-pong", "resultType": "success"})
+				continue
+			}
 			if scenario == "success" {
 				event("turn.started", "previous", map[string]string{"inputId": "previous"})
 				event("turn.completed", "previous", map[string]string{"resultType": "success", "response": "stale"})
@@ -326,6 +446,10 @@ func TestProtocolHelper(t *testing.T) {
 				os.Exit(0)
 			case "hang":
 				continue
+			case "quota-busy":
+				event("turn.failed", "turn", map[string]any{"inputId": input, "error": map[string]any{"code": "3010", "type": "admission_busy"}})
+			case "quota-generic":
+				event("turn.failed", "turn", map[string]any{"inputId": input, "error": "quota over"})
 			case "failed":
 				event("turn.failed", "turn", map[string]any{"error": map[string]string{"message": "failed"}})
 			case "empty":
@@ -342,8 +466,13 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			continue
 		case "session/close":
+			var params struct{ SessionID string }
+			_ = json.Unmarshal(m.Params, &params)
 			emit(map[string]any{"id": m.ID, "result": map[string]bool{"closed": true}})
-			os.Exit(0)
+			if params.SessionID == "session" {
+				os.Exit(0)
+			}
+			continue
 		}
 		emit(map[string]any{"id": m.ID, "result": result})
 	}

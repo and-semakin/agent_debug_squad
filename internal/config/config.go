@@ -213,6 +213,9 @@ func normalizeAgentSpec(spec domain.AgentSpec) (domain.AgentSpec, error) {
 	if err := ValidateOpenCodeAgent(spec); err != nil {
 		return spec, err
 	}
+	if err := ValidateZCodeAgent(spec); err != nil {
+		return spec, err
+	}
 	return spec, nil
 }
 
