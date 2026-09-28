@@ -126,6 +126,10 @@ ZCode discovery SHALL use only an independently verified session-free, configura
 - **WHEN** a structurally compatible bridge has passed read-only lifecycle verification and returns registry records
 - **THEN** discovery returns only allowed metadata, preserves truncation, and marks unsupported execution selections instead of promising they can run
 
+#### Scenario: Plan eligibility is not the complete model catalog
+- **WHEN** execution routing can read model-specific Start billing buckets but no full session-free effective registry source is verified
+- **THEN** generic ZCode discovery remains unsupported with read_only_catalog_unavailable rather than presenting those buckets as a complete catalog or initializing the execution auth bridge
+
 ### Requirement: Fake discovery is explicitly synthetic
 
 The fake backend SHALL return one deterministic synthetic fake model record with source scope synthetic, no provider/auth/reasoning claims and no filesystem, network or session effects. This fixture SHALL NOT restrict arbitrary explicitly configured fake model values or appear implicitly in an all-real-backend query.

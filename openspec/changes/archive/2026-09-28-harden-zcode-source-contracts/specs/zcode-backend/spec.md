@@ -76,6 +76,13 @@ Auth requests/cancellations SHALL be scoped to generation/workspace/session/requ
 - **WHEN** cancellation occurs while the private credential lookup is pending
 - **THEN** the late result is discarded and no credential response or secret-bearing diagnostic is emitted
 
+### Requirement: Start verification limitations are explicit
+The adapter SHALL report unsupported Start CAPTCHA verification as a failed turn without automatically spending Individual quota. Documentation SHALL distinguish successful balance eligibility from successful model execution and SHALL identify Start inference and real quota-exhaustion continuation as unverified until independently demonstrated. The default fixed Individual mode SHALL remain available without Start verification.
+
+#### Scenario: Start requires Desktop CAPTCHA
+- **WHEN** an eligible Start model request requires CAPTCHA verification unsupported by the host
+- **THEN** the turn fails with a verification requirement, retains the conversation, and does not dispatch an Individual continuation
+
 ### Requirement: Turn recovery never implies prompt replay
 The system SHALL correlate acceptance, started and terminal events with the submitted input and owned turn within the active generation, buffer valid early events within bounds, and ignore historical or foreign completions. A contradictory terminal sequence observed before finalization SHALL fail rather than produce multiple completions. Transport loss after a prompt may have been written or accepted SHALL preserve the known session ID and streamed evidence, return an execution-outcome-unknown diagnostic and SHALL NOT automatically resend the prompt or a permission decision. Subsequent explicit turns SHALL resume the saved session without repeating startup instructions. Switching plans for a new turn SHALL preserve the existing session and full requested model/reasoning selection without repeating startup instructions. Reset SHALL retain old native history.
 

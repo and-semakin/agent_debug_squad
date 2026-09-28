@@ -62,3 +62,18 @@ Evidence classes below: **S** = inspected source; **L** = read-only local metada
 | Assume v4 or Web host solves auth/catalog | None established | Different host/service and transport boundaries, initialization side effects; no verified stable external broker |
 
 The selected hybrid makes a real bridge-free path available while preserving existing users. Removing the remaining account shim requires a verified upstream protocol-server standalone-account option or external native host auth/catalog contract; neither is demonstrated at this commit. This is a documented limitation, not an implementation task to discover an unspecified architecture.
+
+
+## Authorized installed-account verification — 2026-09-28
+
+The user explicitly authorized short real-account conversations and code fixes. Installed ZCode Desktop reports 3.14.3. Evidence below is limited to the tested installation; no credentials, billing records, device identifiers, or CAPTCHA tokens are recorded.
+
+- Fixed Individual GLM-5.3-Flash: `pong`, then `4` in the same native session, confirmed twice.
+- Start balance: initially HTTP 400. Mirroring `services/providers/sourceHeaders.ts` and `api/nodeApiClient.ts`, including the existing device header, makes the guarded balance read succeed. Device identity is read, never generated or changed.
+- Start-first GLM-5.3: `routing_start_model_absent` selected Individual on both turns; replies were `pong` and `4` with the same native session.
+- Start-first GLM-5.3-Flash: routing selects `account:zai-start-plan` with `routing_start_available`. Model execution then requests `captcha-retry`; it is rejected without Individual fallback.
+- The installed bundle differs from the pinned public source: its request-reason enum includes `captcha-retry`. Inspection of the installed Desktop renderer shows Start requests obtaining CAPTCHA verification material per request. The pinned public source only declares `model-request`. Ordinary JWT auth and successful balance access are insufficient to claim Start inference support. A supported human-verification/Desktop bridge is still required; CAPTCHA verification is not bypassed, fabricated, or replayed.
+- Startup/state/computer-use notifications no longer fail ordinary turns. Unknown reverse *requests* remain unsupported; storage initialization failure remains fatal.
+- Regression tests cover notification dispatch, storage failure, billing URL/auth/source headers and reuse (without creation) of the existing device identity. `TestLiveZCodePlanRouting` is explicitly opt-in and records routing decisions and short replies only.
+
+No offer activation, reset redemption, subscription change, release or personal API mode was used. Quota exhaustion was not forced. Installed isolated lifecycle harness and full Start compatibility remain open tasks.

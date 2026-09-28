@@ -455,6 +455,15 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			result = map[string]any{"running": items, "ended": ended}
 		case "session/send":
+			if scenario == "notifications" || scenario == "storage-failed" {
+				phase := "ready"
+				if scenario == "storage-failed" {
+					phase = "failed"
+				}
+				emit(map[string]any{"method": "startup/storageState", "params": map[string]any{"phase": phase}})
+				emit(map[string]any{"method": "state.updated", "params": map[string]any{"revision": 1}})
+				emit(map[string]any{"method": "computer-use/operation-event", "params": map[string]any{}})
+			}
 			var p struct {
 				Content        string
 				InputID        string
@@ -615,5 +624,25 @@ func TestRejectConcurrentSend(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+func TestRuntimeNotifications(t *testing.T) {
+	for _, scenario := range []string{"notifications", "storage-failed"} {
+		t.Run(scenario, func(t *testing.T) {
+			a, state := fakeAdapter(t, scenario)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "notification-test", Message: "ping"}, domain.DiscardRunSink())
+			if scenario == "storage-failed" {
+				if err == nil {
+					t.Fatal("storage failure ignored")
+				}
+				return
+			}
+			if err != nil || result.FinalMessage != "pong" {
+				t.Fatalf("reply=%q err=%v", result.FinalMessage, err)
+			}
+		})
 	}
 }

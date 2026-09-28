@@ -42,3 +42,7 @@ Implementation review order: milestone A (sections 1 and 3 plus task 4.3), then 
 - [x] 5.2 Run go vet ./... and record success after resolving findings.
 - [x] 5.3 Run go test -race -count=1 ./... with paid/live inference disabled; record isolated/live-read skips separately from passed tests.
 - [ ] 5.4 Run openspec validate harden-zcode-source-contracts --strict and compare implementation to every scenario before archive; verify no personal API mode, runtime fork, account mutation or release entered scope.
+
+## Archive disposition — 2026-09-28
+
+Archived at the user's explicit request after discussing the Start CAPTCHA limitation. Unchecked tasks remain unchecked and are not represented as completed: 4.3 (isolated installed-CJS harness), 4.4 (full live Start compatibility gate), and 5.4 (complete scenario reconciliation). Strict validation passed, but that is not full behavioral verification. Live account balance reads, fixed Individual Flash, and Start-first GLM-5.3 absence fallback were verified; Start Flash inference and real exhaustion continuation remain unverified. No CAPTCHA-to-Individual fallback is implemented. See research.md for evidence and README for supported use. Release publication was separately authorized by the user after this disposition.

@@ -284,7 +284,7 @@ function requestViaProxy(target, proxyUrl, ca, cb) {
   connectReq.end();
 }
 
-function performRead(url, authorization) {
+function performRead(url, authorization, sourceHeaders = {}) {
   return new Promise(resolve => {
     let settled = false;
     const finish = value => { if (!settled) { settled = true; resolve(value); } };
@@ -292,7 +292,7 @@ function performRead(url, authorization) {
     const ca = caCertificates();
     const proxyUrl = process.env.ZCODE_HTTP_PROXY;
     const useProxy = proxyUrl && proxyUrl.trim() !== '' && !noProxyMatches(target.hostname, process.env.ZCODE_NO_PROXY);
-    const headers = {Authorization: authorization, host: target.host, accept: 'application/json'};
+    const headers = {...sourceHeaders, Authorization: authorization, host: target.host, accept: 'application/json'};
     const send = socket => {
       const req = https.request({
         hostname: target.hostname, port: target.port || 443, path: `${target.pathname}${target.search}`,
@@ -379,6 +379,29 @@ function providerHeaderRequest(params) {
 const balanceOrigin = 'https://zcode.z.ai';
 const subscriptionOrigin = 'https://api.z.ai';
 
+// Mirrors the source headers used by the native ZCode endpoint client.
+function startSourceHeaders(version) {
+  let deviceHeaders = {};
+  try {
+    const mid = JSON.parse(fs.readFileSync(path.join(accountDir(), 'telemetry-state.json'), 'utf8')).deviceMid;
+    if (typeof mid === 'string' && /^[\x20-\x7e]+$/.test(mid.trim())) deviceHeaders['X-Device-Mid'] = mid.trim();
+  } catch {}
+  return {
+    ...deviceHeaders,
+    'User-Agent': `ZCode/${version}`,
+    'HTTP-Referer': balanceOrigin,
+    'X-Title': 'Z Code@electron',
+    'X-Release-Channel': 'production',
+    'x-request-id': crypto.randomUUID(),
+    'X-ZCode-App-Version': version,
+    'X-Platform': `${process.platform}-${process.arch}`,
+    'X-Client-Language': Intl.DateTimeFormat().resolvedOptions().locale,
+    'X-Client-Timezone': Intl.DateTimeFormat().resolvedOptions().timeZone,
+    'X-Os-Category': process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
+    'X-Os-Version': os.version(),
+  };
+}
+
 async function readStartBalance(runtime, jwt) {
   const version = appVersion(runtime);
   if (!version) {
@@ -388,7 +411,7 @@ async function readStartBalance(runtime, jwt) {
     return {ok: false, kind: 'auth', message: 'No usable Start Plan credential for the guarded read; sign in or refresh the plan in ZCode.'};
   }
   const url = `${balanceOrigin}/api/v1/zcode-plan/billing/balance?app_version=${encodeURIComponent(version)}`;
-  const response = await performRead(url, `Bearer ${jwt}`);
+  const response = await performRead(url, `Bearer ${jwt.trim()}`, startSourceHeaders(version));
   if (!response.ok) return response;
   const envelope = readSuccessfulEnvelope(response.payload);
   if (!envelope.ok || !envelope.data || typeof envelope.data !== 'object') {
@@ -616,6 +639,9 @@ async function main() {
   const requestHeaders = msg => {
     const request = providerHeaderRequest(msg.params);
     const provider = request.providerId;
+    if (request.reason === 'captcha-retry' && provider === startProvider) {
+      return send({id: msg.id, result: {headersApplied: false, errorMessage: 'Start Plan requires ZCode Desktop CAPTCHA verification for this request; the headless adapter cannot complete it. Individual quota was not used.'}});
+    }
     if (request.reason !== 'model-request' || (provider !== individualProvider && provider !== startProvider)) {
       return send({id: msg.id, result: {headersApplied: false, errorMessage: 'Unsupported provider or authentication challenge; resolve it in ZCode.'}});
     }
@@ -730,4 +756,4 @@ async function main() {
   }).on('close', () => { if (child) child.stdin.end(); });
 }
 if (!module.parent) main().catch(error => fatal(error.message));
-module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope, performRead, providerHeaderRequest};
+module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope, performRead, providerHeaderRequest, startSourceHeaders, readStartBalance};

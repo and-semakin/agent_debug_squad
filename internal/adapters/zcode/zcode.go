@@ -681,10 +681,28 @@ func routingErrorCode(err error) string {
 
 // hostRequest is the dispatcher's inbound table. It runs on the dedicated
 // dispatcher goroutine while ordinary RPCs are pending, and never blocks the
-// reader: every response is bounded, and unknown operations get an explicit
-// method-not-supported failure.
+// reader: every response is bounded, and unknown requests get an explicit
+// method-not-supported failure. Additive notifications do not require a reply.
 func (r *activeRun) hostRequest(msg wireMessage) {
 	switch msg.Method {
+	case "startup/storageState":
+		if len(msg.ID) != 0 {
+			r.c.fail(errors.New("zcode sent a request using a notification-only method"))
+			return
+		}
+		var state struct {
+			Phase string `json:"phase"`
+		}
+		if json.Unmarshal(msg.Params, &state) != nil || state.Phase == "failed" {
+			r.c.fail(errors.New("zcode storage initialization failed"))
+		}
+		return
+	case "state.updated", "process/mcpTelemetry", "process/mcpResourceSamples", "process/toolExecResource", "process/resourceSample", "plugins/operationProgress":
+		if len(msg.ID) == 0 {
+			return
+		}
+		r.c.fail(errors.New("zcode sent a request using a notification-only method"))
+		return
 	case "session/requestRuntimePreferences":
 		r.preferences(msg)
 	case "squad/authorizeProviderHeaders":
@@ -700,6 +718,10 @@ func (r *activeRun) hostRequest(msg wireMessage) {
 		default:
 		}
 	default:
+		// Additive notifications require no host action or reply.
+		if len(msg.ID) == 0 {
+			return
+		}
 		_ = r.c.respond(context.Background(), map[string]any{"id": msg.ID, "error": wireError{Code: -32601, Message: "Unsupported Squad host interaction: " + msg.Method}})
 		select {
 		case r.hostErr <- fmt.Errorf("unsupported zcode host interaction: %s", msg.Method):

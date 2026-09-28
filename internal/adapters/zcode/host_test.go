@@ -353,3 +353,43 @@ process.stdout.write(JSON.stringify([
 		t.Fatalf("missing params must degrade safely: %v", parsed[2])
 	}
 }
+
+// Source: services/providers/{sourceHeaders,api/nodeApiClient}.ts. Start
+// billing rejects requests without the existing device identity (HTTP 400).
+func TestStartBalanceRequestContract(t *testing.T) {
+	node := requireNode(t)
+	tmp := t.TempDir()
+	host := filepath.Join(tmp, "host.cjs")
+	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `const assert=require('node:assert/strict');
+const fs=require('node:fs'),path=require('node:path'),https=require('node:https'),{EventEmitter}=require('node:events');
+const root=process.argv[2];process.env.ZCODE_DATA_BASE_DIR=root;process.env.SQUAD_ZCODE_APP_VERSION='3.14.3';delete process.env.ZCODE_HTTP_PROXY;
+fs.mkdirSync(path.join(root,'v2'));
+fs.writeFileSync(path.join(root,'v2','telemetry-state.json'),JSON.stringify({deviceMid:'synthetic-device-id'}));
+const h=require(process.argv[1]);let calls=0;
+https.request=(options,callback)=>{
+ calls++;assert.equal(options.hostname,'zcode.z.ai');assert.equal(options.path,'/api/v1/zcode-plan/billing/balance?app_version=3.14.3');
+ assert.equal(options.headers.Authorization,'Bearer synthetic-jwt');
+ assert.equal(options.headers['X-Device-Mid'],'synthetic-device-id');
+ assert.equal(options.headers['User-Agent'],'ZCode/3.14.3');
+ assert.equal(options.headers['X-ZCode-App-Version'],'3.14.3');
+ assert.equal(options.headers['HTTP-Referer'],'https://zcode.z.ai');
+ assert.ok(options.headers['x-request-id']);
+ const req=new EventEmitter();req.setTimeout=()=>req;req.destroy=()=>{};
+ req.end=()=>{const res=new EventEmitter();res.statusCode=200;callback(res);res.emit('data',Buffer.from('{"code":0,"data":{"plans":[],"balances":[]}}'));res.emit('end');};return req;
+};
+h.readStartBalance('/synthetic/runtime.cjs','synthetic-jwt').then(r=>{
+ assert.equal(r.ok,true);assert.equal(calls,1);
+ fs.writeFileSync(path.join(root,'v2','telemetry-state.json'),'{"deviceMid":"bad\\nheader"}');
+ assert.equal(h.startSourceHeaders('3.14.3')['X-Device-Mid'],undefined);
+ fs.unlinkSync(path.join(root,'v2','telemetry-state.json'));
+ assert.equal(h.startSourceHeaders('3.14.3')['X-Device-Mid'],undefined);
+ assert.equal(fs.existsSync(path.join(root,'v2','telemetry-state.json')),false);
+}).catch(e=>{console.error(e);process.exitCode=1;});`
+	out, err := exec.Command(node, "-e", script, host, tmp).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: %v", out, err)
+	}
+}
