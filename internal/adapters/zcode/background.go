@@ -3,9 +3,6 @@ package zcode
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"strings"
 	"time"
 )
 
@@ -15,19 +12,19 @@ import (
 // identities come from the verified session snapshot fields only; shapes the
 // source does not define are never guessed.
 type backgroundTasks struct {
-	ids      map[string]bool
-	statuses map[string]string
-	order    []string
+	ids   map[string]bool
+	order []string
 }
 
 func newBackgroundTasks() *backgroundTasks {
-	return &backgroundTasks{ids: map[string]bool{}, statuses: map[string]string{}}
+	return &backgroundTasks{ids: map[string]bool{}}
 }
 
 func (b *backgroundTasks) count() int { return len(b.order) }
 
-// observe records a task identity with its status evidence.
-func (b *backgroundTasks) observe(taskID, status string) {
+// observe records a task identity so terminal cleanup can cancel it through
+// the owning runtime.
+func (b *backgroundTasks) observe(taskID string) {
 	if taskID == "" {
 		return
 	}
@@ -35,28 +32,11 @@ func (b *backgroundTasks) observe(taskID, status string) {
 		b.ids[taskID] = true
 		b.order = append(b.order, taskID)
 	}
-	b.statuses[taskID] = status
 }
-
-// backgroundTerminalStatuses is the explicit terminal set from the inspected
-// upstream status mapping (cancelled, completed, failed, lost, spawn_error,
-// timed_out). Anything outside the allowlist — running, empty, or an unknown
-// value — proves nothing and never confirms completion.
-var backgroundTerminalStatuses = map[string]bool{
-	"cancelled":   true,
-	"completed":   true,
-	"failed":      true,
-	"lost":        true,
-	"spawn_error": true,
-	"timed_out":   true,
-}
-
-func backgroundTaskTerminal(status string) bool { return backgroundTerminalStatuses[status] }
 
 // observeSessionSnapshot tracks background job identity from the verified
 // session.backgroundJobs surface of a session snapshot. Anything else is
-// ignored; status evidence is kept so confirmation can tell running work from
-// finished work.
+// ignored.
 func (b *backgroundTasks) observeSessionSnapshot(raw json.RawMessage) {
 	if len(raw) == 0 {
 		return
@@ -66,7 +46,6 @@ func (b *backgroundTasks) observeSessionSnapshot(raw json.RawMessage) {
 			ID     string `json:"id"`
 			TaskID string `json:"taskId"`
 			JobID  string `json:"jobId"`
-			Status string `json:"status"`
 		} `json:"backgroundJobs"`
 	}
 	if json.Unmarshal(raw, &session) != nil {
@@ -75,105 +54,13 @@ func (b *backgroundTasks) observeSessionSnapshot(raw json.RawMessage) {
 	for _, job := range session.BackgroundJobs {
 		switch {
 		case job.ID != "":
-			b.observe(job.ID, job.Status)
+			b.observe(job.ID)
 		case job.TaskID != "":
-			b.observe(job.TaskID, job.Status)
+			b.observe(job.TaskID)
 		case job.JobID != "":
-			b.observe(job.JobID, job.Status)
+			b.observe(job.JobID)
 		}
 	}
-}
-
-// readSessionBackgroundJobs reads one session snapshot strictly: the session
-// identity must match the requested session and the backgroundJobs surface
-// must be present, even when empty. A snapshot without the surface, with a
-// foreign session identity, or with unreadable content is an error — missing
-// evidence never confirms that background work stopped.
-func readSessionBackgroundJobs(ctx context.Context, call func(ctx context.Context, method string, params any, result any) error, session string) (map[string]string, error) {
-	var raw json.RawMessage
-	if err := call(ctx, "session/read", map[string]any{"sessionId": session}, &raw); err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Session *struct {
-			SessionID      string           `json:"sessionId"`
-			BackgroundJobs *json.RawMessage `json:"backgroundJobs"`
-		} `json:"session"`
-	}
-	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Session == nil {
-		return nil, errors.New("zcode session snapshot carried no session object")
-	}
-	if envelope.Session.SessionID != session {
-		return nil, fmt.Errorf("zcode session snapshot names session %q, not %q", envelope.Session.SessionID, session)
-	}
-	if envelope.Session.BackgroundJobs == nil {
-		return nil, errors.New("zcode session snapshot carried no backgroundJobs surface")
-	}
-	var jobs []struct {
-		ID     string `json:"id"`
-		TaskID string `json:"taskId"`
-		JobID  string `json:"jobId"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(*envelope.Session.BackgroundJobs, &jobs); err != nil {
-		return nil, errors.New("zcode backgroundJobs surface could not be decoded")
-	}
-	statuses := map[string]string{}
-	for _, job := range jobs {
-		id := job.TaskID
-		if id == "" {
-			id = job.ID
-		}
-		if id == "" {
-			id = job.JobID
-		}
-		// A record without identity cannot be tracked or confirmed; one
-		// without status proves nothing. Both are damaged evidence.
-		if id == "" {
-			return nil, errors.New("zcode backgroundJobs entry carries no task identity")
-		}
-		if strings.TrimSpace(job.Status) == "" {
-			return nil, errors.New("zcode backgroundJobs entry carries no status")
-		}
-		statuses[id] = job.Status
-	}
-	return statuses, nil
-}
-
-// refreshBackgroundTasks re-reads the session snapshot strictly and folds the
-// current backgroundJobs surface into the owned set: tasks the attempt started
-// during the turn join before the drain, so cleanup cannot pass with an empty
-// list while old work still runs.
-func refreshBackgroundTasks(ctx context.Context, call func(ctx context.Context, method string, params any, result any) error, session string, tasks *backgroundTasks) error {
-	jobs, err := readSessionBackgroundJobs(ctx, call, session)
-	if err != nil {
-		return err
-	}
-	for id, status := range jobs {
-		tasks.observe(id, status)
-	}
-	return nil
-}
-
-// confirmBackgroundTasksStopped verifies with one fresh session read that
-// every owned task has left the runtime or reached a terminal status. ZCode
-// keeps finished tasks listed with an updated status, so absence is not the
-// only completion evidence — but a task still running, or with unknown status,
-// keeps the drain uncertain.
-func confirmBackgroundTasksStopped(ctx context.Context, call func(ctx context.Context, method string, params any, result any) error, session string, tasks *backgroundTasks) error {
-	if tasks == nil || tasks.count() == 0 {
-		return nil
-	}
-	jobs, err := readSessionBackgroundJobs(ctx, call, session)
-	if err != nil {
-		return err
-	}
-	for _, id := range tasks.order {
-		if status, ok := jobs[id]; ok && !backgroundTaskTerminal(status) {
-			return fmt.Errorf("background task %s has not reached a terminal status after cancellation", id)
-		}
-	}
-	return nil
 }
 
 // cleanupDeadline is the shared terminal cleanup budget for every final
@@ -186,14 +73,11 @@ const (
 // cleanupSpec describes what one terminal cleanup must stop, in dependency
 // order: stop the root turn, cancel known owned background tasks through the
 // owning runtime, stop/close owned descendants, close the root, then close
-// stdin and terminate the owned process group with the remaining budget. The
-// continuation drain reuses the same order with stopRoot false: the root
-// conversation stays open across the provider switch.
+// stdin and terminate the owned process group with the remaining budget.
 type cleanupSpec struct {
 	session     string
 	descendants []string
 	background  *backgroundTasks
-	stopRoot    bool
 }
 
 // runTerminalCleanup executes the shared cleanup under one deadline. A stop
@@ -221,7 +105,7 @@ func runTerminalCleanup(call func(ctx context.Context, method string, params any
 			firstErr = err
 		}
 	}
-	if spec.stopRoot && spec.session != "" {
+	if spec.session != "" {
 		record(step(cleanupGracePeriod, "session/stop", map[string]any{"sessionId": spec.session}))
 	}
 	if spec.background != nil {
@@ -233,7 +117,7 @@ func runTerminalCleanup(call func(ctx context.Context, method string, params any
 		record(step(0, "session/stop", map[string]any{"sessionId": child}))
 		record(step(0, "session/close", map[string]any{"sessionId": child}))
 	}
-	if spec.stopRoot && spec.session != "" {
+	if spec.session != "" {
 		record(step(0, "session/close", map[string]any{"sessionId": spec.session}))
 	}
 	return firstErr

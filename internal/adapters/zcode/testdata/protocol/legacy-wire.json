@@ -7,17 +7,142 @@
   },
   "payload": {
     "frames": [
-      {"note": "string request id", "frame": {"id": "squad-7", "method": "session/requestRuntimePreferences", "params": {"sessionId": ""}}},
-      {"note": "numeric request id", "frame": {"id": 42, "method": "interaction/requestProviderRuntimeHeaders", "params": {"requestId": "req-1", "sessionId": "s1", "reason": "model-request", "providerId": "account:zai-individual-coding-plan", "modelId": "GLM-5.3-Flash"}}},
-      {"note": "cancellation notification", "frame": {"method": "interaction/providerRuntimeHeadersCancelled", "params": {"requestId": "req-1"}}},
-      {"note": "invalid params rejection", "frame": {"id": 43, "error": {"code": -32602, "message": "Invalid params"}}},
-      {"note": "method not found rejection", "frame": {"id": 44, "error": {"code": -32601, "message": "Method not found"}}},
-      {"note": "send acknowledgement", "frame": {"id": "squad-9", "result": {"accepted": true}}},
-      {"note": "terminal success", "frame": {"method": "session/event", "params": {"type": "turn.completed", "sessionId": "s1", "turnId": "t1", "payload": {"inputId": "in-1", "response": "done", "resultType": "success"}}}},
-      {"note": "terminal failure", "frame": {"method": "session/event", "params": {"type": "turn.failed", "sessionId": "s1", "turnId": "t1", "payload": {"inputId": "in-1", "error": {"code": "start_plan_quota_exhausted", "type": "quota_exhaustion"}}}}},
-      {"note": "admission busy failure is not exhaustion", "frame": {"method": "session/event", "params": {"type": "turn.failed", "sessionId": "s1", "turnId": "t1", "payload": {"inputId": "in-1", "error": {"code": "3010", "type": "admission_busy"}}}}},
-      {"note": "subagent pagination page", "frame": {"id": "squad-11", "result": {"running": [{"childSessionId": "c1", "status": "running"}], "ended": {"items": [{"childSessionId": "c2", "status": "success"}], "nextCursor": "cur-2"}}}},
-      {"note": "session snapshot background jobs", "frame": {"id": "squad-12", "result": {"session": {"sessionId": "s1", "backgroundJobs": [{"id": "bg-1", "kind": "bash"}]}}}}
+      {
+        "note": "string request id",
+        "frame": {
+          "id": "squad-7",
+          "method": "session/requestRuntimePreferences",
+          "params": {
+            "sessionId": ""
+          }
+        }
+      },
+      {
+        "note": "numeric request id",
+        "frame": {
+          "id": 42,
+          "method": "interaction/requestProviderRuntimeHeaders",
+          "params": {
+            "requestId": "req-1",
+            "sessionId": "s1",
+            "reason": "model-request",
+            "providerId": "account:zai-individual-coding-plan",
+            "modelId": "GLM-5.3-Flash"
+          }
+        }
+      },
+      {
+        "note": "cancellation notification",
+        "frame": {
+          "method": "interaction/providerRuntimeHeadersCancelled",
+          "params": {
+            "requestId": "req-1"
+          }
+        }
+      },
+      {
+        "note": "invalid params rejection",
+        "frame": {
+          "id": 43,
+          "error": {
+            "code": -32602,
+            "message": "Invalid params"
+          }
+        }
+      },
+      {
+        "note": "method not found rejection",
+        "frame": {
+          "id": 44,
+          "error": {
+            "code": -32601,
+            "message": "Method not found"
+          }
+        }
+      },
+      {
+        "note": "send acknowledgement",
+        "frame": {
+          "id": "squad-9",
+          "result": {
+            "accepted": true
+          }
+        }
+      },
+      {
+        "note": "terminal success",
+        "frame": {
+          "method": "session/event",
+          "params": {
+            "type": "turn.completed",
+            "sessionId": "s1",
+            "turnId": "t1",
+            "payload": {
+              "inputId": "in-1",
+              "response": "done",
+              "resultType": "success"
+            }
+          }
+        }
+      },
+      {
+        "note": "terminal failure",
+        "frame": {
+          "method": "session/event",
+          "params": {
+            "type": "turn.failed",
+            "sessionId": "s1",
+            "turnId": "t1",
+            "payload": {
+              "inputId": "in-1",
+              "error": {
+                "code": "start_plan_quota_exhausted",
+                "type": "quota_exhaustion"
+              }
+            }
+          }
+        }
+      },
+      {
+        "note": "subagent pagination page",
+        "frame": {
+          "id": "squad-11",
+          "result": {
+            "running": [
+              {
+                "childSessionId": "c1",
+                "status": "running"
+              }
+            ],
+            "ended": {
+              "items": [
+                {
+                  "childSessionId": "c2",
+                  "status": "success"
+                }
+              ],
+              "nextCursor": "cur-2"
+            }
+          }
+        }
+      },
+      {
+        "note": "session snapshot background jobs",
+        "frame": {
+          "id": "squad-12",
+          "result": {
+            "session": {
+              "sessionId": "s1",
+              "backgroundJobs": [
+                {
+                  "id": "bg-1",
+                  "kind": "bash"
+                }
+              ]
+            }
+          }
+        }
+      }
     ]
   }
 }

@@ -17,10 +17,6 @@ agents:
       # Optional: defaults to the standard macOS ZCode installation.
       # runtime_path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
       provider: account:zai-individual-coding-plan
-      # Optional plan routing: fixed (default) keeps the Individual provider;
-      # start-first prefers an applicable Start Plan allowance for the same
-      # model and falls back to Individual only on confirmed exhaustion.
-      # plan_policy: start-first
       model: GLM-5.3-Flash
       reasoning: low
       inherit_env:

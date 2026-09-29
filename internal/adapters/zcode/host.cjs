@@ -1,11 +1,9 @@
 // ZCode desktop 3.x host compatibility bridge.
-// Native bootstrap/auth and the narrow account reads live here; Go owns
-// sessions, run policy, routing, and the runtime preferences answers.
+// Native bootstrap/auth and the local registry-view read live here; Go owns
+// sessions, run policy, selection verification, and the runtime preferences
+// answers. No network read against Z.AI origins happens in this shim.
 'use strict';
 const fs = require('node:fs');
-const http = require('node:http');
-const https = require('node:https');
-const tls = require('node:tls');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
@@ -13,7 +11,6 @@ const Module = require('node:module');
 const {spawn} = require('node:child_process');
 const readline = require('node:readline');
 const individualProvider = 'account:zai-individual-coding-plan';
-const startProvider = 'account:zai-start-plan';
 // Every secret seen during process lifetime is redacted forever, including
 // rotated values loaded after the first.
 const secrets = [];
@@ -129,232 +126,6 @@ function accountDir() {
   return path.join(base, 'v2');
 }
 
-// decodeJwtPayload decodes the middle segment of a JWT without verifying the
-// signature: the payload only supplies the account identity evidence for the
-// cross-plan binding check, never trust.
-function decodeJwtPayload(token) {
-  const parts = String(token || '').split('.');
-  if (parts.length !== 3 || !parts[1]) return null;
-  try {
-    const json = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
-    const parsed = JSON.parse(json);
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-// jwtIdentityClaims extracts the identity candidates the binding check may
-// compare against the Individual key's account segment. Expiry is honored
-// when the payload carries it: an expired JWT never establishes identity.
-const jwtIdentityFields = ['id', 'user_id', 'userId', 'sub', 'uid', 'account_id', 'accountId'];
-function jwtIdentityClaims(payload) {
-  if (!payload) return {claims: [], expired: false};
-  let expired = false;
-  if (typeof payload.exp === 'number' && Number.isFinite(payload.exp) && payload.exp * 1000 <= Date.now()) {
-    expired = true;
-  }
-  const claims = [];
-  for (const field of jwtIdentityFields) {
-    const value = payload[field];
-    if (typeof value === 'string' && value.trim() !== '') claims.push(value.trim());
-    else if (typeof value === 'number' && Number.isFinite(value)) claims.push(String(value));
-  }
-  return {claims, expired};
-}
-
-// individualAccountSegment parses the account identity embedded in an
-// Individual credential key name.
-function individualAccountSegment(key) {
-  const match = /^account-provider:coding-plan:account:([^:]+):account:(.+):api-key$/.exec(String(key || ''));
-  return match ? match[2] : null;
-}
-
-// resolveIdentity binds the plan auth sources for one policy. Fixed requires
-// exactly one Individual key. Start-first additionally requires a current
-// ZCode JWT whose identity matches that Individual key; multiple stored keys
-// are never evidence of the current account.
-function resolveIdentity(policy, keyNames, token) {
-  const individualKeys = keyNames.filter(key => individualAccountSegment(key));
-  if (individualKeys.length !== 1) {
-    return {ok: false, hasStart: false, identityMatch: false, reason: 'Expected exactly one ZCode Z.AI Coding Plan credential; select or sign in to an unambiguous account in ZCode.'};
-  }
-  const segment = individualAccountSegment(individualKeys[0]);
-  if (policy !== 'start-first') {
-    return {ok: true, segment, jwt: null, hasStart: false, identityMatch: false};
-  }
-  const {claims, expired} = jwtIdentityClaims(decodeJwtPayload(token));
-  if (expired || !token) {
-    return {ok: false, hasStart: false, identityMatch: false, reason: 'The ZCode Start Plan token is missing or expired; refresh the sign-in in ZCode.'};
-  }
-  const hasStart = Boolean(token) && !expired;
-  const identityMatch = hasStart && claims.includes(segment);
-  if (!identityMatch) {
-    return {ok: false, hasStart, identityMatch: false, reason: 'The ZCode Start token and the Individual Coding Plan credential do not resolve to one current account; resolve the account in ZCode.'};
-  }
-  return {ok: true, segment, jwt: token, hasStart, identityMatch};
-}
-
-// appVersion resolves the real app version for the balance read: the explicit
-// override, the desktop Info.plist, then a package.json next to the bundle.
-// Without a version the read fails closed instead of guessing.
-function appVersion(runtime) {
-  const override = process.env.SQUAD_ZCODE_APP_VERSION;
-  if (override && override.trim() !== '') return override.trim();
-  const plist = path.resolve(path.dirname(runtime), '../../Info.plist');
-  try {
-    const text = fs.readFileSync(plist, 'utf8');
-    const match = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/.exec(text);
-    if (match) return match[1].trim();
-  } catch {}
-  const manifest = path.resolve(path.dirname(runtime), 'package.json');
-  try {
-    const parsed = JSON.parse(fs.readFileSync(manifest, 'utf8'));
-    if (parsed && typeof parsed.version === 'string' && parsed.version.trim() !== '') return parsed.version.trim();
-  } catch {}
-  return null;
-}
-
-// readEnvelope is the bounded result contract for account reads: a normalized
-// allowlisted payload or a typed failure. No credential or raw body ever
-// reaches Go; messages are fixed templates. The request itself runs on the
-// same network context as the integration: ZCODE_HTTP_PROXY with ZCODE_NO_PROXY
-// bypass rules and ZCODE_AGENT_CA_CERT for the custom CA, exactly the keys the
-// runtime's own network stack consumes.
-const READ_TIMEOUT_MS = 5000;
-const MAX_READ_BYTES = 4 * 1024 * 1024;
-
-function noProxyMatches(host, noProxyValue) {
-  if (!noProxyValue || noProxyValue.trim() === '') return false;
-  for (let entry of noProxyValue.split(',')) {
-    entry = entry.trim().toLowerCase();
-    if (entry === '') continue;
-    if (entry === '*') return true;
-    if (entry.startsWith('.')) {
-      if (host === entry.slice(1) || host.endsWith(entry)) return true;
-    } else if (host === entry || host.endsWith(`.${entry}`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function caCertificates() {
-  const caFile = process.env.ZCODE_AGENT_CA_CERT;
-  if (!caFile || caFile.trim() === '') return undefined;
-  try { return fs.readFileSync(caFile.trim()); } catch { return undefined; }
-}
-
-// requestViaProxy tunnels one HTTPS request through an HTTP proxy with
-// CONNECT and then establishes TLS INSIDE the tunnel with server-name
-// verification and the custom CA when present. The tunnel socket is never
-// spoken to in the clear.
-function requestViaProxy(target, proxyUrl, ca, cb) {
-  const proxy = new URL(proxyUrl);
-  const connectReq = http.request({
-    host: proxy.hostname, port: proxy.port || 80, method: 'CONNECT',
-    path: `${target.hostname}:443`,
-    headers: {host: `${target.hostname}:443`},
-  });
-  connectReq.setTimeout(READ_TIMEOUT_MS, () => connectReq.destroy(Error('proxy connect timed out')));
-  connectReq.on('connect', (response, socket) => {
-    if (response.statusCode !== 200) {
-      socket.destroy();
-      return cb(Error(`proxy CONNECT failed with status ${response.statusCode}`));
-    }
-    const tlsSocket = tls.connect({
-      socket,
-      servername: target.hostname,
-      host: target.hostname,
-      port: target.port || 443,
-      ca,
-      rejectUnauthorized: true,
-    });
-    tlsSocket.setTimeout(READ_TIMEOUT_MS, () => tlsSocket.destroy(Error('TLS handshake through the proxy timed out')));
-    tlsSocket.once('secureConnect', () => {
-      tlsSocket.setTimeout(0);
-      cb(null, tlsSocket);
-    });
-    tlsSocket.once('error', error => {
-      tlsSocket.destroy();
-      cb(error);
-    });
-  });
-  connectReq.on('error', error => cb(error));
-  connectReq.end();
-}
-
-function performRead(url, authorization, sourceHeaders = {}) {
-  return new Promise(resolve => {
-    let settled = false;
-    const finish = value => { if (!settled) { settled = true; resolve(value); } };
-    const target = new URL(url);
-    const ca = caCertificates();
-    const proxyUrl = process.env.ZCODE_HTTP_PROXY;
-    const useProxy = proxyUrl && proxyUrl.trim() !== '' && !noProxyMatches(target.hostname, process.env.ZCODE_NO_PROXY);
-    const headers = {...sourceHeaders, Authorization: authorization, host: target.host, accept: 'application/json'};
-    const send = socket => {
-      const req = https.request({
-        hostname: target.hostname, port: target.port || 443, path: `${target.pathname}${target.search}`,
-        method: 'GET', headers,
-        ca,
-        ...(socket ? {createConnection: () => socket} : {}),
-      }, response => {
-        if (response.statusCode >= 300 && response.statusCode < 400) {
-          response.resume();
-          return finish({ok: false, kind: 'schema', message: 'The account read redirected to an unverified origin; refusing to follow it.'});
-        }
-        let size = 0;
-        const chunks = [];
-        response.on('data', chunk => {
-          size += chunk.length;
-          if (size > MAX_READ_BYTES) {
-            response.destroy();
-            return finish({ok: false, kind: 'schema', message: 'The account read response exceeded its size bound.'});
-          }
-          chunks.push(chunk);
-        });
-        response.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          if (response.statusCode === 401 || response.statusCode === 403) {
-            return finish({ok: false, kind: 'auth', message: 'The account read was rejected as unauthenticated; sign in or refresh the plan in ZCode.'});
-          }
-          if (response.statusCode !== 200) {
-            return finish({ok: false, kind: 'network', httpCode: response.statusCode, message: 'The account read endpoint returned an error status.'});
-          }
-          let parsed;
-          try { parsed = JSON.parse(text); } catch {
-            return finish({ok: false, kind: 'schema', message: 'The account read response was not valid JSON.'});
-          }
-          finish({ok: true, payload: parsed});
-        });
-        response.on('error', () => finish({ok: false, kind: 'network', message: 'The account read failed while reading the response.'}));
-      });
-      req.setTimeout(READ_TIMEOUT_MS, () => req.destroy(Error('account read timed out')));
-      req.on('error', () => finish({ok: false, kind: 'network', message: 'The account read failed at the transport level.'}));
-      req.end();
-    };
-    if (useProxy) {
-      requestViaProxy(target, proxyUrl.trim(), ca, (error, tlsSocket) => {
-        if (error) return finish({ok: false, kind: 'network', message: 'The account read could not establish the TLS tunnel through the proxy.'});
-        send(tlsSocket);
-      });
-    } else {
-      send(null);
-    }
-  });
-}
-
-// readSuccessfulEnvelope applies the inspected upstream business-envelope
-// contract before any projection: success:false or a failed business code is
-// an error even when a data body rides along.
-function readSuccessfulEnvelope(parsed) {
-  if (!parsed || typeof parsed !== 'object') return {ok: false};
-  if (parsed.success === false) return {ok: false};
-  if (parsed.code !== undefined && parsed.code !== 0 && parsed.code !== 200) return {ok: false};
-  return {ok: true, data: parsed.data};
-}
-
 // providerHeaderRequest extracts the binding fields of a provider runtime
 // headers request. The model rides in params.modelSelection — the wire has no
 // top-level modelId.
@@ -369,79 +140,6 @@ function providerHeaderRequest(params) {
     modelId: typeof selection.modelId === 'string' ? selection.modelId : '',
     reason: typeof p.reason === 'string' ? p.reason : '',
   };
-}
-
-// Account reads use the pinned source-defined endpoints with the confirmed
-// authorization source per plan: the Start balance takes the ZCode JWT, and
-// the Individual subscription list takes the Individual plan API key itself,
-// exactly like the upstream availability readers. Origins are fixed; redirects
-// are never followed to an unverified origin.
-const balanceOrigin = 'https://zcode.z.ai';
-const subscriptionOrigin = 'https://api.z.ai';
-
-// Mirrors the source headers used by the native ZCode endpoint client.
-function startSourceHeaders(version) {
-  let deviceHeaders = {};
-  try {
-    const mid = JSON.parse(fs.readFileSync(path.join(accountDir(), 'telemetry-state.json'), 'utf8')).deviceMid;
-    if (typeof mid === 'string' && /^[\x20-\x7e]+$/.test(mid.trim())) deviceHeaders['X-Device-Mid'] = mid.trim();
-  } catch {}
-  return {
-    ...deviceHeaders,
-    'User-Agent': `ZCode/${version}`,
-    'HTTP-Referer': balanceOrigin,
-    'X-Title': 'Z Code@electron',
-    'X-Release-Channel': 'production',
-    'x-request-id': crypto.randomUUID(),
-    'X-ZCode-App-Version': version,
-    'X-Platform': `${process.platform}-${process.arch}`,
-    'X-Client-Language': Intl.DateTimeFormat().resolvedOptions().locale,
-    'X-Client-Timezone': Intl.DateTimeFormat().resolvedOptions().timeZone,
-    'X-Os-Category': process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
-    'X-Os-Version': os.version(),
-  };
-}
-
-async function readStartBalance(runtime, jwt) {
-  const version = appVersion(runtime);
-  if (!version) {
-    return {ok: false, kind: 'schema', message: 'The ZCode app version could not be resolved; the Start balance read is unavailable.'};
-  }
-  if (!jwt) {
-    return {ok: false, kind: 'auth', message: 'No usable Start Plan credential for the guarded read; sign in or refresh the plan in ZCode.'};
-  }
-  const url = `${balanceOrigin}/api/v1/zcode-plan/billing/balance?app_version=${encodeURIComponent(version)}`;
-  const response = await performRead(url, `Bearer ${jwt.trim()}`, startSourceHeaders(version));
-  if (!response.ok) return response;
-  const envelope = readSuccessfulEnvelope(response.payload);
-  if (!envelope.ok || !envelope.data || typeof envelope.data !== 'object') {
-    return {ok: false, kind: 'schema', message: 'The Start balance read returned a business error or unreadable evidence.'};
-  }
-  return {ok: true, payload: {data: envelope.data}};
-}
-
-// normalizeApiKeyForHeader mirrors the upstream header normalization: strip a
-// pasted Bearer prefix and send the bare structured key.
-function normalizeApiKeyForHeader(value) {
-  const trimmed = String(value || '').trim().replace(/^Bearer\s+/i, '').trim();
-  const structured = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/.exec(trimmed);
-  if (structured) return structured[0];
-  const ascii = /^[\x21-\x7e]+/.exec(trimmed);
-  return ascii ? ascii[0].trim() : '';
-}
-
-async function readIndividualSubscription(individualApiKey) {
-  const key = normalizeApiKeyForHeader(individualApiKey);
-  if (!key) {
-    return {ok: false, kind: 'auth', message: 'No usable Individual credential for the guarded read; sign in or refresh the plan in ZCode.'};
-  }
-  const response = await performRead(`${subscriptionOrigin}/api/biz/subscription/list`, key);
-  if (!response.ok) return response;
-  const envelope = readSuccessfulEnvelope(response.payload);
-  if (!envelope.ok) {
-    return {ok: false, kind: 'schema', message: 'The Individual subscription read returned a business error.'};
-  }
-  return {ok: true, payload: {data: envelope.data}};
 }
 
 // readRegistryView projects the live registry view onto the bounded
@@ -480,7 +178,7 @@ async function readRegistryView(pick, found, ensure, env, request) {
     // fail-closed account source lists no entitled models at all.
     const snapshot = pick(found.snapshotParser)({
       revision: 'squad-' + Date.now(),
-      basedOnZCodeBuiltinRevision: revision,
+      basedOnZcodeBuiltinRevision: revision,
       providers: {[request.provider]: {access: {type: 'zhipu-account', entitled: Boolean(request.entitled)}}},
       states: {[request.provider]: {availability: request.entitled ? 'available' : 'unavailable', entitled: Boolean(request.entitled), current: Boolean(request.current)}},
     });
@@ -551,7 +249,7 @@ async function main() {
   // pending tables so responses always reach the right side.
   let generation = null;
   let workspace = null;
-  let authMaterial = null;
+  let secret = null;
   let revision = null;
   let nextInternalId = 1;
   const pendingAuth = new Map();
@@ -577,32 +275,21 @@ async function main() {
     const params = msg.params || {};
     generation = params.generation;
     workspace = params.workspace;
-    const policy = params.planPolicy === 'start-first' ? 'start-first' : 'fixed';
+    // Identity is the unique Individual Coding Plan credential; multiple stored
+    // keys are never evidence of the current account.
     const names = credentialKeys().filter(key => key.startsWith(`account-provider:coding-plan:${individualProvider}:account:`) && key.endsWith(':api-key'));
+    if (names.length !== 1) {
+      return failBootstrap(msg.id, 'Expected exactly one ZCode Z.AI Coding Plan credential; select/sign in to an unambiguous account in ZCode.');
+    }
     const store = await ensure(() => pick(found.credentials)({env: process.env}));
     if (typeof store?.load !== 'function') {
       return failBootstrap(msg.id, 'ZCode credential store interface unavailable; update the adapter.');
     }
-    let jwt = null;
-    if (policy === 'start-first') {
-      try {
-        const candidate = await ensure(() => store.load('zcodejwttoken'));
-        if (candidate) { jwt = candidate; setSecret(candidate); }
-      } catch {}
-    }
-    const identity = resolveIdentity(policy, names, jwt);
-    if (!identity.ok) return failBootstrap(msg.id, identity.reason);
-    let secret = null;
     try {
       secret = await ensure(() => store.load(names[0]));
     } catch {}
     if (!secret) return failBootstrap(msg.id, 'ZCode credential is unavailable; sign in again in ZCode.');
     setSecret(secret);
-    // The subscription read uses the confirmed authorization source for the
-    // Individual plan: the plan's own API key, like the upstream availability
-    // reader. No other stored token is consulted. All secrets stay in the
-    // shim; Go only ever sees the normalized evidence.
-    authMaterial = {individual: secret, start: identity.jwt, subscription: secret};
     // Registry entry point first: interface-checked and disposed after the
     // builtin revision is read; the credential store was interface-checked
     // before any credential value was read.
@@ -618,19 +305,19 @@ async function main() {
     child.on('exit', code => { process.exitCode = code || 0; process.stdin.destroy(); });
     readline.createInterface({input: child.stderr}).on('line', line => process.stderr.write(safe(line) + '\n'));
     wireRuntime();
-    respondToSquad(msg.id, {result: {ok: true, revision, hasStart: identity.hasStart, hasIndividual: true, identityMatch: identity.identityMatch}});
+    respondToSquad(msg.id, {result: {ok: true, revision}});
   };
 
   const applyOverlay = msg => {
     const provider = msg.params && msg.params.provider;
-    if (provider !== individualProvider && provider !== startProvider) {
+    if (provider !== individualProvider) {
       return respondToSquad(msg.id, {error: {code: -32602, message: 'Overlay provider is outside the allowed Z.AI account family.'}});
     }
     const entitled = Boolean(msg.params.entitled);
     const internalId = `squad-overlay-${nextInternalId++}`;
     pendingOverlay.set(internalId, msg.id);
     send({id: internalId, method: 'provider/updateAccountConfig', params: {
-      revision: 'squad-' + Date.now(), basedOnZCodeBuiltinRevision: revision,
+      revision: 'squad-' + Date.now(), basedOnZcodeBuiltinRevision: revision,
       providers: {[provider]: {access: {type: 'zhipu-account', entitled}}},
       states: {[provider]: {availability: entitled ? 'available' : 'unavailable', entitled, current: entitled}}
     }});
@@ -639,14 +326,11 @@ async function main() {
   const requestHeaders = msg => {
     const request = providerHeaderRequest(msg.params);
     const provider = request.providerId;
-    if (request.reason === 'captcha-retry' && provider === startProvider) {
-      return send({id: msg.id, result: {headersApplied: false, errorMessage: 'Start Plan requires ZCode Desktop CAPTCHA verification for this request; the headless adapter cannot complete it. Individual quota was not used.'}});
-    }
-    if (request.reason !== 'model-request' || (provider !== individualProvider && provider !== startProvider)) {
+    if (request.reason !== 'model-request' || provider !== individualProvider) {
       return send({id: msg.id, result: {headersApplied: false, errorMessage: 'Unsupported provider or authentication challenge; resolve it in ZCode.'}});
     }
     const internalId = `squad-auth-${nextInternalId++}`;
-    pendingAuth.set(internalId, {id: msg.id, provider, timer: setTimeout(() => {
+    pendingAuth.set(internalId, {id: msg.id, timer: setTimeout(() => {
       if (!pendingAuth.has(internalId)) return;
       pendingAuth.delete(internalId);
       send({id: msg.id, result: {headersApplied: false, errorMessage: 'The account authorization round-trip timed out.'}});
@@ -682,31 +366,25 @@ async function main() {
     });
   };
 
-  // Squad-owned account reads. They run in the shim with native credentials
-  // and answer with the bounded envelope; they never reach the App Server.
+  // The Squad-owned registry-view read runs in the shim against the installed
+  // bundle and answers with the bounded envelope; it never reaches the App
+  // Server and never touches the network.
   const requireBootstrap = () => {
-    if (!bootstrapped || !authMaterial) {
-      return {ok: false, kind: 'auth', message: 'The guarded account read ran before bootstrap completed.'};
+    if (!bootstrapped) {
+      return {ok: false, kind: 'auth', message: 'The guarded registry read ran before bootstrap completed.'};
     }
     return null;
   };
   const handleRead = async msg => {
     const missing = requireBootstrap();
     if (missing) return respondToSquad(msg.id, {result: missing});
-    let envelope;
-    if (msg.method === 'squad/readStartBalance') {
-      envelope = await readStartBalance(runtime, authMaterial.start);
-    } else if (msg.method === 'squad/readIndividualSubscription') {
-      envelope = await readIndividualSubscription(authMaterial.subscription);
-    } else {
-      const request = msg.params && typeof msg.params === 'object' ? msg.params : {};
-      envelope = await readRegistryView(pick, found, ensure, env, {
-        provider: request.provider,
-        entitled: Boolean(request.entitled),
-        current: Boolean(request.current),
-        basedOnZCodeBuiltinRevision: revision,
-      });
-    }
+    const request = msg.params && typeof msg.params === 'object' ? msg.params : {};
+    const envelope = await readRegistryView(pick, found, ensure, env, {
+      provider: request.provider,
+      entitled: Boolean(request.entitled),
+      current: Boolean(request.current),
+      basedOnZcodeBuiltinRevision: revision,
+    });
     respondToSquad(msg.id, {result: envelope});
   };
 
@@ -722,11 +400,11 @@ async function main() {
     if (msg.method === 'squad/applyAccountOverlay') {
       return applyOverlay(msg);
     }
-    if (msg.method === 'squad/readStartBalance' || msg.method === 'squad/readIndividualSubscription' || msg.method === 'squad/readRegistryView') {
+    if (msg.method === 'squad/readRegistryView') {
       try {
         await handleRead(msg);
       } catch (error) {
-        respondToSquad(msg.id, {result: {ok: false, kind: 'schema', message: 'The guarded account read failed inside the shim.'}});
+        respondToSquad(msg.id, {result: {ok: false, kind: 'schema', message: 'The guarded registry read failed inside the shim.'}});
       }
       return;
     }
@@ -742,11 +420,10 @@ async function main() {
         if (!allow) {
           return send({id: pending.id, result: {headersApplied: false, errorMessage: 'The account authorization request is not bound to the active Squad run.'}});
         }
-        const secretForProvider = pending.provider === startProvider ? authMaterial.start : authMaterial.individual;
-        if (!secretForProvider) {
+        if (!secret) {
           return send({id: pending.id, result: {headersApplied: false, errorMessage: 'The selected provider credential is unavailable; resolve the account in ZCode.'}});
         }
-        return send({id: pending.id, result: {headersApplied: true, requestAuth: {apiKey: secretForProvider}}});
+        return send({id: pending.id, result: {headersApplied: true, requestAuth: {apiKey: secret}}});
       }
     }
     if (!child) {
@@ -756,4 +433,4 @@ async function main() {
   }).on('close', () => { if (child) child.stdin.end(); });
 }
 if (!module.parent) main().catch(error => fatal(error.message));
-module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, decodeJwtPayload, resolveIdentity, jwtIdentityClaims, individualAccountSegment, noProxyMatches, normalizeApiKeyForHeader, readSuccessfulEnvelope, performRead, providerHeaderRequest, startSourceHeaders, readStartBalance};
+module.exports = {safe, setSecretForTest(value) { secrets.length = 0; setSecret(value); }, discover, providerHeaderRequest};

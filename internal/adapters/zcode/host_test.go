@@ -1,17 +1,13 @@
 package zcode
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 )
 
 func requireNode(t *testing.T) string {
@@ -136,190 +132,6 @@ func discoverFailure(t *testing.T, node, host, bundle string) string {
 	return string(out)
 }
 
-// b64url encodes a JWT segment the way issuers do.
-func b64url(t *testing.T, value any) string {
-	t.Helper()
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
-
-func jwt(t *testing.T, payload map[string]any) string {
-	t.Helper()
-	return "eyJhbGciOiJIUzI1NiJ9." + b64url(t, payload) + ".c2ln"
-}
-
-func TestHostIdentityBinding(t *testing.T) {
-	node := requireNode(t)
-	tmp := t.TempDir()
-	host := filepath.Join(tmp, "host.cjs")
-	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
-		t.Fatal(err)
-	}
-	individualKey := "account-provider:coding-plan:account:zai-individual-coding-plan:account:user-42:api-key"
-	script := `const h=require(process.argv[1]);
-const [policy, token, keys] = [process.argv[2], process.argv[3], JSON.parse(process.argv[4])];
-const identity = h.resolveIdentity(policy, keys, token);
-process.stdout.write(JSON.stringify(identity));`
-	run := func(policy, token string, keys []string) map[string]any {
-		out, err := exec.Command(node, "-e", script, host, policy, token, mustJSON(t, keys)).CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s %v", out, err)
-		}
-		var parsed map[string]any
-		if err := json.Unmarshal(out, &parsed); err != nil {
-			t.Fatalf("%s %v", out, err)
-		}
-		return parsed
-	}
-
-	current := jwt(t, map[string]any{"sub": "user-42", "exp": float64(time.Now().Add(time.Hour).Unix())})
-	expired := jwt(t, map[string]any{"sub": "user-42", "exp": float64(time.Now().Add(-time.Hour).Unix())})
-	foreign := jwt(t, map[string]any{"sub": "user-43", "exp": float64(time.Now().Add(time.Hour).Unix())})
-
-	cases := []struct {
-		name          string
-		policy        string
-		token         string
-		keys          []string
-		ok            bool
-		identityMatch bool
-	}{
-		{"fixed unique key", "fixed", "", []string{individualKey}, true, false},
-		{"fixed multiple keys rejected", "fixed", "", []string{individualKey, individualKey}, false, false},
-		{"start-first bound identity", "start-first", current, []string{individualKey}, true, true},
-		{"start-first foreign identity", "start-first", foreign, []string{individualKey}, false, false},
-		{"start-first expired token", "start-first", expired, []string{individualKey}, false, false},
-		{"start-first missing token", "start-first", "", []string{individualKey}, false, false},
-	}
-	for _, item := range cases {
-		t.Run(item.name, func(t *testing.T) {
-			parsed := run(item.policy, item.token, item.keys)
-			if parsed["ok"] != item.ok || parsed["identityMatch"] != item.identityMatch {
-				t.Fatalf("%v", parsed)
-			}
-		})
-	}
-}
-
-func mustJSON(t *testing.T, value any) string {
-	t.Helper()
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(raw)
-}
-
-func TestHostGuardedReadHelpers(t *testing.T) {
-	node := requireNode(t)
-	tmp := t.TempDir()
-	host := filepath.Join(tmp, "host.cjs")
-	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
-		t.Fatal(err)
-	}
-	script := `const h=require(process.argv[1]);
-const out = {
-  noProxyExact: h.noProxyMatches('api.z.ai', 'api.z.ai,example.com'),
-  noProxySuffix: h.noProxyMatches('sub.api.z.ai', '.api.z.ai'),
-  noProxyMiss: h.noProxyMatches('api.z.ai', 'example.com,.bigmodel.cn'),
-  noProxyWildcard: h.noProxyMatches('api.z.ai', '*'),
-  noProxyEmpty: h.noProxyMatches('api.z.ai', ''),
-  keyBare: h.normalizeApiKeyForHeader('abc12345.xyz98765'),
-  keyBearer: h.normalizeApiKeyForHeader('Bearer abc12345.xyz98765'),
-  keyPadded: h.normalizeApiKeyForHeader('  abc12345.xyz98765 notes'),
-  envOk: h.readSuccessfulEnvelope({code: 200, success: true, data: {a: 1}}).ok,
-  envOmittedCode: h.readSuccessfulEnvelope({data: []}).ok,
-  envZero: h.readSuccessfulEnvelope({code: 0, data: []}).ok,
-  envSuccessFalse: h.readSuccessfulEnvelope({success: false, code: 200, data: {x: 1}}).ok,
-  envBusinessError: h.readSuccessfulEnvelope({success: true, code: 500, data: {y: 2}}).ok,
-  envNonObject: h.readSuccessfulEnvelope('nope').ok,
-};
-process.stdout.write(JSON.stringify(out));`
-	out, err := exec.Command(node, "-e", script, host).CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v", out, err)
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		t.Fatalf("%s %v", out, err)
-	}
-	expect := map[string]any{
-		"noProxyExact": true, "noProxySuffix": true, "noProxyMiss": false,
-		"noProxyWildcard": true, "noProxyEmpty": false,
-		"keyBare": "abc12345.xyz98765", "keyBearer": "abc12345.xyz98765", "keyPadded": "abc12345.xyz98765",
-		"envOk": true, "envOmittedCode": true, "envZero": true,
-		"envSuccessFalse": false, "envBusinessError": false, "envNonObject": false,
-	}
-	for key, want := range expect {
-		if parsed[key] != want {
-			t.Fatalf("%s = %v, want %v", key, parsed[key], want)
-		}
-	}
-}
-
-// A proxy that answers CONNECT with 200 and then speaks plaintext HTTP used to
-// receive the Authorization header in the clear and have its fake response
-// accepted. With TLS inside the tunnel the read must fail instead.
-func TestHostProxiedReadRejectsPlaintextTunnel(t *testing.T) {
-	node := requireNode(t)
-	tmp := t.TempDir()
-	host := filepath.Join(tmp, "host.cjs")
-	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
-		t.Fatal(err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodConnect {
-			hijacker, ok := w.(http.Hijacker)
-			if !ok {
-				t.Error("cannot hijack")
-				return
-			}
-			conn, buf, err := hijacker.Hijack()
-			if err != nil {
-				return
-			}
-			defer conn.Close()
-			buf.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
-			buf.Flush()
-			// Plaintext HTTP where TLS is expected: the read must fail.
-			buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"stolen\":true}")
-			buf.Flush()
-			return
-		}
-		w.WriteHeader(http.StatusForbidden)
-	})}
-	go server.Serve(listener)
-	defer func() { _ = server.Close() }()
-
-	script := `const h=require(process.argv[1]);
-process.env.ZCODE_HTTP_PROXY=process.argv[2];
-h.performRead('https://api.z.ai/api/biz/subscription/list','synthetic-secret').then(r=>process.stdout.write(JSON.stringify(r)));`
-	cmd := exec.Command(node, "-e", script, host, "http://"+listener.Addr().String())
-	cmd.Env = append(os.Environ(), "GO_WANT_HELPER=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v", out, err)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(out, &response); err != nil {
-		t.Fatalf("%s %v", out, err)
-	}
-	if response["ok"] == true {
-		t.Fatalf("plaintext tunnel accepted: %s", out)
-	}
-	if strings.Contains(string(out), "synthetic-secret") {
-		t.Fatal("the authorization header leaked into the diagnostic")
-	}
-}
-
 func TestHostProviderHeaderRequestExtraction(t *testing.T) {
 	node := requireNode(t)
 	tmp := t.TempDir()
@@ -330,11 +142,11 @@ func TestHostProviderHeaderRequestExtraction(t *testing.T) {
 	// The wire shape from the inspected source: the model rides in
 	// params.modelSelection, and there is no top-level modelId.
 	script := `const h=require(process.argv[1]);
-process.stdout.write(JSON.stringify([
-  h.providerHeaderRequest({requestId:'r1', sessionId:'s1', turnId:'t1', providerId:'account:zai-individual-coding-plan', modelSelection:{providerId:'account:zai-individual-coding-plan', modelId:'GLM-5.3-Flash'}, reason:'model-request'}),
-  h.providerHeaderRequest({providerId:'p', modelId:'WRONG'}),
-  h.providerHeaderRequest(undefined),
-]));`
+	process.stdout.write(JSON.stringify([
+	  h.providerHeaderRequest({requestId:'r1', sessionId:'s1', turnId:'t1', providerId:'account:zai-individual-coding-plan', modelSelection:{providerId:'account:zai-individual-coding-plan', modelId:'GLM-5.3-Flash'}, reason:'model-request'}),
+	  h.providerHeaderRequest({providerId:'p', modelId:'WRONG'}),
+	  h.providerHeaderRequest(undefined),
+	]));`
 	out, err := exec.Command(node, "-e", script, host).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v", out, err)
@@ -351,45 +163,5 @@ process.stdout.write(JSON.stringify([
 	}
 	if parsed[2]["providerId"] != "" {
 		t.Fatalf("missing params must degrade safely: %v", parsed[2])
-	}
-}
-
-// Source: services/providers/{sourceHeaders,api/nodeApiClient}.ts. Start
-// billing rejects requests without the existing device identity (HTTP 400).
-func TestStartBalanceRequestContract(t *testing.T) {
-	node := requireNode(t)
-	tmp := t.TempDir()
-	host := filepath.Join(tmp, "host.cjs")
-	if err := os.WriteFile(host, []byte(hostSource), 0600); err != nil {
-		t.Fatal(err)
-	}
-	script := `const assert=require('node:assert/strict');
-const fs=require('node:fs'),path=require('node:path'),https=require('node:https'),{EventEmitter}=require('node:events');
-const root=process.argv[2];process.env.ZCODE_DATA_BASE_DIR=root;process.env.SQUAD_ZCODE_APP_VERSION='3.14.3';delete process.env.ZCODE_HTTP_PROXY;
-fs.mkdirSync(path.join(root,'v2'));
-fs.writeFileSync(path.join(root,'v2','telemetry-state.json'),JSON.stringify({deviceMid:'synthetic-device-id'}));
-const h=require(process.argv[1]);let calls=0;
-https.request=(options,callback)=>{
- calls++;assert.equal(options.hostname,'zcode.z.ai');assert.equal(options.path,'/api/v1/zcode-plan/billing/balance?app_version=3.14.3');
- assert.equal(options.headers.Authorization,'Bearer synthetic-jwt');
- assert.equal(options.headers['X-Device-Mid'],'synthetic-device-id');
- assert.equal(options.headers['User-Agent'],'ZCode/3.14.3');
- assert.equal(options.headers['X-ZCode-App-Version'],'3.14.3');
- assert.equal(options.headers['HTTP-Referer'],'https://zcode.z.ai');
- assert.ok(options.headers['x-request-id']);
- const req=new EventEmitter();req.setTimeout=()=>req;req.destroy=()=>{};
- req.end=()=>{const res=new EventEmitter();res.statusCode=200;callback(res);res.emit('data',Buffer.from('{"code":0,"data":{"plans":[],"balances":[]}}'));res.emit('end');};return req;
-};
-h.readStartBalance('/synthetic/runtime.cjs','synthetic-jwt').then(r=>{
- assert.equal(r.ok,true);assert.equal(calls,1);
- fs.writeFileSync(path.join(root,'v2','telemetry-state.json'),'{"deviceMid":"bad\\nheader"}');
- assert.equal(h.startSourceHeaders('3.14.3')['X-Device-Mid'],undefined);
- fs.unlinkSync(path.join(root,'v2','telemetry-state.json'));
- assert.equal(h.startSourceHeaders('3.14.3')['X-Device-Mid'],undefined);
- assert.equal(fs.existsSync(path.join(root,'v2','telemetry-state.json')),false);
-}).catch(e=>{console.error(e);process.exitCode=1;});`
-	out, err := exec.Command(node, "-e", script, host, tmp).CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s: %v", out, err)
 	}
 }

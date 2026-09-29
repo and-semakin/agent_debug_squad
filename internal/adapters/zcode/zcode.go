@@ -24,6 +24,11 @@ var hostSource string
 
 const defaultRuntime = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
 
+// The only supported account provider: the Z.AI Individual Coding Plan.
+// Start Plan routing was removed; the provider option accepts only this ID or
+// omission.
+const ProviderIndividual = "account:zai-individual-coding-plan"
+
 // Descendant ownership traversal bounds. Exceeding either cap is an explicit
 // incomplete-ownership failure, never silent success.
 const (
@@ -75,15 +80,13 @@ type activeRun struct {
 	stateMu    sync.Mutex
 	generation uint64
 	workspace  string
-	provider   string
-	model      string
 	// preferencesSessionID records the one bootstrap association granted while
 	// the create/resume result is outstanding; the returned snapshot's session
 	// ID must agree with it. preferencesGranted counts granted associations.
 	preferencesSessionID string
 	preferencesGranted   int
-	continued            bool
-	decision             routingDecision
+	provider             string
+	model                string
 	lastActivity         time.Time
 }
 type snapshot struct {
@@ -145,23 +148,28 @@ func (a *Adapter) option(name, fallback string) string {
 	}
 	return fallback
 }
-func (a *Adapter) planPolicy() string         { return a.option("plan_policy", PlanPolicyFixed) }
 func (a *Adapter) requestedModel() string     { return a.option("model", "GLM-5.3-Flash") }
 func (a *Adapter) requestedReasoning() string { return a.option("reasoning", "low") }
 
-// selection builds the complete model selection for the effective provider.
-// Every send passes the full selection; switching providers never changes the
-// requested model or reasoning.
-func (a *Adapter) selection(provider string) map[string]any {
-	return map[string]any{"providerId": provider, "modelId": a.requestedModel(), "options": map[string]string{"reasoningLevel": a.requestedReasoning()}}
+// selection builds the complete model selection for the configured provider.
+func (a *Adapter) selection() map[string]any {
+	return map[string]any{"providerId": a.option("provider", ProviderIndividual), "modelId": a.requestedModel(), "options": map[string]string{"reasoningLevel": a.requestedReasoning()}}
 }
 
 func (a *Adapter) Init(ctx context.Context, spec domain.AgentSpec, state domain.AgentState) (domain.AgentState, error) {
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
-	if err := validateAgentOptions(a.planPolicy(), a.option("provider", ""), a.requestedReasoning()); err != nil {
-		return state, err
+	if _, set := a.spec.StringOptions["plan_policy"]; set {
+		return state, errors.New("zcode plan_policy was removed; remove it from the agent options")
+	}
+	if provider := a.spec.StringOptions["provider"]; provider != "" && provider != ProviderIndividual {
+		return state, fmt.Errorf("zcode supports only provider %s", ProviderIndividual)
+	}
+	switch a.requestedReasoning() {
+	case "low", "high", "max":
+	default:
+		return state, errors.New("zcode reasoning must be low, high, or max")
 	}
 	if state.CreatedAt.IsZero() {
 		state.CreatedAt = time.Now().UTC()
@@ -240,7 +248,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 			session := r.session
 			r.stateMu.Unlock()
 			sort.Strings(descendants)
-			if err := runTerminalCleanup(c.call, cleanupSpec{session: session, descendants: descendants, background: r.background, stopRoot: true}); err != nil && ctx.Err() == nil {
+			if err := runTerminalCleanup(c.call, cleanupSpec{session: session, descendants: descendants, background: r.background}); err != nil && ctx.Err() == nil {
 				// A cleanup failure prevents clean success; the final text is
 				// retained as evidence with an explicit cleanup failure.
 				if retErr == nil {
@@ -296,29 +304,21 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 
 	c.setHandler(r.hostRequest)
 
-	// The bootstrap resolves credentials under the policy's identity rule and
-	// starts the app-server; its typed failure maps to auth-required.
+	// The bootstrap resolves the unique Individual credential and starts the
+	// app-server; its typed failure is surfaced as a plain actionable error.
 	var boot struct {
-		OK            bool   `json:"ok"`
-		Kind          string `json:"kind,omitempty"`
-		Message       string `json:"message,omitempty"`
-		Revision      string `json:"revision,omitempty"`
-		HasStart      bool   `json:"hasStart"`
-		HasIndividual bool   `json:"hasIndividual"`
-		IdentityMatch bool   `json:"identityMatch"`
+		OK      bool   `json:"ok"`
+		Kind    string `json:"kind,omitempty"`
+		Message string `json:"message,omitempty"`
 	}
 	bootstrapCtx, bootstrapCancel := context.WithTimeout(ctx, rpcTimeout)
-	err = c.call(bootstrapCtx, "squad/bootstrap", map[string]any{"generation": r.generation, "workspace": state.WorkspaceDir, "planPolicy": a.planPolicy()}, &boot)
+	err = c.call(bootstrapCtx, "squad/bootstrap", map[string]any{"generation": r.generation, "workspace": state.WorkspaceDir}, &boot)
 	bootstrapCancel()
 	if err != nil {
 		return result, next, err
 	}
 	if !boot.OK {
-		failure := errors.New(boot.Message)
-		if boot.Kind == "auth" {
-			failure = routingError{code: CodeRoutingAuthRequired, safe: boot.Message}
-		}
-		return result, next, failure
+		return result, next, errors.New(boot.Message)
 	}
 
 	// Wire compatibility is established before any conversation exists.
@@ -326,32 +326,24 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return result, next, err
 	}
 
-	// Account-bound eligibility precedes every new Squad turn.
-	engine := newRoutingEngine(&hostBridge{call: c.call})
-	eligibilityIn := eligibility{policy: a.planPolicy(), requestedModel: a.requestedModel(), requestedLevel: a.requestedReasoning(), provider: a.option("provider", "")}
-	var decision routingDecision
-	if a.planPolicy() == PlanPolicyStartFirst {
-		decision, err = engine.decideStartFirst(ctx, eligibilityIn)
-	} else {
-		decision, err = engine.decideFixed(ctx, eligibilityIn)
-	}
-	if err != nil {
-		if routingErr, ok := err.(routingError); ok {
-			emitRoutingDiagnostic(sink, a.requestedModel(), a.planPolicy(), routingDecision{ReasonCode: routingErr.code}, r.id)
-		}
-		return result, next, err
-	}
+	// Pre-dispatch selection verification, local to the installed bundle: the
+	// exact configured provider/model/reasoning must be selectable in the live
+	// registry view after the account evidence is applied. No Z.AI network
+	// origin is read, so account-service reachability never gates dispatch.
+	provider := a.option("provider", ProviderIndividual)
 	r.stateMu.Lock()
-	r.provider = decision.Provider
-	r.decision = decision
+	r.provider = provider
 	r.stateMu.Unlock()
-	if decision.ReasonCode != "" {
-		emitRoutingDiagnostic(sink, a.requestedModel(), a.planPolicy(), decision, r.id)
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, rpcTimeout)
+	verifyErr := verifySelection(verifyCtx, &hostBridge{call: c.call}, provider, a.requestedModel(), a.requestedReasoning())
+	verifyCancel()
+	if verifyErr != nil {
+		return result, next, verifyErr
 	}
-	// The overlay carries the evidence verdict; the host attaches the actual
-	// native builtin revision it read during bootstrap.
+	// The overlay marks the configured provider entitled/current; the host
+	// attaches the actual native builtin revision it read during bootstrap.
 	overlayCtx, overlayCancel := context.WithTimeout(ctx, rpcTimeout)
-	err = c.call(overlayCtx, "squad/applyAccountOverlay", overlayRequest{Provider: decision.Provider, Entitled: true, Current: true}, nil)
+	err = c.call(overlayCtx, "squad/applyAccountOverlay", overlayRequest{Provider: provider, Entitled: true, Current: true}, nil)
 	overlayCancel()
 	if err != nil {
 		return result, next, err
@@ -364,7 +356,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	var snapRaw json.RawMessage
 	fresh := state.BackendSessionID == ""
 	if fresh {
-		err = c.call(ctx, "session/create", map[string]any{"workspace": map[string]string{"workspaceKey": state.WorkspaceDir, "workspacePath": state.WorkspaceDir}, "mode": mode, "model": a.selection(decision.Provider), "titleGenerationEnabled": false}, &snapRaw)
+		err = c.call(ctx, "session/create", map[string]any{"workspace": map[string]string{"workspaceKey": state.WorkspaceDir, "workspacePath": state.WorkspaceDir}, "mode": mode, "model": a.selection(), "titleGenerationEnabled": false}, &snapRaw)
 	} else {
 		err = c.call(ctx, "session/resume", map[string]any{"sessionId": state.BackendSessionID}, &snapRaw)
 	}
@@ -423,7 +415,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 	var accepted struct {
 		Accepted bool `json:"accepted"`
 	}
-	if err = c.call(ctx, "session/send", map[string]any{"sessionId": session, "content": message, "inputId": input, "modelSelection": a.selection(decision.Provider)}, &accepted); err != nil {
+	if err = c.call(ctx, "session/send", map[string]any{"sessionId": session, "content": message, "inputId": input, "modelSelection": a.selection()}, &accepted); err != nil {
 		return result, next, err
 	}
 	if !accepted.Accepted {
@@ -435,8 +427,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 }
 
 // awaitTurn consumes events until the owned turn completes, fails, or the
-// caller cancels. A confirmed quota-exhaustion failure under start-first
-// triggers the single automatic continuation defined by the change.
+// caller cancels.
 func (r *activeRun) awaitTurn(ctx context.Context, a *Adapter) (domain.RunResult, error) {
 	var result domain.RunResult
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -491,26 +482,9 @@ func (r *activeRun) awaitTurn(ctx context.Context, a *Adapter) (domain.RunResult
 			}
 			input := r.input
 			turn := r.turn
-			continued := r.continued
 			r.stateMu.Unlock()
 			if e.Type == "turn.failed" && e.Payload.InputID == input {
-				if continued {
-					// The one Individual continuation failed: the run ends
-					// without a loop or switch back.
-					emitContinuationDiagnostic(r.sink, quotaExhaustionEvidence{
-						FromProvider: ProviderStart, ToProvider: ProviderIndividual,
-						Reason: "continuation_failed", AttemptID: r.id, InputID: input,
-					}, CodeRoutingContinuationFailed)
-					return result, fmt.Errorf("zcode continuation turn failed: %s", e.Payload.Error)
-				}
-				if a.planPolicy() != PlanPolicyStartFirst || !classifyQuotaExhaustion(e.Payload.Error) {
-					return result, fmt.Errorf("zcode turn failed: %s", e.Payload.Error)
-				}
-				if err := r.transitionToIndividual(ctx, a, e.Payload.Error); err != nil {
-					return result, err
-				}
-				// The continuation owns the run now; keep waiting.
-				continue
+				return result, fmt.Errorf("zcode turn failed: %s", e.Payload.Error)
 			}
 			if e.Type == "turn.started" && e.Payload.InputID == input {
 				r.stateMu.Lock()
@@ -542,141 +516,6 @@ func (r *activeRun) awaitTurn(ctx context.Context, a *Adapter) (domain.RunResult
 			}
 		}
 	}
-}
-
-// transitionToIndividual performs the single Start-to-Individual continuation:
-// retire old permissions, drain owned old-attempt work, refresh Individual
-// eligibility with fresh evidence, and send the short continuation input
-// under the original deadline.
-func (r *activeRun) transitionToIndividual(ctx context.Context, a *Adapter, failurePayload json.RawMessage) error {
-	r.stateMu.Lock()
-	if r.continued {
-		r.stateMu.Unlock()
-		return errors.New("zcode quota continuation already used for this run")
-	}
-	r.continued = true
-	session := r.session
-	provider := r.provider
-	r.stateMu.Unlock()
-	_ = provider
-	_ = failurePayload
-
-	// Old pending permissions and auth requests become inactive.
-	r.stateMu.Lock()
-	r.pending = map[string]approval{}
-	r.stateMu.Unlock()
-	r.publish()
-
-	// Refresh the background state first: tasks the failed attempt started
-	// during the turn must join the owned set before the drain.
-	refreshCtx, refreshCancel := context.WithTimeout(ctx, rpcTimeout)
-	refreshErr := refreshBackgroundTasks(refreshCtx, r.c.call, session, r.background)
-	refreshCancel()
-	if refreshErr != nil {
-		return fmt.Errorf("old-attempt background state could not be refreshed: %w", refreshErr)
-	}
-
-	// Drain positively owned descendant/background work from the failed
-	// attempt; uncertainty fails the run rather than overlapping attempts.
-	r.stateMu.Lock()
-	descendants := make([]string, 0, len(r.children))
-	for id := range r.children {
-		descendants = append(descendants, id)
-	}
-	r.stateMu.Unlock()
-	sort.Strings(descendants)
-	if err := runTerminalCleanup(r.c.call, cleanupSpec{session: session, descendants: descendants, background: r.background, stopRoot: false}); err != nil {
-		return fmt.Errorf("old-attempt cleanup could not be established: %w", err)
-	}
-	// Confirm the known tasks actually left the runtime before dispatching
-	// overlapping work under the other provider.
-	confirmCtx, confirmCancel := context.WithTimeout(ctx, rpcTimeout)
-	confirmErr := confirmBackgroundTasksStopped(confirmCtx, r.c.call, session, r.background)
-	confirmCancel()
-	if confirmErr != nil {
-		return fmt.Errorf("old-attempt background work could not be confirmed stopped: %w", confirmErr)
-	}
-
-	// Fresh eligibility for the same account, model, and reasoning; cached
-	// pre-failure evidence is bypassed.
-	engine := newRoutingEngine(&hostBridge{call: r.c.call})
-	engine.invalidate("individual-subscription")
-	engine.invalidate("registry-view")
-	engine.invalidate("start-balance")
-	decision, err := engine.decideIndividual(ctx, eligibility{
-		policy: a.planPolicy(), requestedModel: a.requestedModel(), requestedLevel: a.requestedReasoning(), provider: ProviderIndividual,
-	}, CodeRoutingStartExhausted)
-	if err != nil {
-		emitRoutingDiagnostic(r.sink, a.requestedModel(), a.planPolicy(), routingDecision{ReasonCode: routingErrorCode(err)}, r.id)
-		return fmt.Errorf("Individual eligibility is uncertain after quota exhaustion: %w", err)
-	}
-	if decision.Provider != ProviderIndividual {
-		return errors.New("Individual is not available for the same selection; no continuation was dispatched")
-	}
-	emitRoutingDiagnostic(r.sink, a.requestedModel(), a.planPolicy(), routingDecision{ReasonCode: CodeRoutingStartExhausted, Provider: ProviderIndividual, ObservedAt: decision.ObservedAt, hasObservedAt: decision.hasObservedAt}, r.id)
-
-	overlayCtx, overlayCancel := context.WithTimeout(ctx, rpcTimeout)
-	overlayErr := r.c.call(overlayCtx, "squad/applyAccountOverlay", overlayRequest{Provider: ProviderIndividual, Entitled: true, Current: true}, nil)
-	overlayCancel()
-	if overlayErr != nil {
-		return overlayErr
-	}
-
-	r.stateMu.Lock()
-	gate := continuationGate{
-		hasDeadline:  false,
-		individualOK: true,
-		cleanupOK:    true,
-	}
-	if ctxDeadline, ok := ctx.Deadline(); ok {
-		gate.deadline = ctxDeadline
-		gate.hasDeadline = true
-	}
-	if ctx.Err() != nil {
-		gate.cancelled = true
-	}
-	input := r.input
-	r.stateMu.Unlock()
-	if err := gate.admit(); err != nil {
-		if errors.Is(err, errContinuationBudgetShort) {
-			emitRoutingDiagnostic(r.sink, a.requestedModel(), a.planPolicy(), routingDecision{ReasonCode: CodeContinuationBudgetShort}, r.id)
-		}
-		return err
-	}
-	continuationInput := fmt.Sprintf("%s-continuation", input)
-	// Bind the new attempt's identity before dispatching: the runtime may ask
-	// for the provider credentials between the send write and its
-	// acknowledgement, and that request must validate against Individual. The
-	// one-transition flag and the no-retry rule already cover unknown send
-	// outcomes; a failed send fails the run, so the early binding never
-	// enables a second dispatch.
-	r.stateMu.Lock()
-	r.input = continuationInput
-	r.turn = ""
-	r.provider = ProviderIndividual
-	r.stateMu.Unlock()
-	sendCtx, sendCancel := context.WithTimeout(ctx, rpcTimeout)
-	err = runContinuation(sendCtx, r.c.call, session, continuationInput, a.selection(ProviderIndividual))
-	sendCancel()
-	if err != nil {
-		emitContinuationDiagnostic(r.sink, quotaExhaustionEvidence{
-			FromProvider: ProviderStart, ToProvider: ProviderIndividual,
-			Reason: "continuation_send_failed", AttemptID: r.id, InputID: continuationInput,
-		}, CodeRoutingContinuationFailed)
-		return err
-	}
-	emitContinuationDiagnostic(r.sink, quotaExhaustionEvidence{
-		FromProvider: ProviderStart, ToProvider: ProviderIndividual,
-		Reason: CodeRoutingStartExhausted, AttemptID: r.id, InputID: continuationInput,
-	}, CodeRoutingContinuationStarted)
-	return nil
-}
-
-func routingErrorCode(err error) string {
-	if routingErr, ok := err.(routingError); ok {
-		return routingErr.code
-	}
-	return CodeRoutingIndividualUnknown
 }
 
 // hostRequest is the dispatcher's inbound table. It runs on the dedicated

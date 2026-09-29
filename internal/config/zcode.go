@@ -7,18 +7,20 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
-// ValidateZCodeAgent rejects invalid ZCode plan-policy/provider combinations
-// during YAML load and workflow validation, before preflight or run
-// allocation. plan_policy is agent-only: the machine backend schema never
-// accepts it. Direct adapter construction enforces the same rule in Init.
+// ValidateZCodeAgent rejects removed or unsupported ZCode options during YAML
+// load and workflow validation, before preflight or run allocation. The
+// plan_policy option was removed with Start Plan routing and now fails with an
+// actionable error; the provider option accepts only the Individual Coding
+// Plan ID. Direct adapter construction enforces the same rules in Init.
 func ValidateZCodeAgent(spec domain.AgentSpec) error {
 	if spec.Backend != "zcode" {
 		return nil
 	}
-	policy := spec.StringOptions["plan_policy"]
-	provider := spec.StringOptions["provider"]
-	if err := zcode.ValidatePlanPolicy(policy, provider); err != nil {
-		return fmt.Errorf("agent %q: %w", spec.Name, err)
+	if _, set := spec.StringOptions["plan_policy"]; set {
+		return fmt.Errorf("agent %q: zcode plan_policy was removed; remove it from the agent options", spec.Name)
+	}
+	if provider := spec.StringOptions["provider"]; provider != "" && provider != zcode.ProviderIndividual {
+		return fmt.Errorf("agent %q: zcode supports only provider %s", spec.Name, zcode.ProviderIndividual)
 	}
 	return nil
 }

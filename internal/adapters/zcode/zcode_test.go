@@ -227,8 +227,8 @@ func TestEnvironment(t *testing.T) {
 
 // A separate Go test process exercises real pipes, bidirectional callbacks,
 // response/event interleaving, and shutdown without Node or a paid account.
-// It plays the guarded host: bootstrap, wire probes, evidence reads, overlay,
-// and the session operations.
+// It plays the guarded host: bootstrap, wire probes, the registry-view
+// selection read, overlay, and the session operations.
 func TestProtocolHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_ZCODE_HELPER") != "1" {
 		return
@@ -241,24 +241,7 @@ func TestProtocolHelper(t *testing.T) {
 	fresh := true
 	input := ""
 	mode := ""
-	continuations := 0
-	balanceReads := 0
-	subscriptionReads := 0
-	sessionReads := 0
-	cancelledTasks := []string{}
-	bootstrapGeneration := uint64(0)
-	bootstrapWorkspace := ""
 
-	balancePayload := map[string]any{"data": map[string]any{
-		"server_time": 1700000000,
-		"plans":       []any{map[string]any{"user_plan_id": "p1", "status": "active"}},
-		"balances": []any{map[string]any{
-			"bucket_id": "b1", "user_plan_id": "p1", "unit_type": "token",
-			"capabilities":    []string{"model:GLM-5.3-Flash"},
-			"available_units": 5, "remaining_units": 10, "reserved_units": 5,
-		}},
-	}}
-	subscriptionPayload := map[string]any{"data": []any{map[string]any{"productId": "zcode-coding-plan-month", "status": "VALID", "inCurrentPeriod": true}}}
 	registryPayload := map[string]any{"revision": "rev-1", "providers": []any{map[string]any{
 		"providerId": "account:zai-individual-coding-plan",
 		"models":     []any{map[string]any{"modelId": "GLM-5.3-Flash", "reasoningLevels": []string{"low", "high", "max"}}},
@@ -336,7 +319,7 @@ func TestProtocolHelper(t *testing.T) {
 				continue
 			}
 			if scenario == "auth-fail" {
-				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "auth", "message": "The ZCode Start Plan token is missing or expired; refresh the sign-in in ZCode."}})
+				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "auth", "message": "ZCode credential is unavailable; sign in again in ZCode."}})
 				continue
 			}
 			var p struct {
@@ -344,28 +327,10 @@ func TestProtocolHelper(t *testing.T) {
 				Workspace  string
 			}
 			_ = json.Unmarshal(m.Params, &p)
-			bootstrapGeneration = p.Generation
-			bootstrapWorkspace = p.Workspace
-			result = map[string]any{"ok": true, "revision": "rev-1", "hasStart": true, "hasIndividual": true, "identityMatch": true}
-		case "squad/readStartBalance":
-			balanceReads++
-			if scenario == "balance-unknown" {
-				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "network", "httpCode": 503, "message": "The account read endpoint returned an error status."}})
-				continue
-			}
-			respondEvidence(m, balancePayload)
-			continue
-		case "squad/readIndividualSubscription":
-			subscriptionReads++
-			if scenario == "individual-unknown" {
-				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "network", "message": "The account read failed at the transport level."}})
-				continue
-			}
-			respondEvidence(m, subscriptionPayload)
-			continue
+			result = map[string]any{"ok": true, "revision": "rev-1"}
 		case "squad/readRegistryView":
 			// The view request must carry the account evidence Go resolved:
-			// the Individual provider, entitled and current.
+			// the configured Individual provider, entitled and current.
 			var p struct {
 				Provider string
 				Entitled bool
@@ -375,7 +340,21 @@ func TestProtocolHelper(t *testing.T) {
 			if p.Provider != "account:zai-individual-coding-plan" || !p.Entitled || !p.Current {
 				os.Exit(18)
 			}
-			respondEvidence(m, registryPayload)
+			switch scenario {
+			case "model-unavailable":
+				respondEvidence(m, map[string]any{"revision": "rev-1", "providers": []any{map[string]any{
+					"providerId": "account:zai-individual-coding-plan", "models": []any{},
+				}}})
+			case "reasoning-unsupported":
+				respondEvidence(m, map[string]any{"revision": "rev-1", "providers": []any{map[string]any{
+					"providerId": "account:zai-individual-coding-plan",
+					"models":     []any{map[string]any{"modelId": "GLM-5.3-Flash", "reasoningLevels": []string{"high", "max"}}},
+				}}})
+			case "registry-unreadable":
+				emit(map[string]any{"id": m.ID, "result": map[string]any{"ok": false, "kind": "schema", "message": "The registry view could not be materialized; update the adapter."}})
+			default:
+				respondEvidence(m, registryPayload)
+			}
 			continue
 		case "squad/applyAccountOverlay":
 			var p struct {
@@ -410,32 +389,6 @@ func TestProtocolHelper(t *testing.T) {
 				// rejected by the adapter.
 				emit(map[string]any{"id": "pref1", "method": "session/requestRuntimePreferences", "params": map[string]any{"sessionId": "foreign-session"}})
 			}
-		case "session/read":
-			sessionReads++
-			var sessionState map[string]any
-			switch {
-			case scenario == "background-malformed":
-				// The strict refresh must reject a snapshot without the
-				// backgroundJobs surface.
-				sessionState = map[string]any{"sessionId": "session"}
-			case scenario == "background-foreign":
-				sessionState = map[string]any{"sessionId": "other-session", "backgroundJobs": []any{}}
-			case sessionReads == 1 && (scenario == "quota-continuation" || scenario == "background-still-running"):
-				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "running"}}}
-			case sessionReads >= 2 && scenario == "background-still-running":
-				// ZCode keeps finished tasks listed with an updated status; a
-				// task that is still running must block the continuation.
-				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "running"}}}
-			case sessionReads >= 2 && scenario == "background-unknown-status":
-				// A status outside the terminal set proves nothing: the
-				// continuation must not dispatch over it.
-				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "wat"}}}
-			default:
-				// A finished task stays listed with a terminal status: that
-				// must count as stopped.
-				sessionState = map[string]any{"sessionId": "session", "backgroundJobs": []any{map[string]any{"taskId": "bg-old", "kind": "bash", "status": "completed"}}}
-			}
-			result = map[string]any{"session": sessionState}
 		case "session/subagents":
 			items := []map[string]string{}
 			var params struct{ SessionID string }
@@ -465,36 +418,21 @@ func TestProtocolHelper(t *testing.T) {
 				emit(map[string]any{"method": "computer-use/operation-event", "params": map[string]any{}})
 			}
 			var p struct {
-				Content        string
-				InputID        string
-				ModelSelection struct {
+				Content  string
+				InputID  string
+				ModelSel struct {
 					ProviderID string
 					ModelID    string
 					Options    struct{ ReasoningLevel string }
-				}
+				} `json:"modelSelection"`
 			}
 			_ = json.Unmarshal(m.Params, &p)
-			previousInput := input
 			input = p.InputID
-			if continuations == 0 {
-				if strings.Contains(p.Content, "startup marker") != fresh || p.ModelSelection.ModelID != "GLM-5.3-Flash" || p.ModelSelection.Options.ReasoningLevel != "low" {
-					os.Exit(6)
-				}
-				if scenario == "quota-continuation" && p.ModelSelection.ProviderID != "account:zai-start-plan" {
-					os.Exit(11)
-				}
-			} else {
-				// The continuation: distinct input ID, fixed short message,
-				// same model and reasoning through Individual, no replay.
-				if p.InputID == previousInput {
-					os.Exit(12)
-				}
-				if !strings.HasSuffix(p.InputID, "-continuation") || strings.Contains(p.Content, "startup marker") || !strings.Contains(p.Content, "Please continue from where you stopped") || strings.Contains(p.Content, "ping") {
-					os.Exit(13)
-				}
-				if p.ModelSelection.ProviderID != "account:zai-individual-coding-plan" || p.ModelSelection.ModelID != "GLM-5.3-Flash" || p.ModelSelection.Options.ReasoningLevel != "low" {
-					os.Exit(14)
-				}
+			if strings.Contains(p.Content, "startup marker") != fresh || p.ModelSel.ModelID != "GLM-5.3-Flash" || p.ModelSel.Options.ReasoningLevel != "low" {
+				os.Exit(6)
+			}
+			if p.ModelSel.ProviderID != "account:zai-individual-coding-plan" {
+				os.Exit(11)
 			}
 			if scenario == "permission" && mode != "build" || scenario != "permission" && mode != "yolo" {
 				os.Exit(7)
@@ -504,31 +442,6 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			emit(map[string]any{"id": m.ID, "result": map[string]bool{"accepted": scenario != "rejected"}})
 			sent = true
-			if scenario == "auth-before-ack" && continuations == 1 {
-				// The runtime asks for the new provider's credentials between
-				// the send write and its acknowledgement; the binding must
-				// already name Individual.
-				emit(map[string]any{"id": "squad-auth-1", "method": "squad/authorizeProviderHeaders", "params": map[string]any{
-					"requestId": "req-1", "sessionId": "session", "providerId": p.ModelSelection.ProviderID,
-					"modelId": p.ModelSelection.ModelID, "workspace": bootstrapWorkspace, "generation": bootstrapGeneration,
-				}})
-			}
-			quotaScenario := scenario == "quota-continuation" || scenario == "background-still-running" || scenario == "background-malformed" || scenario == "background-foreign" || scenario == "background-unknown-status" || scenario == "auth-before-ack"
-			if quotaScenario && continuations == 0 {
-				continuations++
-				event("turn.started", "turn", map[string]string{"inputId": input})
-				event("turn.failed", "turn", map[string]any{"inputId": input, "error": map[string]any{"code": "start_plan_quota_exhausted", "type": "quota_exhaustion"}})
-				continue
-			}
-			if continuations > 0 {
-				if quotaScenario && (len(cancelledTasks) != 1 || cancelledTasks[0] != "bg-old") {
-					os.Exit(17)
-				}
-				continuations++
-				event("turn.started", "turn-2", map[string]string{"inputId": input})
-				event("turn.completed", "turn-2", map[string]any{"inputId": input, "response": "continued-pong", "resultType": "success"})
-				continue
-			}
 			if scenario == "success" {
 				event("turn.started", "previous", map[string]string{"inputId": "previous"})
 				event("turn.completed", "previous", map[string]string{"resultType": "success", "response": "stale"})
@@ -539,10 +452,6 @@ func TestProtocolHelper(t *testing.T) {
 				os.Exit(0)
 			case "hang":
 				continue
-			case "quota-busy":
-				event("turn.failed", "turn", map[string]any{"inputId": input, "error": map[string]any{"code": "3010", "type": "admission_busy"}})
-			case "quota-generic":
-				event("turn.failed", "turn", map[string]any{"inputId": input, "error": "quota over"})
 			case "failed":
 				event("turn.failed", "turn", map[string]any{"error": map[string]string{"message": "failed"}})
 			case "empty":
@@ -559,11 +468,6 @@ func TestProtocolHelper(t *testing.T) {
 			}
 			continue
 		case "session/cancelBackgroundTask":
-			var p struct {
-				TaskID string `json:"taskId"`
-			}
-			_ = json.Unmarshal(m.Params, &p)
-			cancelledTasks = append(cancelledTasks, p.TaskID)
 			result = map[string]any{"ok": true}
 		case "session/close":
 			var params struct{ SessionID string }

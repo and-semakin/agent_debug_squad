@@ -8,16 +8,36 @@ import (
 	"time"
 )
 
-// hostBridge performs the narrow, source-defined account reads through the
-// guarded JS host. The host owns native credentials and the HTTP calls; Go
-// owns policy, budgets, and normalization. Secrets never cross this bridge.
+// hostBridge performs the narrow, source-defined registry-view read through
+// the guarded JS host. The host owns native registry structures; Go owns the
+// selection policy. Secrets never cross this bridge.
 type hostBridge struct {
 	call func(ctx context.Context, method string, params any, result any) error
 }
 
-// readEnvelope is the bounded result contract of every host read: either a
-// normalized payload or a typed failure kind with a safe message. HTTP status
-// codes ride along only to steer the retry policy.
+// routingFailureKind is the typed failure the host reports for a guarded
+// read.
+type routingFailureKind string
+
+const (
+	readFailureAuth    routingFailureKind = "auth"
+	readFailureNetwork routingFailureKind = "network"
+	readFailureSchema  routingFailureKind = "schema"
+)
+
+// readOutcome is the bounded result of one host read: either a normalized
+// payload or a typed failure kind with a safe message.
+type readOutcome struct {
+	ok       bool
+	kind     routingFailureKind
+	payload  json.RawMessage
+	failure  string
+	httpCode int
+}
+
+// readEnvelope is the bounded result contract of the host read: either a
+// normalized payload or a typed failure. No credential or raw body ever
+// reaches Go; messages are fixed templates.
 type readEnvelope struct {
 	OK       bool            `json:"ok"`
 	Kind     string          `json:"kind,omitempty"`
@@ -67,35 +87,21 @@ func safeReadFailure(message string) string {
 	return message
 }
 
-func (h *hostBridge) readStartBalance(ctx context.Context) readOutcome {
-	return h.read(ctx, "squad/readStartBalance", map[string]any{})
-}
-
-func (h *hostBridge) readIndividualSubscription(ctx context.Context) readOutcome {
-	return h.read(ctx, "squad/readIndividualSubscription", map[string]any{})
-}
-
-// readRegistryView carries the account evidence Go resolved in the subscription
-// decision: the shim applies exactly this entitlement to its guarded registry
-// instance before projecting the selectable view. Without it the fail-closed
-// account source enumerates no entitled models.
+// readRegistryView carries the account evidence Go resolved: the shim applies
+// exactly this entitlement to its guarded registry instance before projecting
+// the selectable view. Without it the fail-closed account source enumerates no
+// entitled models.
 func (h *hostBridge) readRegistryView(ctx context.Context, evidence overlayRequest) readOutcome {
 	return h.read(ctx, "squad/readRegistryView", evidence)
 }
 
-// overlayRequest carries the evidence-derived account overlay to the host.
-// The host attaches the actual native builtin revision it read during
-// bootstrap; entitled/current come from the routing evidence, never from
-// unconditional hardcoded claims.
+// overlayRequest carries the account overlay to the host. The host attaches
+// the actual native builtin revision it read during bootstrap; the configured
+// Individual provider is marked entitled and current.
 type overlayRequest struct {
 	Provider string `json:"provider"`
 	Entitled bool   `json:"entitled"`
 	Current  bool   `json:"current"`
-}
-
-// pushOverlay forwards the evidence-based overlay through the host.
-func (h *hostBridge) pushOverlay(ctx context.Context, request overlayRequest) error {
-	return h.call(ctx, "squad/applyAccountOverlay", request, nil)
 }
 
 // authorizeHeaders validates a reverse auth request from the runtime. Go

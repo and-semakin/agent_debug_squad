@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
@@ -9,7 +10,7 @@ import (
 func TestValidateZCodeAgent(t *testing.T) {
 	valid := []domain.AgentSpec{
 		{Name: "a", Backend: "zcode", StringOptions: map[string]string{}},
-		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "start-first", "provider": "account:zai-start-plan"}},
+		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"provider": "account:zai-individual-coding-plan"}},
 		{Name: "a", Backend: "codex"},
 	}
 	for _, spec := range valid {
@@ -18,27 +19,40 @@ func TestValidateZCodeAgent(t *testing.T) {
 		}
 	}
 	invalid := []domain.AgentSpec{
-		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "start-first", "provider": "openai"}},
-		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "auto"}},
-		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "fixed", "provider": "account:zai-start-plan"}},
+		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "fixed"}},
+		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "start-first"}},
+		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"provider": "account:zai-start-plan"}},
+		{Name: "a", Backend: "zcode", StringOptions: map[string]string{"provider": "openai"}},
 	}
 	for _, spec := range invalid {
-		if err := ValidateZCodeAgent(spec); err == nil {
+		err := ValidateZCodeAgent(spec)
+		if err == nil {
 			t.Fatalf("accepted invalid %+v", spec)
 		}
 	}
 }
 
-func TestNormalizeAgentSpecRejectsForeignStartFirstProvider(t *testing.T) {
-	spec := domain.AgentSpec{Name: "a", Backend: "zcode", StartupPrompt: "s", Options: map[string]any{"plan_policy": "start-first", "provider": "openai"}}
-	if _, err := NormalizeAgentOptions(spec); err == nil {
-		t.Fatal("normalization accepted a foreign provider under start-first")
+func TestValidateZCodeAgentNamesRemovedOption(t *testing.T) {
+	spec := domain.AgentSpec{Name: "a", Backend: "zcode", StringOptions: map[string]string{"plan_policy": "start-first"}}
+	err := ValidateZCodeAgent(spec)
+	if err == nil || !strings.Contains(err.Error(), "plan_policy") {
+		t.Fatalf("rejection must name the removed option: %v", err)
 	}
-	accepted, err := NormalizeAgentOptions(domain.AgentSpec{Name: "a", Backend: "zcode", StartupPrompt: "s", Options: map[string]any{"plan_policy": "start-first"}})
+}
+
+func TestNormalizeAgentSpecRejectsPlanPolicy(t *testing.T) {
+	spec := domain.AgentSpec{Name: "a", Backend: "zcode", StartupPrompt: "s", Options: map[string]any{"plan_policy": "fixed"}}
+	if _, err := NormalizeAgentOptions(spec); err == nil {
+		t.Fatal("normalization accepted the removed plan_policy option")
+	}
+	if _, err := NormalizeAgentOptions(domain.AgentSpec{Name: "a", Backend: "zcode", StartupPrompt: "s", Options: map[string]any{"provider": "openai"}}); err == nil {
+		t.Fatal("normalization accepted a foreign provider")
+	}
+	accepted, err := NormalizeAgentOptions(domain.AgentSpec{Name: "a", Backend: "zcode", StartupPrompt: "s", Options: map[string]any{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accepted.StringOptions["plan_policy"] != "start-first" {
-		t.Fatal("plan policy lost")
+	if _, set := accepted.StringOptions["plan_policy"]; set {
+		t.Fatal("plan policy must not survive normalization")
 	}
 }
