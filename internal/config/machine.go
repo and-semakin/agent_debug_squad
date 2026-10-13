@@ -30,6 +30,7 @@ func MachineBackendsPath(homeDir string) string {
 // supportedMachineKeys lists the keys one backend section accepts, in a
 // stable order for error messages.
 var supportedMachineKeys = map[string][]string{
+	domain.MachineBackendDevin:    {"command", "inherit_env", "no_proxy", "proxy_url"},
 	domain.MachineBackendCodex:    {"command", "inherit_env", "no_proxy", "proxy_url"},
 	domain.MachineBackendCursor:   {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url"},
 	domain.MachineBackendKimi:     {"command", "inherit_env", "no_proxy", "proxy_url"},
@@ -92,6 +93,8 @@ func LoadMachineBackends(homeDir string) (domain.MachineBackends, error) {
 			continue
 		}
 		switch name {
+		case domain.MachineBackendDevin:
+			backends.Devin = settings
 		case domain.MachineBackendCodex:
 			backends.Codex = settings
 		case domain.MachineBackendCursor:
@@ -344,7 +347,7 @@ func MachineEnvEntries(backend string, settings *domain.MachineBackendSettings) 
 		entries = append(entries, key+"="+value)
 	}
 	switch backend {
-	case domain.MachineBackendCodex:
+	case domain.MachineBackendCodex, domain.MachineBackendDevin:
 		if settings.ProxyURL != "" {
 			add("HTTP_PROXY", settings.ProxyURL)
 			add("HTTPS_PROXY", settings.ProxyURL)
@@ -390,6 +393,7 @@ func MachineEnvEntries(backend string, settings *domain.MachineBackendSettings) 
 // machineStringDefaults lists the agent option keys a backend may default
 // from machine settings.
 var machineStringDefaults = map[string][]string{
+	domain.MachineBackendDevin:  {"command"},
 	domain.MachineBackendCodex:  {"command"},
 	domain.MachineBackendCursor: {"command"},
 	domain.MachineBackendKimi:   {"command"},

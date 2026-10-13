@@ -1,0 +1,21 @@
+session_name: local-devin
+workspace_dir: .
+state_dir_name: .agent-debug-squad
+host: 127.0.0.1
+port: 8083
+log_level: info
+agents:
+  - name: Devin
+    backend: devin
+    startup_prompt: |
+      Investigate the assigned task in this local workspace.
+      Report concrete evidence and keep responses concise.
+    options:
+      # Normal ACP permissions are required. Devin 3000.11.1 does not offer
+      # this mode and will fail before prompting. See docs/devin-backend.md.
+      # Use true only when intentionally allowing native Bypass permissions.
+      yolo: false
+      # Optional exact ACP model value; omit to retain the native default.
+      # model: swe-2-high
+      # Proxy configuration can instead live in machine backends.yaml.
+      inherit_env: [HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY]

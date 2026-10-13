@@ -6,6 +6,7 @@ import (
 
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/codex"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/cursor"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/devin"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/fake"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/kimi"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/zcode"
@@ -25,6 +26,8 @@ type AgentAdapter interface {
 
 func New(spec domain.AgentSpec) (AgentAdapter, error) {
 	switch spec.Backend {
+	case "devin":
+		return devin.New(spec), nil
 	case "zcode":
 		return zcode.New(spec), nil
 	case "fake":
@@ -46,3 +49,7 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 type PermissionReplier interface {
 	ReplyPermission(ctx context.Context, runID, requestID string, reply domain.PermissionReply) error
 }
+
+// PreparationCloser releases resources retained by Init before Send. The worker
+// calls it on every exit, including a failure to persist the allocated identity.
+type PreparationCloser interface{ ClosePreparation() error }

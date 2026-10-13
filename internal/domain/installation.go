@@ -45,6 +45,7 @@ const (
 // Official documentation links reported with installation and service
 // failures. OS-specific choices are delegated to these pages.
 const (
+	DocDevinCLI       = "https://docs.devin.ai/cli"
 	DocCodexCLI       = "https://learn.chatgpt.com/docs/codex/cli"
 	DocCursorCLI      = "https://cursor.com/docs/cli/installation"
 	DocKimiCLI        = "https://www.kimi.com/code/docs/en/"
