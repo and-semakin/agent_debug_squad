@@ -30,6 +30,7 @@ type MachineBackendSettings struct {
 // MachineBackends is the resolved content of the machine backend settings
 // file. Nil sections mean the backend has no machine settings.
 type MachineBackends struct {
+	Devin    *MachineBackendSettings
 	Codex    *MachineBackendSettings
 	Cursor   *MachineBackendSettings
 	Kimi     *MachineBackendSettings
@@ -40,6 +41,7 @@ type MachineBackends struct {
 
 // Backend names accepted as sections in the machine settings file.
 const (
+	MachineBackendDevin    = "devin"
 	MachineBackendCodex    = "codex"
 	MachineBackendCursor   = "cursor"
 	MachineBackendKimi     = "kimi"
@@ -51,6 +53,7 @@ const (
 // MachineBackendNames lists the accepted section names in a stable order.
 func MachineBackendNames() []string {
 	return []string{
+		MachineBackendDevin,
 		MachineBackendCodex,
 		MachineBackendCursor,
 		MachineBackendKimi,
@@ -64,6 +67,8 @@ func MachineBackendNames() []string {
 // backend has no machine settings or is not a machine-configurable backend.
 func (m MachineBackends) For(backend string) *MachineBackendSettings {
 	switch backend {
+	case MachineBackendDevin:
+		return m.Devin
 	case MachineBackendCodex:
 		return m.Codex
 	case MachineBackendCursor:

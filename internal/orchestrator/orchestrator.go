@@ -632,6 +632,10 @@ func (o *Orchestrator) runWorker(ctx context.Context, runtimeKey string, run dom
 		o.mu.Unlock()
 		o.releaseAgent(runtimeKey)
 		if onDone != nil {
+			if outcome.Status == "" {
+				outcome.Status = run.Status
+				outcome.Error = deref(run.Error)
+			}
 			outcome.RunID = run.RunID
 			onDone(outcome)
 		}
@@ -655,6 +659,12 @@ func (o *Orchestrator) runWorker(ctx context.Context, runtimeKey string, run dom
 	spec := rt.spec
 	initialized := rt.initialized
 	o.mu.Unlock()
+
+	// Init may retain a fresh native process until the identity is persisted.
+	// Always release that preparation, including when storage fails before Send.
+	if closer, ok := adapter.(adapters.PreparationCloser); ok {
+		defer closer.ClosePreparation()
+	}
 
 	// The first checked turn creates a deferred external session. Ordinary
 	// repeated turns keep their backend session ID and startup-prompt
@@ -692,9 +702,24 @@ func (o *Orchestrator) runWorker(ctx context.Context, runtimeKey string, run dom
 			current.initialized = true
 		}
 		o.mu.Unlock()
-		o.saveRuntimeState(rt, initState)
 	}
-	o.saveRuntimeState(rt, state)
+	if err := o.saveRuntimeState(rt, state); err != nil {
+		message := "save agent state before dispatch: " + err.Error()
+		state.Status = domain.AgentFailed
+		state.LastError = &message
+		o.mu.Lock()
+		if current := o.runtimes[runtimeKey]; current != nil {
+			current.state = state
+		}
+		o.mu.Unlock()
+		run.Status = domain.RunFailed
+		run.Progress.Phase = domain.RunPhaseFailed
+		run.Error = &message
+		completed := time.Now().UTC()
+		run.CompletedAt = &completed
+		_ = o.store.SaveRun(run)
+		return
+	}
 
 	sink := newRunSink(o.store, run, log.Default(), o.cfg.LogLevel)
 	o.mu.Lock()

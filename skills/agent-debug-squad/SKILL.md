@@ -97,6 +97,7 @@ Backends:
 - `cursor`: Cursor Agent CLI adapter with `command`, optional `model`, read-only `mode`, `sandbox`, `yolo`, `env`, and `inherit_env`.
 - `opencode`: HTTP adapter with `base_url`, optional `model`, `timeout_seconds`, and `yolo`.
 - `zcode`: private App Server adapter with `command` (Node), `runtime_path`, `provider`, `model`, `reasoning`, `yolo`, `env`, and `inherit_env`. Defaults to GLM-5.3-Flash/low; requires a compatible installed ZCode bundle and existing Z.AI Coding Plan login. See the repository README and `examples/zcode-squad.yaml` for compatibility.
+- `devin`: official local ACP CLI with `command`, exact advertised `model`, `yolo`, `env`, and `inherit_env`. See `docs/devin-backend.md` and `examples/devin-squad.yaml`. Tested 3000.11.1 lacks Normal ACP mode, so `yolo: false` fails before prompting; never silently change it to bypass or Code. Model-list variants are informational until their ACP selection is verified. Native hooks/MCP/plugin profiles are unsupported.
 - `kimi`: CLI adapter with `command` and optional model settings.
 - `fake`: deterministic in-process adapter for smoke tests.
 

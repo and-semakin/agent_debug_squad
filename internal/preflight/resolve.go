@@ -252,6 +252,8 @@ func officialLinksFor(backend string) []domain.InstallationLink {
 
 func officialLinkURL(backend string) string {
 	switch backend {
+	case "devin":
+		return domain.DocDevinCLI
 	case "codex":
 		return domain.DocCodexCLI
 	case "cursor":
@@ -271,6 +273,8 @@ func officialLinkURL(backend string) string {
 
 func productLabel(backend string) string {
 	switch backend {
+	case "devin":
+		return "Devin CLI installation"
 	case "codex":
 		return "Codex CLI installation"
 	case "cursor":

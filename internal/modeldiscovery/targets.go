@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/codex"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/devin"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/preflight"
@@ -15,7 +16,7 @@ import (
 	"strings"
 )
 
-var RealBackends = []string{"codex", "cursor", "kimi", "opencode", "zcode"}
+var RealBackends = []string{"codex", "cursor", "kimi", "opencode", "zcode", "devin"}
 
 type Options struct {
 	All                   bool
@@ -37,7 +38,7 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	selected := map[string]bool{}
 	for _, b := range o.Backends {
 		switch b {
-		case "codex", "cursor", "kimi", "opencode", "zcode", "fake":
+		case "codex", "cursor", "kimi", "opencode", "zcode", "devin", "fake":
 			selected[b] = true
 		default:
 			return nil, errors.New("invalid_arguments")
@@ -92,7 +93,7 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	out := []Target{}
 	for _, t := range targets {
 		switch t.Spec.Backend {
-		case "codex", "cursor", "kimi", "opencode", "zcode", "fake":
+		case "codex", "cursor", "kimi", "opencode", "zcode", "devin", "fake":
 		default:
 			return nil, errors.New("invalid_configuration")
 		}
@@ -110,6 +111,9 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 		env := preflight.MaterializeEnv(codex.BuildEnv(t.Spec, ambient), ambient)
 		if t.Spec.Backend == "kimi" && len(t.Spec.ListOptions["env"]) == 0 && len(t.Spec.ListOptions["inherit_env"]) == 0 {
 			env = ambient
+		}
+		if t.Spec.Backend == "devin" {
+			env = devin.BuildEnv(t.Spec, ambient)
 		}
 		envMap := map[string]string{}
 		for _, e := range env {

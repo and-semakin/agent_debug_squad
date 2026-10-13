@@ -1,0 +1,121 @@
+## Purpose
+
+Coordinate Cognition's official local Devin CLI through explicit ACP turns while preserving independent conversations, local workspace access and conservative lifecycle guarantees.
+
+## ADDED Requirements
+
+### Requirement: Local compatible Devin execution
+The system SHALL accept backend `devin` for the official local CLI on supported macOS/Linux hosts. It SHALL use Squad's absolute workspace as the child and session working directory and require a compatible ACP protocol with session loading before submitting work. It SHALL NOT select cloud relay, adopt a cloud API client, silently fall back to print mode, or claim local installation checking proves protocol compatibility. Unsupported required capabilities SHALL fail with safe official-product guidance. Leading executable slash commands SHALL be rejected as unsupported input rather than invoking cloud, account, configuration or autonomous-loop commands.
+
+#### Scenario: Official local session
+- **WHEN** a compatible Devin backend starts a checked turn
+- **THEN** its session uses the same local workspace and readable dependency artifact paths as Squad without creating a cloud workspace
+
+#### Scenario: Unofficial executable with the same name
+- **WHEN** an executable named devin exists but cannot establish the required ACP contract
+- **THEN** work fails before any prompt and no alternate API or executable is tried
+
+#### Scenario: Cloud command in task input
+- **WHEN** a submitted message starts with an executable `/handoff` or `/cloud` command
+- **THEN** the adapter rejects it without passing the command to Devin
+
+### Requirement: Persisted independent conversations
+Manual turns SHALL preserve a native session identity across operations and restarts. A newly allocated identity SHALL be durably saved before its first prompt; persistence failure SHALL prevent prompt submission. Workflow attempts and explicit workflow retries SHALL use fresh identities distinct from manual and other attempt conversations. Startup instructions SHALL be included only in an empty conversation. Historical load output SHALL NOT be presented as new response text. Missing, locked, wrong-workspace or unloadable saved sessions SHALL fail without replacement or recency-based adoption. Reset SHALL preserve old history and defer replacement until a checked turn.
+
+#### Scenario: Subsequent manual turn
+- **WHEN** a second turn loads the saved session and history is replayed
+- **THEN** the ID remains unchanged and only the new turn's assistant text appears in its result
+
+#### Scenario: Initial identity cannot be saved
+- **WHEN** native session creation succeeds but Squad cannot persist its identity
+- **THEN** no prompt is sent and the operation reports storage failure
+
+#### Scenario: Retry after interrupted workflow attempt
+- **WHEN** the caller explicitly confirms a permitted workflow retry
+- **THEN** the retry gets a fresh conversation and the interrupted attempt is never automatically replayed
+
+#### Scenario: First turn failed after submission
+- **WHEN** an existing conversation contains a submitted user turn but no successful LastRunID
+- **THEN** a later explicit manual turn does not duplicate startup instructions merely because LastRunID is empty
+
+#### Scenario: Reset is lazy
+- **WHEN** an idle Devin agent is reset
+- **THEN** its current identity is cleared, native history remains intact and no replacement conversation is created until checked work begins
+
+### Requirement: Owned turn completion is explicit
+Success SHALL require the matching prompt response indicating normal end of turn, new nonempty assistant text, and completed owned cleanup. The system SHALL stream bounded owned events and preserve partial artifacts on failure. Historical text, thoughts, tool output, unrelated sessions, process exit zero and inactivity SHALL NOT establish successful completion. Refusal, token/turn limits, cancellation, transport loss, malformed data, unsupported required interactions and storage errors SHALL remain failures with distinguishable safe diagnostics. Uncertain prompts SHALL never be automatically resent, including after an error marked retryable.
+
+#### Scenario: Process exits cleanly too soon
+- **WHEN** Devin exits zero after partial text without the matching prompt completion
+- **THEN** the run fails and retains the partial artifacts without releasing a successful dependency result
+
+#### Scenario: Completion with a limit
+- **WHEN** the prompt response reports a token limit despite useful output
+- **THEN** the run is failed with a limit diagnostic rather than completed
+
+#### Scenario: Retryable channel closure
+- **WHEN** a transport error marked retryable follows prompt submission
+- **THEN** the adapter reports uncertainty without resending the prompt or starting a replacement conversation
+
+### Requirement: Verified selection and permission controls
+The system SHALL forward explicit model selection without hidden fallback and verify its application to loaded as well as new sessions. Omission SHALL preserve the native default or saved selection. Effective YOLO SHALL request verified native bypass semantics when true and normal approval semantics when false, without overriding administrator restrictions. Missing or ambiguous required controls SHALL fail before prompting. The initial backend SHALL reject unsupported reasoning, speed, sandbox and permission-mode override options rather than silently ignoring them.
+
+Native permission requests SHALL be visible through the existing run-scoped permission interface with only supported offered decisions. The initial backend SHALL expose no persistent grant that mutates native configuration. Foreign, duplicate, inactive and stale replies SHALL be rejected. Questions or authentication interactions that Squad cannot represent SHALL fail explicitly without fabricated responses. YOLO SHALL NOT imply OS sandboxing or permission to override unexpected native approval requests.
+
+#### Scenario: Resumed session uses another model
+- **WHEN** explicit options.model differs from a loaded session's saved model
+- **THEN** the requested selection is applied and verified before prompting, or the operation fails without fallback
+
+#### Scenario: Manual approval
+- **WHEN** a normal-mode owned tool requires permission
+- **THEN** progress exposes waiting_for_permission and an offered once or reject reply is translated to the exact native option
+
+#### Scenario: Approval arrives after cancellation
+- **WHEN** the run is cancelled before a pending reply arrives
+- **THEN** the reply is rejected and cannot authorize another run or native session
+
+#### Scenario: Required mode cannot be established
+- **WHEN** the installed CLI does not offer an identifiable supported normal or bypass control requested by the configuration
+- **THEN** no prompt is submitted and the error explains the unsupported capability
+
+### Requirement: Bounded owned work and honest cleanup
+Cancellation, force reset, startup failure and normal turn teardown SHALL close and reap owned processes/readers within a five-second cleanup budget subject to the enclosing shutdown budget. Cancellation SHALL request native cancellation when possible before terminating the owned process group. Independent Devin processes and sessions SHALL remain untouched. Background work SHALL NOT intentionally survive its turn; any native feature that cannot be settled or disabled through a verified supported profile SHALL be unsupported. Cleanup failure or uncertainty SHALL prevent successful completion. The system SHALL NOT claim that stopping a local process reverses or proves cessation of arbitrary remote side effects.
+
+#### Scenario: Descriptor-holding child
+- **WHEN** an owned shell descendant holds output pipes after the main process exits
+- **THEN** cleanup terminates the owned group, closes and joins readers and finishes within its budget or reports cleanup failure
+
+#### Scenario: Unrelated interactive session
+- **WHEN** Squad cancels its Devin operation while a separate user Devin session is active
+- **THEN** only Squad's owned resources are stopped
+
+#### Scenario: Background completion is uncertain
+- **WHEN** a native prompt ends while owned background work cannot be settled or accounted for
+- **THEN** the run does not report success or promise all work has stopped
+
+### Requirement: Native account and diagnostic boundaries
+Squad SHALL NOT log in, install/update the CLI, rewrite native user/project configuration or auto-switch models to repair failures. It SHALL use only a verified launch profile compatible with those boundaries and fail safely for known unsafe startup mutation behavior. Authentication and entitlement SHALL remain separate from executable availability. Credentials, proxy secrets and raw authentication/configuration messages SHALL NOT reach logs, saved diagnostics or model output envelopes. Documentation SHALL distinguish local tools from remote inference, plan/quota consumption, configuration imports, unsupported sandbox guarantees and the tested release/profile.
+
+#### Scenario: Authentication is required
+- **WHEN** a compatible installed CLI reports an explicit authentication requirement
+- **THEN** the run fails with operator login guidance without opening a browser, starting authentication or persisting credential text
+
+#### Scenario: Startup would migrate native configuration
+- **WHEN** the selected launch profile is known to rewrite native configuration and no verified non-mutating launch is available
+- **THEN** the backend refuses that profile with migration guidance rather than modifying the files
+
+#### Scenario: Secret-bearing backend error
+- **WHEN** backend diagnostics include a configured credential or credentialed proxy value
+- **THEN** persisted diagnostics and public errors contain only safe classified information
+
+
+### Requirement: Empty native preparation is bounded
+When the native CLI does not retain an empty session after process exit, Init SHALL retain its creating process only until the first checked Send, cancellation, explicit worker cleanup or a 30-second preparation expiry. A pre-dispatch storage failure SHALL release the retained preparation. An expired or crash-lost identity SHALL NOT be silently recreated.
+
+#### Scenario: Empty process must survive the persistence gate
+- **WHEN** Squad persists the newly allocated ID successfully and starts the first Send
+- **THEN** Send uses the prepared native process, and all later completed-turn processes are closed
+
+#### Scenario: Preparation is abandoned
+- **WHEN** persistence fails, the operation is cancelled or preparation expires before Send
+- **THEN** the native process and private config are released without submitting a prompt

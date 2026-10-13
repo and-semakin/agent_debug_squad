@@ -123,7 +123,7 @@ func TestSelectorModesAndPrivateDeduplication(t *testing.T) {
 	for _, tc := range []struct {
 		o Options
 		n int
-	}{{Options{}, 5}, {Options{ConfigPath: cfg}, 2}, {Options{ConfigPath: cfg, All: true}, 6}, {Options{ConfigPath: cfg, Backends: []string{"fake"}}, 1}, {Options{ConfigPath: cfg, Backends: []string{"codex", "codex"}}, 2}} {
+	}{{Options{}, 6}, {Options{ConfigPath: cfg}, 2}, {Options{ConfigPath: cfg, All: true}, 7}, {Options{ConfigPath: cfg, Backends: []string{"fake"}}, 1}, {Options{ConfigPath: cfg, Backends: []string{"codex", "codex"}}, 2}} {
 		targets, e := Resolve(tc.o, domain.MachineBackends{}, nil)
 		if e != nil || len(targets) != tc.n {
 			t.Fatal(targets, e)

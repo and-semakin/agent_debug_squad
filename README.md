@@ -17,7 +17,7 @@ Coding-agent CLIs expose different flags, session formats, and streaming protoco
 - interrupt and reset one stuck agent without restarting the squad;
 - let an external facilitator coordinate review, critique, and implementation rounds through HTTP.
 
-Supported backends are Codex CLI, Cursor Agent CLI, OpenCode, Kimi CLI, ZCode App Server, and a deterministic fake backend for local smoke tests.
+Supported backends are Codex CLI, Cursor Agent CLI, OpenCode, Kimi CLI, ZCode App Server, official local Devin CLI, and a deterministic fake backend for local smoke tests.
 
 ## Quick Start
 
@@ -83,7 +83,7 @@ agent-debug-squad models --backend codex --backend cursor --json
 agent-debug-squad models --config squad.yaml --json
 ```
 
-Without selectors or a config, `models` queries the five real backends. With a config,
+Without selectors or a config, `models` queries the six real backends. With a config,
 no selector means every distinct effective agent context; `--all` also adds missing
 real backends. Repeated `--backend` filters select matching agents, falling back to
 machine settings when that backend is absent. Equivalent reviewers share a query.
@@ -144,6 +144,7 @@ and 10,000 rows; incomplete data is never labelled complete.
 | Cursor | `--list-models` text | Opaque exact ID; verified header/rows/footer; format drift is explicit |
 | Kimi | `provider list --json` | Configured alias; provider secrets and unknown fields are excluded |
 | OpenCode | Classic `/provider` and `/config/providers` | Provider/model; managed owned runtime or configured external endpoint |
+| Devin | `models list --format json` | Informational variant inventory; ACP selection mapping is not inferred |
 | ZCode | No verified read-only bootstrap | `unsupported`, `read_only_catalog_unavailable`; no session workaround |
 | fake | Fixed synthetic `fake` record | Explicit test fixture; arbitrary manually configured models still work |
 
@@ -240,6 +241,7 @@ The verdict must be one the task declares (`400` otherwise), and the request is 
 | `opencode` | Owned `opencode serve` (default), or explicit external HTTP server | OpenCode session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
 | `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `model`, `reasoning`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
+| `devin` | Owned local ACP process | Explicit native session ID | `command`, `model`, `yolo`, `env`, `inherit_env`; [compatibility limits](docs/devin-backend.md) |
 | `fake` | In process | Deterministic state | none |
 
 `defaults.yolo` is `true` when omitted. Codex maps YOLO to its approval/sandbox bypass flags, Cursor maps it to `--force`, and OpenCode automatically replies `once` to permission requests for the active run and its tracked descendant sessions. Reviewer roles should explicitly use `yolo: false`; Cursor reviewers should additionally use a read-only `mode` such as `ask` or `plan`.
@@ -252,11 +254,15 @@ Cursor model IDs depend on the account and current catalog. Verify them before u
 cursor-agent --list-models
 ```
 
+### Devin CLI
+
+See [Devin configuration and compatibility](docs/devin-backend.md) and [the example](examples/devin-squad.yaml). Real local turns, continuation, tools and cancellation were checked on 3000.11.1. This release has no Normal ACP mode: `yolo: false` currently fails before prompting rather than silently allowing workspace edits. Explicit `yolo: true` selects native Bypass. Configure proxies in the machine `devin` section or opt into environment inheritance. Hooks/MCP/plugins and unsupported model variants are rejected or reported as unsupported; no native configuration is rewritten.
+
 ### Backend Installation Preflight
 
 Before Squad admits work it verifies local backend prerequisites, so missing executables fail with one actionable report instead of failing mid-attempt after the workspace changed. The gate runs for manual turns (selected agent only), workflow submission (every agent referenced by the task graph, including downstream, loop and allowed-to-fail tasks), recovery and resume (agents that can still execute), retry acceptance (only the retry target), every dispatch batch, and the one-shot `run` command. It never installs or updates tools, probes CLI versions, reads credentials, tests authentication or model access, or creates backend sessions.
 
-Bare command names are resolved with the **effective child PATH**, not the server's PATH — an intentional fix over earlier behavior that looked the executable up in the server environment. Agents with no `env`/`inherit_env` options inherit the ambient environment; once environment options produce a nonempty child environment, PATH must be present in it (via `inherit_env: [PATH]` or an explicit entry) or an absolute `command` must be configured. PATH entries that are relative directories reject bare-name lookup (`invalid_search_path`); empty entries are ignored. Explicit paths never fall back to defaults or aliases, resolve without shell expansion, and relative paths resolve against the workspace. Symlinks are followed to regular executables with effective-user execute access, and known shebang interpreters are verified without executing wrapper contents.
+Bare command names are resolved with the **effective child PATH**, not the server's PATH — an intentional fix over earlier behavior that looked the executable up in the server environment. Devin always uses its documented constrained environment. Other CLI agents with no `env`/`inherit_env` options inherit the ambient environment; once environment options produce a nonempty child environment, PATH must be present in it (via `inherit_env: [PATH]` or an explicit entry) or an absolute `command` must be configured. PATH entries that are relative directories reject bare-name lookup (`invalid_search_path`); empty entries are ignored. Explicit paths never fall back to defaults or aliases, resolve without shell expansion, and relative paths resolve against the workspace. Symlinks are followed to regular executables with effective-user execute access, and known shebang interpreters are verified without executing wrapper contents.
 
 A failed admission returns `503` with a structured report before any run or execution is created:
 
@@ -388,7 +394,7 @@ judge:
 
 `judge.confidence_threshold` must be an unquoted, finite number greater than 0 and at most 1. An explicit workflow threshold still wins. The machine default applies to future classifications of saved executions whose workflow omitted the field, including after recovery; it does not rewrite completed verdicts or enter the workflow hash. Restart the server after changing this file.
 
-For Codex, Cursor, Kimi and ZCode, explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
+For Codex, Cursor, Kimi, ZCode and Devin, explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
 
 ### Managed and external OpenCode
 
