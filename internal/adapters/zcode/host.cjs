@@ -178,7 +178,7 @@ async function readRegistryView(pick, found, ensure, env, request) {
     // fail-closed account source lists no entitled models at all.
     const snapshot = pick(found.snapshotParser)({
       revision: 'squad-' + Date.now(),
-      basedOnZcodeBuiltinRevision: revision,
+      basedOnZCodeBuiltinRevision: revision,
       providers: {[request.provider]: {access: {type: 'zhipu-account', entitled: Boolean(request.entitled)}}},
       states: {[request.provider]: {availability: request.entitled ? 'available' : 'unavailable', entitled: Boolean(request.entitled), current: Boolean(request.current)}},
     });
@@ -317,7 +317,7 @@ async function main() {
     const internalId = `squad-overlay-${nextInternalId++}`;
     pendingOverlay.set(internalId, msg.id);
     send({id: internalId, method: 'provider/updateAccountConfig', params: {
-      revision: 'squad-' + Date.now(), basedOnZcodeBuiltinRevision: revision,
+      revision: 'squad-' + Date.now(), basedOnZCodeBuiltinRevision: revision,
       providers: {[provider]: {access: {type: 'zhipu-account', entitled}}},
       states: {[provider]: {availability: entitled ? 'available' : 'unavailable', entitled, current: entitled}}
     }});
@@ -383,7 +383,6 @@ async function main() {
       provider: request.provider,
       entitled: Boolean(request.entitled),
       current: Boolean(request.current),
-      basedOnZcodeBuiltinRevision: revision,
     });
     respondToSquad(msg.id, {result: envelope});
   };
