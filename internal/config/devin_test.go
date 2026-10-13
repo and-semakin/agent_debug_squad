@@ -9,7 +9,10 @@ import (
 )
 
 func TestDevinOptionsValidation(t *testing.T) {
-	for _, options := range []map[string]any{{"reasoning": "high"}, {"speed": "fast"}, {"sandbox": true}, {"model": 3}, {"model": []string{"x"}}, {"env": "X=y"}, {"yolo": "maybe"}, {"yolo": "false"}, {"env": []string{"DEVIN_REFUSAL_FALLBACK=true"}}} {
+	for _, options := range []map[string]any{{"reasoning": ""}, {"speed": "turbo"}, {"mode": "invalid"}, {"mode": "ask", "yolo": true}, {"mode": "bypass", "yolo": false}, {"sandbox": true}, {"model": 3}, {"model": []string{"x"}}, {"env": "X=y"}, {"yolo": "maybe"}, {"yolo": "false"}, {"env": []string{"DEVIN_REFUSAL_FALLBACK=true"}}} {
+		if _, ok := options["model"]; !ok {
+			options["model"] = "swe-2-high"
+		}
 		_, e := NormalizeAgentOptions(domain.AgentSpec{Name: "test", StartupPrompt: "test", Backend: "devin", Options: options})
 		if e == nil {
 			t.Fatal("accepted unsupported options", options)
@@ -45,7 +48,25 @@ func TestDevinExampleParses(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(cfg.Agents) != 1 || cfg.Agents[0].Backend != "devin" || cfg.Agents[0].Yolo == nil || *cfg.Agents[0].Yolo {
-		t.Fatal("example must explicitly avoid bypass")
+	if len(cfg.Agents) != 1 || cfg.Agents[0].Backend != "devin" || cfg.Agents[0].Yolo == nil || !*cfg.Agents[0].Yolo {
+		t.Fatal("example must explicitly select bypass")
+	}
+}
+
+func TestDevinRequiredModelAndControlCombinations(t *testing.T) {
+	for _, opts := range []map[string]any{nil, {"model": ""}, {"model": " "}} {
+		if _, err := NormalizeAgentOptions(domain.AgentSpec{Name: "test", StartupPrompt: "test", Backend: "devin", Options: opts}); err == nil {
+			t.Fatal("accepted missing model")
+		}
+	}
+	for _, opts := range []map[string]any{
+		{"model": "swe-2-high"},
+		{"model": "swe-2-high", "mode": "ask"},
+		{"model": "swe-2-high", "mode": "plan", "yolo": false},
+		{"model": "swe-2-high", "mode": "bypass", "yolo": true, "reasoning": "medium", "speed": "standard"},
+	} {
+		if _, err := NormalizeAgentOptions(domain.AgentSpec{Name: "test", StartupPrompt: "test", Backend: "devin", Options: opts}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

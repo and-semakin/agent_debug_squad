@@ -4,9 +4,21 @@
 
 ## Configuration
 
-The agent accepts `command`, `model`, `yolo`, `env`, and `inherit_env`. It rejects reasoning, speed, sandbox, arbitrary arguments and cloud/permission-mode overrides. `model` must exactly match an offered ACP model value; aliases and fuzzy matching are not applied. Omission preserves the native default/saved model. Selection is checked before every prompt, including resumed conversations.
+Every configured agent must provide a nonblank exact ACP `model` ID. The agent accepts `command`, `model`, `reasoning`, `speed`, `mode`, `yolo`, `env`, and `inherit_env`. It rejects sandbox, arbitrary arguments and cloud overrides. Model aliases and catalog variant suffixes are not rewritten. Selection is checked before every prompt, including resumed conversations.
 
-`yolo: true` selects ACP `bypass`; unexpected native approval requests still require an explicit decision. `yolo: false` requires native `normal` approval semantics and fails before prompting when unavailable. **The tested 3000.11.1 release offers Code (`accept-edits`), Ask, Plan and Bypass, but no Normal ACP mode. Consequently this release currently supports execution with `yolo: true` only.** Code automatically allows workspace edits and is deliberately not silently substituted for Normal. The example uses explicit `false` to make this limitation visible instead of silently opting into bypass. Neither setting certifies an OS sandbox.
+| Option | Default and behavior |
+| --- | --- |
+| `model` | Required exact advertised ACP model value; live-tested `swe-2-high` and `gpt-6-sol-medium` |
+| `reasoning` | Prefer `high` when offered; otherwise use the advertised current level. Without a reasoning selector, omission is allowed but explicit reasoning fails |
+| `speed` | `standard`; `fast` requires an advertised speed selector. Models without it accept only standard |
+| `mode` | `bypass`; supported names are `normal`, `accept-edits`, `ask`, `plan`, `smart`, `bypass`, subject to native availability |
+| `yolo` | Defaults to true under Squad defaults. Without mode, true selects bypass and false selects normal |
+| `command` | `devin`, resolved from the explicit child PATH |
+| `env`, `inherit_env` | Explicit environment values and inheritance, described below |
+
+An explicit `mode` wins over an implicit/inherited yolo default. If both are explicit, `yolo: true` requires bypass and `yolo: false` requires a non-bypass mode. Contradictory choices fail configuration. Existing squad-wide `defaults.yolo` remains effective when mode is absent. The tested CLI offers no Normal ACP mode, so `yolo: false` without mode fails before prompting. Use explicit `mode: accept-edits` for Code (automatic workspace edits), or ask/plan for those native behaviors. Neither modes nor yolo certify an OS sandbox. Unexpected native permission requests still require an explicit decision.
+
+Model selection runs first; each subsequent control uses refreshed model-specific choices. After applying reasoning, speed and mode, the adapter verifies all selected values together. Unsupported, ignored or reset controls prevent prompt submission. Missing reasoning/speed controls never cause suffix-derived model selection or silent Fast fallback.
 
 Machine-specific configuration belongs in `~/.agent-debug-squad/backends.yaml`:
 
@@ -48,7 +60,7 @@ Only offered `once` and `reject` decisions are supported through the existing pe
 agent-debug-squad models --backend devin --workspace . --json
 ```
 
-Discovery uses `models list --format json` without starting ACP or a conversation. It projects the observed `families[].variants[]` schema; unknown shapes are unsupported. Account catalog variants and ACP model options are different sets. Rows therefore report `selection.supported: false` with `requires_live_acp_model_option` and no fabricated YAML recipe. A manually configured exact ID still works when advertised and verified by the execution session (live-tested: `swe-2-high`). Thought-level/speed mappings are deferred. Hidden coverage, freshness, configuration and inference availability remain unknown unless independently established.
+Discovery uses `models list --format json` without starting ACP or a conversation. It projects the observed `families[].variants[]` schema; unknown shapes are unsupported. Account catalog variants and ACP model options are different sets. Rows therefore report `selection.supported: false` with `requires_live_acp_model_option` and no fabricated YAML recipe. A manually configured exact ID still works when advertised and verified by the execution session (live-tested: `swe-2-high`). Execution applies reasoning and speed through live ACP controls; catalog variant IDs still do not supply verified executable recipes. Hidden coverage, freshness, configuration and inference availability remain unknown unless independently established.
 
 ## Verification
 

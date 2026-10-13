@@ -27,7 +27,7 @@ func TestLiveLocalContinuity(t *testing.T) {
 			t.Error("native config changed")
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	s := domain.AgentSpec{Name: "probe", Backend: "devin", StringOptions: map[string]string{"model": "swe-2-high"}, ListOptions: map[string][]string{"inherit_env": {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}}}
 	a := New(s)
@@ -48,6 +48,8 @@ func TestLiveLocalContinuity(t *testing.T) {
 		t.Fatalf("unexpected first answer: %q", r.FinalMessage)
 	}
 	a.spec.StringOptions["model"] = "swe-2-high"
+	a.spec.StringOptions["reasoning"] = "medium"
+	a.spec.StringOptions["mode"] = "ask"
 	r, _, e = a.Send(ctx, st, domain.RunRequest{RunID: "live-2", Message: "Repeat exactly your previous answer. Do not use tools."}, nil)
 	if e != nil {
 		t.Fatal(e)
@@ -55,5 +57,12 @@ func TestLiveLocalContinuity(t *testing.T) {
 	if r.FinalMessage != "SQUAD_LIVE_OK" {
 		t.Fatalf("unexpected resumed answer: %q", r.FinalMessage)
 	}
-	t.Log("fresh and loaded turns succeeded with exact model selection")
+	a.spec.StringOptions["model"] = "gpt-6-sol-medium"
+	a.spec.StringOptions["reasoning"] = "high"
+	a.spec.StringOptions["speed"] = "fast"
+	r, _, e = a.Send(ctx, st, domain.RunRequest{RunID: "live-fast", Message: "Reply exactly SQUAD_LIVE_OK. Do not use tools."}, nil)
+	if e != nil || r.FinalMessage != "SQUAD_LIVE_OK" {
+		t.Fatalf("fast turn failed: %v", e)
+	}
+	t.Log("fresh/loaded turns verified model, reasoning, mode and fast speed")
 }

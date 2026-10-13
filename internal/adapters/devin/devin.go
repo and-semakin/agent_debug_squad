@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -331,23 +330,7 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 			return result, out, errors.New("devin: invalid loaded session")
 		}
 	}
-	if model := a.spec.StringOptions["model"]; model != "" {
-		if e = setOption(ctx, c, t.sessionID, s.Options, "model", model, t.handle); e != nil {
-			return result, out, e
-		}
-	}
-	mode := "bypass"
-	yolo := true
-	if raw, ok := a.spec.StringOptions["yolo"]; ok {
-		yolo, _ = strconv.ParseBool(raw)
-	}
-	if a.spec.Yolo != nil {
-		yolo = *a.spec.Yolo
-	}
-	if !yolo {
-		mode = "normal"
-	}
-	if e = setOption(ctx, c, t.sessionID, s.Options, "mode", mode, t.handle); e != nil {
+	if e = applyControls(ctx, c, t.sessionID, s.Options, a.spec, t.handle); e != nil {
 		return result, out, e
 	}
 	prompt := run.Message
@@ -395,51 +378,6 @@ func (a *Adapter) Send(ctx context.Context, state domain.AgentState, run domain.
 		return result, out, errors.New("devin: output persistence failed")
 	}
 	return result, out, nil
-}
-func setOption(ctx context.Context, c *client, sid string, options []configOption, category, value string, handler func(message) error) error {
-	id := ""
-	for _, o := range options {
-		if o.Category == category {
-			if id != "" {
-				return errors.New("devin: ambiguous session control")
-			}
-			id = o.ID
-		}
-	}
-	if id == "" {
-		return fmt.Errorf("devin: unsupported %s control", category)
-	}
-	// Only advertised values are executable. The account JSON catalog includes
-	// additional variants which this control does not accept.
-	if category == "mode" || category == "model" {
-		offered := false
-		for _, o := range options {
-			if o.ID == id {
-				for _, v := range o.Options {
-					if v.Value == value {
-						offered = true
-					}
-				}
-			}
-		}
-		if !offered {
-			return fmt.Errorf("devin: requested %s is not offered by this ACP session", category)
-		}
-	}
-	b, e := boundedCall(ctx, c, "session/set_config_option", map[string]string{"sessionId": sid, "configId": id, "value": value}, handler)
-	if e != nil {
-		return e
-	}
-	var got session
-	if json.Unmarshal(b, &got) != nil {
-		return errors.New("devin: invalid configuration response")
-	}
-	for _, o := range got.Options {
-		if o.ID == id && o.Current == value {
-			return nil
-		}
-	}
-	return errors.New("devin: requested configuration was not applied")
 }
 func (t *turn) handle(m message) error {
 	if m.Method == "session/request_permission" {

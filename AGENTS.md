@@ -12,6 +12,7 @@
 
 ## Development
 
+- Commit and push completed, verified changes directly to `main` (the primary branch in this repository). Do not create pull requests unless the user explicitly requests one. Fetch the latest `origin/main` before starting and before pushing; never force-push over concurrent work.
 - Run `gofmt` on changed Go files.
 - Before handing off a code change, run `go vet ./...` and `go test -race -count=1 ./...`.
 - Do not edit the embedded release version manually. Development builds use `dev`; release builds receive their version, commit, and build date from GoReleaser.

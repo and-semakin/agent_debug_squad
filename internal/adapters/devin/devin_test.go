@@ -30,8 +30,34 @@ func fixture(scenario string) {
 	sid := ""
 	mode := "accept-edits"
 	model := "swe-2-high"
+	reasoning, speed := "medium", "fast"
 	options := func() any {
-		return []any{map[string]any{"id": "mode", "category": "mode", "currentValue": mode, "options": []any{map[string]string{"value": "normal"}, map[string]string{"value": "bypass"}, map[string]string{"value": "accept-edits"}}}, map[string]any{"id": "model", "category": "model", "currentValue": model, "options": []any{map[string]string{"value": "swe-2-high"}}}}
+		option := func(id, category, current string, values ...string) map[string]any {
+			choices := []map[string]string{}
+			for _, v := range values {
+				choices = append(choices, map[string]string{"value": v})
+			}
+			return map[string]any{"id": id, "category": category, "currentValue": current, "options": choices}
+		}
+		modes := []string{"normal", "bypass", "accept-edits", "ask", "plan", "smart"}
+		if scenario == "no-normal" {
+			modes = modes[1:]
+		}
+		result := []any{option("mode", "mode", mode, modes...), option("model", "model", model, "swe-2-high", "controlled", "no-high")}
+		if model == "controlled" || model == "no-high" {
+			levels := []string{"medium", "high", "max"}
+			if model == "no-high" {
+				levels = []string{"medium", "max"}
+			}
+			result = append(result, option("thought_level", "thought_level", reasoning, levels...))
+			if scenario == "ambiguous-control" {
+				result = append(result, option("other-thinking", "thought_level", reasoning, levels...))
+			}
+			result = append(result, option("speed", "model_config", speed, "standard", "fast"))
+			// Another model_config category must not be mistaken for speed.
+			result = append(result, option("unrelated", "model_config", "off", "off", "on"))
+		}
+		return result
 	}
 	update := func(kind, text string) {
 		send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sid, "update": map[string]any{"sessionUpdate": kind, "content": map[string]string{"type": "text", "text": text}}}})
@@ -112,10 +138,20 @@ func fixture(scenario string) {
 			json.Unmarshal(p["configId"], &id)
 			json.Unmarshal(p["value"], &v)
 			if scenario != "ignored-control" {
-				if id == "mode" {
+				switch id {
+				case "mode":
 					mode = v
-				} else {
+					if scenario == "reset-control" {
+						reasoning = "medium"
+					}
+				case "model":
 					model = v
+					reasoning = "medium"
+					speed = "fast"
+				case "thought_level":
+					reasoning = v
+				case "speed":
+					speed = v
 				}
 			}
 			reply(map[string]any{"configOptions": options()})
@@ -185,7 +221,7 @@ func fixtureAdapter(t *testing.T, scenario string) (*Adapter, domain.AgentState)
 		t.Fatal(e)
 	}
 	dir := t.TempDir()
-	spec := domain.AgentSpec{Name: "devin", Backend: "devin", StartupPrompt: "STARTUP_SENTINEL", StringOptions: map[string]string{"command": exe}, ListOptions: map[string][]string{"env": {"HOME=" + t.TempDir(), "XDG_CONFIG_HOME=" + t.TempDir(), "GORACE=atexit_sleep_ms=0", "SQUAD_DEVIN_FIXTURE=" + scenario}}}
+	spec := domain.AgentSpec{Name: "devin", Backend: "devin", StartupPrompt: "STARTUP_SENTINEL", StringOptions: map[string]string{"command": exe, "model": "swe-2-high"}, ListOptions: map[string][]string{"env": {"HOME=" + t.TempDir(), "XDG_CONFIG_HOME=" + t.TempDir(), "GORACE=atexit_sleep_ms=0", "SQUAD_DEVIN_FIXTURE=" + scenario}}}
 	a := New(spec)
 	t.Cleanup(func() { a.ClosePreparation() })
 	return a, domain.AgentState{WorkspaceDir: dir}
@@ -384,17 +420,10 @@ func TestSlashCommandsNeverReachPrompt(t *testing.T) {
 }
 
 func TestUnavailableNormalModeFailsBeforePrompt(t *testing.T) {
-	a, s := fixtureAdapter(t, "ok")
+	a, s := fixtureAdapter(t, "no-normal")
 	no := false
 	a.spec.Yolo = &no
 	s = initFixture(t, a, s)
-	a.mu.Lock()
-	for i := range a.prepared.session.Options {
-		if a.prepared.session.Options[i].Category == "mode" {
-			a.prepared.session.Options[i].Options = nil
-		}
-	}
-	a.mu.Unlock()
 	_, _, e := a.Send(context.Background(), s, domain.RunRequest{Message: "never"}, nil)
 	if e == nil || len(calls(t, s.WorkspaceDir, "session/prompt")) != 0 {
 		t.Fatal("unavailable normal mode dispatched", e)

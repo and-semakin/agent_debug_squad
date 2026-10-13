@@ -11,6 +11,15 @@ func ValidateSpec(s domain.AgentSpec) error {
 	if s.Backend != "devin" {
 		return nil
 	}
+	if strings.TrimSpace(s.StringOptions["model"]) == "" {
+		return fmt.Errorf("devin: model is required")
+	}
+	if mode, raw := s.StringOptions["mode"], s.StringOptions["yolo"]; mode != "" && raw != "" {
+		yolo, err := strconv.ParseBool(raw)
+		if err == nil && yolo != (mode == "bypass") {
+			return fmt.Errorf("devin: mode conflicts with explicit yolo")
+		}
+	}
 	if raw, present := s.Options["yolo"]; present {
 		if _, ok := raw.(bool); !ok {
 			return fmt.Errorf("devin: yolo must be an unquoted boolean")
@@ -18,9 +27,19 @@ func ValidateSpec(s domain.AgentSpec) error {
 	}
 	for k, v := range s.StringOptions {
 		switch k {
-		case "command", "model":
+		case "command", "model", "reasoning":
 			if strings.TrimSpace(v) == "" {
 				return fmt.Errorf("devin: blank %s option", k)
+			}
+		case "speed":
+			if v != "standard" && v != "fast" {
+				return fmt.Errorf("devin: speed must be standard or fast")
+			}
+		case "mode":
+			switch v {
+			case "normal", "accept-edits", "ask", "plan", "smart", "bypass":
+			default:
+				return fmt.Errorf("devin: unsupported mode")
 			}
 		case "yolo":
 			if _, e := strconv.ParseBool(v); e != nil {
