@@ -184,14 +184,16 @@ func TestPausedClosedPassRecoversAndAdvancesOnce(t *testing.T) {
 		t.Fatal("paused close advanced")
 	}
 	restarted := restartJudged(t, fx2)
-	if e := restarted.m.Start(context.Background()); e != nil {
+	// This test drives scheduling with pumpUntil. Recover the persisted state
+	// without also starting a competing background reconciliation loop: its
+	// snapshot replacement can correctly invalidate Resume's preflight.
+	recovered, e := restarted.st.LoadWorkflowSnapshot("wf_000001")
+	if e != nil {
 		t.Fatal(e)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-		_ = restarted.m.Stop(ctx)
-	}()
+	if e := restarted.m.recoverExecution(&recovered); e != nil {
+		t.Fatal(e)
+	}
 	if _, e := restarted.m.Resume(context.Background(), "wf_000001"); e != nil {
 		t.Fatal(e)
 	}
