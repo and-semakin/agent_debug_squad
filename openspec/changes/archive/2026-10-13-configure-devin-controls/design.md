@@ -31,3 +31,7 @@ Update configured Devin agents to include an exact ACP model ID. Publish v0.21.0
 ## Acceptance evidence
 
 On 2026-10-13 the opt-in live test passed (19.18 seconds): new SWE-2 turn, resumed SWE-2 with medium reasoning and Ask, then resumed GPT-6 Sol with high reasoning and Fast. Final-control verification ran before each prompt. Native user configuration remained byte-identical. Offline control fixtures cover new and loaded defaults, optional selector absence, unsupported values, ambiguity, ignored selection and a later mode setter resetting reasoning. No prompt is sent in these failure cases.
+
+Release validation: formatting, go vet ./..., go test -race -count=1 ./..., go build ./..., strict change and main-spec validation passed. Main CI run 38425888304 succeeded on 4c712b85e47a7e6150acf40035f31ea743dcd724. Annotated v0.21.0 was published by Release run 38426149627; all four darwin/linux amd64/arm64 archives matched checksums.txt. Downloaded native binary reports 0.21.0 and the tagged commit and was installed locally with a backup.
+
+Machine setup was completed after publication: existing Squad machine config and native Devin config were backed up with restrictive permissions; only proxy settings changed. With all ambient HTTP/HTTPS/ALL/NO_PROXY variables removed (both cases), the released CLI returned 835 catalog variants and the three-turn live model/reasoning/mode/Fast test passed again (18.76 seconds). Other native config fields were verified unchanged. Machine addresses, credentials and private transcripts are not included here.
