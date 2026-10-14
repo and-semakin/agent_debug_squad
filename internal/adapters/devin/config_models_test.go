@@ -74,7 +74,7 @@ func TestUnsafeProfileRejected(t *testing.T) {
 	for _, path := range []string{".devin/hooks.v1.json", ".devin/mcp_config.json", ".claude/settings.json", ".devin/config.json"} {
 		workspace := t.TempDir()
 		os.MkdirAll(filepath.Dir(filepath.Join(workspace, path)), 0700)
-		body := "{}"
+		body := `{"hooks":{"SessionStart":[{}]},"mcpServers":{"test":{"command":"test"}}}`
 		if path == ".devin/config.json" {
 			body = `{"auto_update":true}`
 		}
