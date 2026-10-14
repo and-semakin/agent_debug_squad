@@ -161,7 +161,7 @@ Devin profile preparation SHALL allow known configuration files containing only 
 - **THEN** its existence does not block preparation and the file remains unchanged
 
 #### Scenario: Imported extension is active
-- **WHEN** an enabled import contains an active MCP server or unsupported Claude hook/plugin
+- **WHEN** an enabled import contains an active MCP server or unsupported Claude hook
 - **THEN** preparation fails with the file path and relevant schema key, without emitting commands, credentials or custom names
 
 #### Scenario: Disabled MCP server
@@ -171,6 +171,10 @@ Devin profile preparation SHALL allow known configuration files containing only 
 #### Scenario: Malformed source
 - **WHEN** a relevant external file contains invalid JSONC or is not a readable bounded regular file
 - **THEN** preparation fails with its path and a classified error without raw content
+
+#### Scenario: Claude plugin metadata does not establish imported extensions
+- **WHEN** user or project Claude settings contain enabledPlugins entries with imports enabled
+- **THEN** those entries alone do not block preparation, import policy and source files remain unchanged, and coexisting active hooks or MCP are still rejected
 
 ### Requirement: Import-aware extension inspection
 External extension checks SHALL respect effective read_config_from switches, defaulting to enabled and applying ancestor project and local overrides after user settings. Disabled sources SHALL not block preparation. Squad SHALL preserve native import policy and SHALL not disable imports automatically to make a run pass.

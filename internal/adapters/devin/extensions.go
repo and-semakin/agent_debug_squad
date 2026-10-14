@@ -47,13 +47,10 @@ func nonempty(v any) bool {
 func checkFields(path string, cfg map[string]any, keys ...string) error {
 	for _, key := range keys {
 		v := cfg[key]
-		if key == "hooks" || key == "enabledPlugins" {
+		if key == "hooks" {
 			if entries, ok := v.(map[string]any); ok {
 				active := false
 				for _, entry := range entries {
-					if key == "enabledPlugins" && entry == false {
-						continue
-					}
 					if nonempty(entry) {
 						active = true
 						break
@@ -190,7 +187,9 @@ func checkExtensions(home, base, workspace string, cfg map[string]any) error {
 			return err
 		}
 		if source.tool == "claude" {
-			if err := checkFields(source.path, doc, "hooks", "enabledPlugins"); err != nil {
+			// Claude enabledPlugins is not evidence of a Devin-loaded plugin.
+			// Keep native import policy intact; inspect actual imported hooks/MCP.
+			if err := checkFields(source.path, doc, "hooks"); err != nil {
 				return err
 			}
 			// Claude's global state can also hold MCP entries for this workspace.

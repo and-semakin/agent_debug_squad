@@ -1,6 +1,7 @@
 package devin
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ func TestExtensionInspection(t *testing.T) {
 		{"claude metadata", ".claude.json", `{"numStartups":42,"projects":{"/other":{"mcpServers":{"unused":{"command":"test"}}}}}`, ""},
 		{"claude settings", ".claude/settings.json", `{"permissions":{"deny":["Bash(sudo *)"]},"hooks":{"SessionStart":[]},"enabledPlugins":{"plugin":false}}`, ""},
 		{"claude hook", ".claude/settings.json", `{"hooks":{"SessionStart":[{"command":"SECRET"}]}}`, "hooks"},
-		{"claude plugin", ".claude/settings.json", `{"enabledPlugins":{"SECRET":true}}`, "enabledPlugins"},
+		{"claude plugin", ".claude/settings.json", `{"enabledPlugins":{"SECRET":true}}`, ""},
 		{"claude server", ".claude.json", `{"mcpServers":{"SECRET":{"command":"SECRET"}}}`, "mcpServers"},
 		{"disabled server", ".claude.json", `{"mcpServers":{"SECRET":{"disabled":true,"command":"SECRET"}}}`, ""},
 		{"opencode plugin only", ".config/opencode/opencode.json", `{"plugin":["example-plugin"],"model":"example"}`, ""},
@@ -83,7 +84,7 @@ func TestExtensionImportPrecedence(t *testing.T) {
 			putConfig(t, filepath.Join(home, ".config/devin/config.json"), tc.user)
 			putConfig(t, filepath.Join(root, ".devin/config.json"), tc.project)
 			putConfig(t, filepath.Join(workspace, ".devin/config.local.json"), tc.local)
-			putConfig(t, filepath.Join(home, ".claude/settings.json"), `{"enabledPlugins":{"example":true}}`)
+			putConfig(t, filepath.Join(home, ".claude/settings.json"), `{"hooks":{"SessionStart":[{"command":"example"}]}}`)
 			_, cleanup, err := profile([]string{"HOME=" + home}, workspace)
 			defer cleanup()
 			if (err != nil) != tc.blocked {
@@ -144,6 +145,79 @@ func TestStandaloneNativeHooks(t *testing.T) {
 		}
 		if err != nil && (!strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "SECRET")) {
 			t.Fatal("unsafe error")
+		}
+	}
+}
+
+func TestClaudePluginsPreserveImportsAndExtensionGuards(t *testing.T) {
+	for _, location := range []string{".claude.json", ".claude/settings.json", ".claude/settings.local.json", "project/.claude/settings.json", "project/.claude/settings.local.json"} {
+		for _, blocker := range []string{"", "hooks", "mcpServers", "requiredPlugins", "optionalPlugins", "plugins"} {
+			t.Run(location+"/"+blocker, func(t *testing.T) {
+				home := t.TempDir()
+				workspace := t.TempDir()
+				path := filepath.Join(home, location)
+				if strings.HasPrefix(location, "project/") {
+					path = filepath.Join(workspace, strings.TrimPrefix(location, "project/"))
+				}
+				body := `{"enabledPlugins":{"gopls-lsp@claude-plugins-official":true}}`
+				var settings map[string]any
+				json.Unmarshal([]byte(body), &settings)
+				native := `{"read_config_from":{"claude":true},"permissions":{"deny":["Exec(sudo)"]}}`
+				var cfg map[string]any
+				json.Unmarshal([]byte(native), &cfg)
+				switch blocker {
+				case "hooks":
+					settings[blocker] = map[string]any{"SessionStart": []any{map[string]any{"command": "SECRET"}}}
+				case "mcpServers":
+					settings[blocker] = map[string]any{"test": map[string]any{"command": "SECRET"}}
+				case "requiredPlugins", "optionalPlugins":
+					cfg[blocker] = []string{"SECRET"}
+				case "plugins":
+					putConfig(t, filepath.Join(home, ".config/devin/plugins/test/plugin.json"), `{}`)
+				}
+				data, err := json.Marshal(settings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				putConfig(t, path, string(data))
+				configData, err := json.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				nativePath := filepath.Join(home, ".config/devin/config.json")
+				putConfig(t, nativePath, string(configData))
+				skillPath := filepath.Join(workspace, ".claude/skills/control/SKILL.md")
+				putConfig(t, skillPath, "---\nname: control\ndescription: Control skill\n---\nControl.\n")
+				profilePath, cleanup, err := profile([]string{"HOME=" + home}, workspace)
+				defer cleanup()
+				if blocker != "" {
+					if err == nil || !strings.Contains(err.Error(), `key "`+blocker+`"`) || strings.Contains(err.Error(), "SECRET") {
+						t.Fatalf("guard lost: %v", err)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					b, e := os.ReadFile(profilePath)
+					if e != nil {
+						t.Fatal(e)
+					}
+					var actual map[string]any
+					if e = json.Unmarshal(b, &actual); e != nil {
+						t.Fatal(e)
+					}
+					imports, ok := actual["read_config_from"].(map[string]any)
+					if !ok || imports["claude"] != true {
+						t.Fatal("Claude import policy changed")
+					}
+				}
+				for p, want := range map[string]string{path: string(data), nativePath: string(configData), skillPath: "---\nname: control\ndescription: Control skill\n---\nControl.\n"} {
+					got, e := os.ReadFile(p)
+					if e != nil || string(got) != want {
+						t.Fatalf("source changed: %s", p)
+					}
+				}
+			})
 		}
 	}
 }
