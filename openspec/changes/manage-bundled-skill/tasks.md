@@ -18,7 +18,7 @@
 - [x] 3.2 Implement required private archive backups and conflict policy; verify modified managed files, dev/downgrade replacement, missing receipt repair, backup permission/disk failures and unowned file/directory collisions never lose data.
 - [x] 3.3 Implement canonical/no-follow path handling and overlap validation; verify destination/descendant symlinks, stable versus changed ancestor links, hard links, special files, traversing inventories, writable parents and management-root overlap.
 - [x] 3.4 Implement registry locking and same-filesystem staging outside discovery roots; verify concurrent process contention, lock release after death, safe stage cleanup, detected external edits and no live-tree changes on staging failure.
-- [ ] 3.5 Add CGO-free macOS/Linux atomic exchange and first-install no-replace helpers; verify native filesystem behavior on both OS families and safe failure when atomic exchange is unsupported, with no in-place fallback.
+- [x] 3.5 Add CGO-free macOS/Linux atomic exchange and first-install no-replace helpers; verify native filesystem behavior on both OS families and safe failure when atomic exchange is unsupported, with no in-place fallback.
 - [x] 3.6 Implement durable intent journals and registry/tree reconciliation; verify injected crashes before publish, after publish, before/after registry commit and before cleanup, including interrupted initial adoption and externally edited recovery conflicts.
 - [x] 3.7 Implement per-destination partial success and cancellation boundaries; verify one unwritable target does not roll back or suppress another success, cancellation starts no further target, and post-publication cancellation remains recoverable.
 
@@ -48,4 +48,4 @@
 
 - [x] 7.1 Run gofmt on every changed Go file and verify no formatting diff remains.
 - [x] 7.2 Run go vet ./... and go test -race -count=1 ./...; record passing results and resolve failures before handoff.
-- [ ] 7.3 Run openspec validate manage-bundled-skill --strict and map every requirement/scenario to implementation evidence, including native platform checks; verify artifacts and task checkboxes reflect actual completed work before any archive action.
+- [x] 7.3 Run openspec validate manage-bundled-skill --strict and map every requirement/scenario to implementation evidence, including native platform checks; verify artifacts and task checkboxes reflect actual completed work before any archive action.
