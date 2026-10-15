@@ -10,9 +10,9 @@ import (
 	"github.com/tailscale/hujson"
 )
 
-// profile is a private semantic copy; native user/project files are never
-// rewritten. Controls below restrict lifecycle, not authentication or proxy policy.
-func profile(env []string, workspace string) (string, func(), error) {
+// profile creates a private semantic user-config copy. Squad does not rewrite
+// source files; native Devin loading/migration may have its own side effects.
+func profile(env []string, _ string) (string, func(), error) {
 	noop := func() {}
 	home := envValue(env, "HOME")
 	base := envValue(env, "XDG_CONFIG_HOME")
@@ -39,14 +39,6 @@ func profile(env []string, workspace string) (string, func(), error) {
 		if e != nil || json.Unmarshal(data, &cfg) != nil || cfg == nil {
 			return "", noop, errors.New("devin: invalid native configuration")
 		}
-	}
-	// Old embedded MCP configuration triggers native on-start migration. Reject
-	// rather than changing policy or letting the CLI write sibling files.
-	if _, ok := cfg["mcpServers"]; ok {
-		return "", noop, configProblem(source, "mcpServers", "migrate legacy MCP configuration separately")
-	}
-	if e := checkExtensions(home, base, workspace, cfg); e != nil {
-		return "", noop, e
 	}
 	cfg["auto_update"] = false
 	cfg["subagents_enabled"] = false

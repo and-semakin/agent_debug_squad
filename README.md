@@ -258,7 +258,7 @@ cursor-agent --list-models
 
 ### Devin CLI
 
-See [Devin configuration and compatibility](docs/devin-backend.md) and [the example](examples/devin-squad.yaml). `model` is required. Optional `reasoning` prefers high when offered, `speed` defaults to standard, and `mode` defaults to bypass (`yolo: true`). Explicit mode overrides inherited yolo; conflicting explicit mode/yolo fails. The tested CLI has no Normal ACP mode, so `yolo: false` without mode fails before prompting. Configure proxy_url/no_proxy or explicit environment inheritance in the machine `devin` section. Real local turns and continuation were checked on 3000.11.1; hooks/MCP/plugins remain unsupported.
+See [Devin configuration and compatibility](docs/devin-backend.md) and [the example](examples/devin-squad.yaml). `model` is required. Optional `reasoning` prefers high when offered, `speed` defaults to standard, and `mode` defaults to bypass (`yolo: true`). Explicit mode overrides inherited yolo; conflicting explicit mode/yolo fails. The tested CLI has no Normal ACP mode, so `yolo: false` without mode fails before prompting. Configure proxy_url/no_proxy or explicit environment inheritance in the machine `devin` section. Real local turns and continuation were checked on 3000.11.1. Native hooks/MCP/plugins and configuration compatibility are delegated to Devin; Squad does not preflight them.
 
 ### Backend Installation Preflight
 

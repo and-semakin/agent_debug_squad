@@ -113,7 +113,7 @@ Native permission requests SHALL be visible through the existing run-scoped perm
 - **THEN** final verification rejects the turn without sending its prompt
 
 ### Requirement: Bounded owned work and honest cleanup
-Cancellation, force reset, startup failure and normal turn teardown SHALL close and reap owned processes/readers within a five-second cleanup budget subject to the enclosing shutdown budget. Cancellation SHALL request native cancellation when possible before terminating the owned process group. Independent Devin processes and sessions SHALL remain untouched. Background work SHALL NOT intentionally survive its turn; any native feature that cannot be settled or disabled through a verified supported profile SHALL be unsupported. Cleanup failure or uncertainty SHALL prevent successful completion. The system SHALL NOT claim that stopping a local process reverses or proves cessation of arbitrary remote side effects.
+Cancellation, force reset, startup failure and normal turn teardown SHALL close and reap owned processes/readers within a five-second cleanup budget subject to the enclosing shutdown budget. Cancellation SHALL request native cancellation when possible before terminating the owned process group. Independent Devin processes and sessions SHALL remain untouched. Squad SHALL terminate its owned process group at teardown; native extensions SHALL NOT be rejected merely because their external effects cannot be isolated or reversed. Cleanup failure or uncertainty SHALL prevent successful completion. The system SHALL NOT claim that stopping a local process reverses or proves cessation of arbitrary remote side effects.
 
 #### Scenario: Descriptor-holding child
 - **WHEN** an owned shell descendant holds output pipes after the main process exits
@@ -128,7 +128,7 @@ Cancellation, force reset, startup failure and normal turn teardown SHALL close 
 - **THEN** the run does not report success or promise all work has stopped
 
 ### Requirement: Native account and diagnostic boundaries
-Squad SHALL NOT log in, install/update the CLI, rewrite native user/project configuration or auto-switch models to repair failures. It SHALL use only a verified launch profile compatible with those boundaries and fail safely for known unsafe startup mutation behavior. Authentication and entitlement SHALL remain separate from executable availability. Credentials, proxy secrets and raw authentication/configuration messages SHALL NOT reach logs, saved diagnostics or model output envelopes. Documentation SHALL distinguish local tools from remote inference, plan/quota consumption, configuration imports, unsupported sandbox guarantees and the tested release/profile.
+Squad SHALL NOT log in, install/update the CLI, rewrite native user/project configuration or auto-switch models to repair failures. It SHALL delegate native configuration loading, extension compatibility and migrations to Devin without extension-specific preflight refusals. Squad itself SHALL NOT rewrite real native settings; this does not prohibit native CLI side effects. Authentication and entitlement SHALL remain separate from executable availability. Credentials, proxy secrets and raw authentication/configuration messages SHALL NOT reach logs, saved diagnostics or model output envelopes. Documentation SHALL distinguish local tools from remote inference, plan/quota consumption, configuration imports, unsupported sandbox guarantees and the tested release/profile.
 
 #### Scenario: Authentication is required
 - **WHEN** a compatible installed CLI reports an explicit authentication requirement
@@ -136,7 +136,7 @@ Squad SHALL NOT log in, install/update the CLI, rewrite native user/project conf
 
 #### Scenario: Startup would migrate native configuration
 - **WHEN** the selected launch profile is known to rewrite native configuration and no verified non-mutating launch is available
-- **THEN** the backend refuses that profile with migration guidance rather than modifying the files
+- **THEN** Squad does not reject it solely for native migration behavior and delegates loading to Devin without itself editing the source files
 
 #### Scenario: Secret-bearing backend error
 - **WHEN** backend diagnostics include a configured credential or credentialed proxy value
@@ -153,36 +153,17 @@ When the native CLI does not retain an empty session after process exit, Init SH
 - **WHEN** persistence fails, the operation is cancelled or preparation expires before Send
 - **THEN** the native process and private config are released without submitting a prompt
 
-### Requirement: Content-aware extension inspection
-Devin profile preparation SHALL allow known configuration files containing only unrelated settings, metadata or empty extension collections. It SHALL reject active unsupported extensions with the source path and schema key, without exposing configuration values. Malformed or unreadable relevant sources SHALL fail with a source-specific diagnostic. Native legacy MCP migration guards SHALL remain enforced.
+### Requirement: Native extension loading
+Squad SHALL NOT inspect or reject native/project/imported configuration for hooks, MCP, plugins, lifecycle overrides or legacy migration keys. It SHALL preserve these settings in its private user configuration copy and leave native import resolution to Devin. Failure to read or parse the user config needed for that copy SHALL still fail safely; native launch failures SHALL remain failed operations.
 
-#### Scenario: Claude metadata exists
-- **WHEN** ~/.claude.json contains metadata and project state without relevant MCP configuration
-- **THEN** its existence does not block preparation and the file remains unchanged
+#### Scenario: Active native extensions
+- **WHEN** the user config contains hooks, plugins or legacy MCP entries
+- **THEN** Squad preserves them in its private copy without a compatibility refusal or source mutation
 
-#### Scenario: Imported extension is active
-- **WHEN** an enabled import contains an active MCP server or unsupported Claude hook
-- **THEN** preparation fails with the file path and relevant schema key, without emitting commands, credentials or custom names
+#### Scenario: External or project settings exist
+- **WHEN** external or project configuration is active, malformed, unreadable or contains lifecycle overrides
+- **THEN** Squad does not preflight those files and lets Devin interpret them
 
-#### Scenario: Disabled MCP server
-- **WHEN** a known standard MCP entry has disabled true or an OpenCode entry has enabled false
-- **THEN** that entry does not block preparation
-
-#### Scenario: Malformed source
-- **WHEN** a relevant external file contains invalid JSONC or is not a readable bounded regular file
-- **THEN** preparation fails with its path and a classified error without raw content
-
-#### Scenario: Claude plugin metadata does not establish imported extensions
-- **WHEN** user or project Claude settings contain enabledPlugins entries with imports enabled
-- **THEN** those entries alone do not block preparation, import policy and source files remain unchanged, and coexisting active hooks or MCP are still rejected
-
-### Requirement: Import-aware extension inspection
-External extension checks SHALL respect effective read_config_from switches, defaulting to enabled and applying ancestor project and local overrides after user settings. Disabled sources SHALL not block preparation. Squad SHALL preserve native import policy and SHALL not disable imports automatically to make a run pass.
-
-#### Scenario: Disabled external source
-- **WHEN** effective read_config_from.claude is false and Claude configuration contains extensions
-- **THEN** those external files do not block preparation and the disabled import policy is preserved
-
-#### Scenario: Project re-enables import
-- **WHEN** user configuration disables an import and a higher-priority project/local setting enables it
-- **THEN** active extensions from that source are checked and rejected before launch
+#### Scenario: User configuration cannot be copied
+- **WHEN** the primary user config is malformed or unreadable
+- **THEN** Squad fails private-copy preparation without exposing its contents
