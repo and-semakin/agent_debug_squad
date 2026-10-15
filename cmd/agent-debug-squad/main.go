@@ -22,14 +22,13 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/oneshot"
 	"github.com/and-semakin/agent_debug_squad/internal/orchestrator"
 	"github.com/and-semakin/agent_debug_squad/internal/selfupdate"
+	"github.com/and-semakin/agent_debug_squad/internal/skillmanager"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
 	"github.com/and-semakin/agent_debug_squad/internal/workflow"
 )
 
 const (
 	serverShutdownTimeout = 5 * time.Second
-	updateCheckTimeout    = 5 * time.Second
-	updateInstallTimeout  = 2 * time.Minute
 	repositoryOwner       = "and-semakin"
 	repositoryName        = "agent_debug_squad"
 	noAutoUpdateEnv       = "AGENT_DEBUG_SQUAD_NO_AUTO_UPDATE"
@@ -90,13 +89,14 @@ func run(args []string) error {
 		}
 		fmt.Printf("agent-debug-squad %s (commit %s, built %s)\n", version, commit, buildDate)
 		return nil
-	case "update":
-		if len(args) != 1 {
-			return fmt.Errorf("update does not accept arguments")
-		}
+	case "skill":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return update(ctx)
+		return &exitError{code: skillmanager.Main(ctx, args[1:], skillBuild(), os.Stdout)}
+	case "update":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return update(ctx, args[1:])
 	case "serve":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -127,13 +127,20 @@ func serve(ctx context.Context, args []string) error {
 	if *configPath == "" {
 		return fmt.Errorf("--config is required")
 	}
-	if !*noAutoUpdate && os.Getenv(noAutoUpdateEnv) != "1" && selfupdate.IsReleaseVersion(version) {
-		updated, err := installUpdate(ctx)
+	continued := selfupdate.ConsumeContinuation(version)
+	if !continued && !*noAutoUpdate && os.Getenv(noAutoUpdateEnv) != "1" && selfupdate.IsReleaseVersion(version) {
+		report, updated, err := maintenanceRun(ctx)
 		if err != nil {
-			log.Printf("automatic update skipped: %v", err)
-		} else if updated {
-			if err := restart(); err != nil {
-				log.Printf("automatic restart skipped: %v", err)
+			log.Printf("automatic maintenance failed: %v", err)
+		} else {
+			skillmanager.Print(os.Stderr, report, false)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if updated {
+				if err := restartProcess(report.Binary.After); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -235,58 +242,58 @@ func serve(ctx context.Context, args []string) error {
 	}
 }
 
-func update(ctx context.Context) error {
-	if !selfupdate.IsReleaseVersion(version) {
-		return fmt.Errorf("self-update is unavailable in development build %q", version)
-	}
-	updated, err := installUpdate(ctx)
+var maintenanceRun = maintain
+var restartProcess = restart
+
+func skillBuild() skillmanager.Build {
+	return skillmanager.Build{Version: version, Commit: commit, Date: buildDate}
+}
+
+func maintain(ctx context.Context) (skillmanager.Report, bool, error) {
+	manager, err := skillmanager.Default(skillBuild())
 	if err != nil {
+		return skillmanager.Report{}, false, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return skillmanager.Report{}, false, err
+	}
+	u := selfupdate.Maintenance{Manager: manager, Executable: executable, Client: selfupdate.Client{Owner: repositoryOwner, Repository: repositoryName, Version: version}}
+	report, updated := u.Run(ctx)
+	return report, updated, nil
+}
+func update(ctx context.Context, args []string) error {
+	jsonMode := skillmanager.HasJSON(args)
+	if len(args) > 1 || len(args) == 1 && args[0] != "--json" && args[0] != "--json=true" {
+		report := skillmanager.NewReport(skillBuild())
+		report.Error = skillmanager.Failure("invalid_arguments", "Usage: agent-debug-squad update [--json]")
+		report.Finish()
+		skillmanager.Print(os.Stdout, report, jsonMode)
+		return &exitError{code: 2}
+	}
+	report, _, err := maintain(ctx)
+	if err != nil {
+		report = skillmanager.NewReport(skillBuild())
+		report.Error = skillmanager.Failure("maintenance_failed", "Cannot initialize maintenance; check filesystem access.")
+		report.Finish()
+	}
+	if err := skillmanager.Print(os.Stdout, report, jsonMode); err != nil {
 		return err
 	}
-	if !updated {
-		fmt.Printf("agent-debug-squad %s is already up to date\n", version)
+	if report.Status != "ok" {
+		return &exitError{code: 2}
 	}
 	return nil
 }
-
-func installUpdate(ctx context.Context) (bool, error) {
-	client := selfupdate.Client{
-		Owner:      repositoryOwner,
-		Repository: repositoryName,
-		Version:    version,
-	}
-	checkCtx, cancelCheck := context.WithTimeout(ctx, updateCheckTimeout)
-	release, err := client.Check(checkCtx)
-	cancelCheck()
-	if err != nil {
-		return false, err
-	}
-	if release == nil {
-		return false, nil
-	}
-
-	executable, err := os.Executable()
-	if err != nil {
-		return false, fmt.Errorf("locate current executable: %w", err)
-	}
-	log.Printf("updating agent-debug-squad from %s to %s", version, release.Version)
-	installCtx, cancelInstall := context.WithTimeout(ctx, updateInstallTimeout)
-	err = client.Install(installCtx, *release, executable)
-	cancelInstall()
-	if err != nil {
-		return false, err
-	}
-	fmt.Printf("updated agent-debug-squad from %s to %s\n", version, release.Version)
-	return true, nil
-}
-
-func restart() error {
+func restart(nextVersion string) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate updated executable: %w", err)
 	}
-	log.Printf("restarting agent-debug-squad %s with the original arguments", version)
-	if err := syscall.Exec(executable, os.Args, os.Environ()); err != nil {
+	log.Printf("restarting installed agent-debug-squad %s", nextVersion)
+	// version is injected without v by GoReleaser; match the actual new process.
+	markerVersion := strings.TrimPrefix(nextVersion, "v")
+	if err := syscall.Exec(executable, os.Args, selfupdate.ContinuationEnvironment(markerVersion)); err != nil {
 		return fmt.Errorf("restart updated executable: %w", err)
 	}
 	return nil
@@ -298,5 +305,6 @@ func usage(out *os.File) {
 	fmt.Fprintln(out, "  agent-debug-squad serve --config squad.yaml [--no-auto-update]")
 	fmt.Fprintln(out, "  agent-debug-squad run --config squad.yaml --request-id <id>")
 	fmt.Fprintln(out, "  agent-debug-squad version")
-	fmt.Fprintln(out, "  agent-debug-squad update")
+	fmt.Fprintln(out, "  agent-debug-squad update [--json]")
+	fmt.Fprint(out, skillmanager.Help)
 }

@@ -41,6 +41,9 @@ jobs:
       - name: Run tests with race detector
         run: go test -race -count=1 ./...
 
+      - name: Verify embedded skill in all release targets
+        run: python3 scripts/verify-skill-builds.py
+
       - name: Build and publish GitHub Release
         uses: goreleaser/goreleaser-action@v6
         with:

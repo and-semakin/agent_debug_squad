@@ -57,7 +57,7 @@ curl -X POST 'http://127.0.0.1:8080/agents/Reviewer/runs?wait=true&timeout_secon
 
 ## Updates
 
-Release builds check the latest stable GitHub Release before `serve` starts. If a newer semantic version exists for the current platform, the CLI downloads its archive, verifies it against the published SHA-256 checksums, atomically replaces the current executable, and restarts with the same arguments and environment. Network and update errors are logged but do not prevent the server from starting.
+Release builds check the latest stable GitHub Release before `serve` starts. If a newer semantic version exists for the current platform, the CLI downloads its archive, verifies it against the published SHA-256 checksums, atomically replaces the current executable, synchronizes registered operating skills using the new executable, and restarts with the same arguments. Network and skill errors are reported separately and normally do not prevent startup; failure to re-execute an installed new binary stops startup rather than running the old process.
 
 Run the same check explicitly without starting a server:
 
@@ -65,13 +65,15 @@ Run the same check explicitly without starting a server:
 agent-debug-squad update
 ```
 
-Disable the startup check for one invocation with `--no-auto-update`, or for an environment with `AGENT_DEBUG_SQUAD_NO_AUTO_UPDATE=1`:
+Even when the binary is current (or release checking fails), update attempts offline repair of registered skills. An installed new binary remains installed if a skill destination fails; retry with `agent-debug-squad skill sync --path <exact-directory>`. `update --json` separates executable and per-destination outcomes; explicit update exits 2 for operational or partial failure. Running sessions are not restarted by another process’s update.
+
+Disable both the startup check and automatic skill writes for one invocation with `--no-auto-update`, or for an environment with `AGENT_DEBUG_SQUAD_NO_AUTO_UPDATE=1`:
 
 ```sh
 agent-debug-squad serve --config squad.yaml --no-auto-update
 ```
 
-Automatic replacement is supported on macOS and Linux. Development builds report version `dev` and skip update checks.
+Automatic replacement is supported on macOS and Linux. Development builds report version `dev` and skip both automatic update phases. The opt-out does not suppress explicit `update` or `skill sync`; `update --no-auto-update` is invalid. `run`, `models`, `version`, and `skill status` never perform implicit maintenance.
 
 ## Discover models before writing YAML
 
@@ -766,9 +768,52 @@ workflows/<execution_id>/run-summary.json
 
 The diagnostic artifact records safe adapter invocation metadata. Cursor diagnostics include the executable and effective CLI flags while omitting prompts, environment values, credentials, and backend session IDs. `run-summary.json` is the derived one-shot CLI report described above and is written only by `run`. The files are designed to be readable by people, scripts, and other agents. Add the configured state directory to the workspace's `.gitignore`; runtime transcripts may contain source code, prompts, or model output.
 
-## Codex Skill
+## Bundled Operating Skill
 
-A portable Codex skill for operating Agent Debug Squad is included at [skills/agent-debug-squad/SKILL.md](skills/agent-debug-squad/SKILL.md). Copy the `agent-debug-squad` directory into your Codex skills directory if you want it available outside this repository. Keep machine-specific paths and credentials in local configuration rather than editing the tracked copy.
+Every binary embeds the complete portable operating skill from [skills/agent-debug-squad/SKILL.md](skills/agent-debug-squad/SKILL.md). Choose the **facilitator that reads the instructions**, independently of the backends configured as workers:
+
+```sh
+agent-debug-squad skill install --agent codex --agent cursor
+agent-debug-squad skill status --json
+agent-debug-squad skill sync
+```
+
+Installation is explicit. Updates only maintain registered paths; they never take over a same-name manual, project or plugin copy. Multiple selected hosts reuse a compatible registered/shared copy where possible. Unknown precedence and observed duplicates are reported instead of deleting another tool’s copy.
+
+| Host preset | Preferred user skills root | Supported override |
+| --- | --- | --- |
+| `codex`, `cursor` | `~/.agents/skills` | None for this root |
+| `claude-code` | `~/.claude/skills` | `CLAUDE_CONFIG_DIR` + `/skills` |
+| `opencode` | `~/.config/opencode/skills` | `XDG_CONFIG_HOME` + `/opencode/skills`; `OPENCODE_CONFIG_DIR` + `/skills` takes preference |
+| `zcode` | `~/.zcode/skills` | None |
+| `kimi` (current Kimi Code) | `~/.kimi-code/skills` | `KIMI_CODE_HOME` + `/skills` |
+| `kimi-cli` (legacy) | `~/.kimi/skills` | None; `KIMI_SHARE_DIR` does not relocate skills |
+
+All roots receive an `agent-debug-squad` child. Overrides must be absolute. Registration freezes the resolved path; later environment changes do not retarget an existing copy. Cursor/OpenCode/current Kimi can reuse compatible shared roots; Claude requires its own effective root. `CODEX_HOME/skills` is observed for legacy conflicts, not assumed to relocate Codex’s modern `.agents` root. See the [compatibility evidence and discovery checklist](docs/skill-management.md) for official sources and limitations.
+
+Use an exact custom directory for another local host or a project/profile, arranging discovery yourself:
+
+```sh
+agent-debug-squad skill install --path "$HOME/team-skills/agent-debug-squad"
+# Explicitly adopt an existing manual copy only after reviewing this policy:
+agent-debug-squad skill install --path "$HOME/.codex/skills/agent-debug-squad" --adopt
+```
+
+`--path` is the **skill directory itself**, not its parent. Adoption makes a verified backup and only enrolls incoming bundled paths. Unknown legacy resources stay unowned. Plugin-controlled copies must be detached/exported first; symlink skill directories are refused. Re-run an exact `skill install --path` to update a registered installation, or use `skill sync --path` for repair without enrollment.
+
+Sync replaces managed resources, removes obsolete managed files, and preserves unowned files. Locally edited managed files are archived before replacement; a new resource colliding with an unowned file stops that destination until you explicitly resolve it. Private registry, recovery journals and backup archives live under `~/.agent-debug-squad/skill-management/`. Backups are never automatically pruned. Keep machine settings and credentials outside managed instructions.
+
+Tree replacement uses a same-filesystem atomic exchange on supported macOS/Linux filesystems. Unsupported filesystems fail without an in-place fallback. A recovery journal closes the gap between tree publication and registry publication: retry `skill sync` after a crash. An ambiguous external edit stops recovery and preserves evidence. Multiple destinations can succeed/fail independently; successful updates are not rolled back. No mechanism forces an already-running agent to reload context: when prompted, reread the reported absolute SKILL.md path and refresh/restart the host if needed.
+
+An older binary cannot silently overwrite a newer managed release. Intentional rollback uses the older binary with `skill sync --path <dir> --allow-downgrade`. Development installs/sync require `--allow-dev`; release restoration retains the prior release authority and backs up differing dev contents. Same-release/different-bundle conflicts cannot be forced. Skill commands exit 0 for success/no-op, 1 for drift or partial/operational failure, and 2 for argument errors; status with no registrations is a successful read-only inspection. Inspect JSON reports even on exit 1:
+
+```sh
+status=0
+agent-debug-squad skill sync --json > skill-report.json || status=$?
+cat skill-report.json
+# status=1 can include successful destinations alongside failures.
+```
+
 
 ## Development
 

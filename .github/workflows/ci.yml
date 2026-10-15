@@ -47,3 +47,20 @@ jobs:
 
       - name: Build all packages
         run: go build ./...
+
+  skill-platforms:
+    name: Skill transactions (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test -race -count=1 ./internal/skillmanager ./internal/selfupdate ./cmd/agent-debug-squad
+      - name: Verify release payload builds
+        shell: bash
+        run: python3 scripts/verify-skill-builds.py

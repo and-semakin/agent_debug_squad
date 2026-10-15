@@ -7,6 +7,25 @@ description: Configure, start, facilitate, monitor, and close local Agent Debug 
 
 Use Agent Debug Squad as a local REST-controlled coordinator for named coding agents. One server process owns one YAML-configured session and stores agent state, transcripts, and run artifacts inside the target workspace.
 
+## Keep these instructions aligned with the binary
+
+Run `agent-debug-squad skill status --json` before relying on an installed copy.
+Inspect exit 0/1 reports, including each destination and observed duplicate. Status
+is read-only. If a registered copy needs repair and maintenance is authorized, run
+`agent-debug-squad skill sync --path <reported-exact-directory> --json`, inspect
+partial failures, and reread its SKILL.md when `reread_required` is true. A binary
+update can succeed while a skill path fails; resolve that path's diagnostic and
+retry sync. A notification does not reload instructions already in your context;
+refresh or restart the host when needed.
+
+No registration means setup is still explicit: choose the user's facilitator host
+with `skill install --agent <host>` or an exact custom directory with `--path`.
+Never infer installation consent from the worker backends in squad YAML. Do not
+adopt a manual copy, change plugin ownership, allow downgrade, or install a dev
+bundle without the user's corresponding intent. `--adopt` backs up a manual copy;
+unknown files stay unowned, and collisions require explicit resolution. Preserve
+reported backup paths. Store local machine settings outside managed instructions.
+
 ## Core Workflow
 
 1. Inspect the repository and choose distinct roles. Keep reviewers read-only; only implementer roles should edit code.
