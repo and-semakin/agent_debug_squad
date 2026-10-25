@@ -34,11 +34,13 @@
 - [x] 6.1 Run an opt-in isolated installed-v2 smoke test for lifecycle, session continuity and supported API operations, plus existing v1 regressions; record tested versions and any untested paid-inference paths honestly.
 - [x] 6.2 Run gofmt on changed Go files, go vet ./... and go test -race -count=1 ./...; resolve failures and record outcomes.
 - [x] 6.3 Run openspec validate add-opencode-2-backend --strict and check implementation against every requirement/scenario and the feature-parity document; keep task checkboxes consistent before archive.
-- [ ] 6.4 Archive through openspec-archive-change only after completion, fetch origin/main, integrate concurrent changes without force push, and commit/push verified work to main under repository policy; verify the pushed commit then wait for green CI and publish/verify the explicitly requested semantic-version release.
+- [x] 6.4 Archive through openspec-archive-change only after completion, fetch origin/main, integrate concurrent changes without force push, and commit/push verified work to main under repository policy; verify the pushed commit then wait for green CI and publish/verify the explicitly requested semantic-version release.
 
 ## Verification evidence
 
 - 2026-10-25: gofmt clean; `go vet ./...` and `go test -race -count=1 ./...` passed.
 - Installed OpenCode 2.1.4 isolated smoke passed with the race detector and a local fake provider (no paid inference).
 - Strict change validation and all 11 main specification validations passed; feature parity and failure scenarios checked against implementation and fixture tests.
-- Release delivery remains pending; archive and final bookkeeping follow verified publication.
+- Implementation commit `b824a48` pushed to main; CI 40215392912 passed on Linux and macOS.
+- Annotated tag `v0.23.0` published; Release workflow 40215590744 passed. All four macOS/Linux AMD64/ARM64 archives matched checksums.txt; the downloaded macOS ARM64 executable reported 0.23.0 and commit b824a48.
+- Main specifications synchronized and verified against every delta; change archived after release verification. Final archive bookkeeping is committed separately from the tagged code.
