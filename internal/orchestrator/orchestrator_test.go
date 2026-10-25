@@ -244,7 +244,7 @@ func TestRunWorkerWritesOpenCodeStreamingEvents(t *testing.T) {
 		case "/config":
 			_, _ = w.Write([]byte(`{"snapshot":false}`))
 		case "/global/health":
-			_, _ = w.Write([]byte(`{"healthy":true,"version":"test"}`))
+			_, _ = w.Write([]byte(`{"healthy":true,"version":"1.18.30"}`))
 		case "/session":
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)

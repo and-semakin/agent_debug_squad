@@ -260,7 +260,9 @@ func officialLinkURL(backend string) string {
 		return domain.DocCursorCLI
 	case "kimi":
 		return domain.DocKimiCLI
-	case "opencode":
+	case "opencode2":
+		return domain.DocOpenCode2CLI
+	case "opencode", "opencode1":
 		return domain.DocOpenCodeCLI
 	case "zcode":
 		return domain.DocZCodeDesktop
@@ -281,8 +283,10 @@ func productLabel(backend string) string {
 		return "Cursor CLI installation"
 	case "kimi":
 		return "Kimi CLI installation"
-	case "opencode":
-		return "OpenCode installation"
+	case "opencode2":
+		return "OpenCode 2 installation"
+	case "opencode", "opencode1":
+		return "OpenCode 1 installation"
 	case "zcode":
 		return "ZCode installation"
 	case "node":
@@ -299,11 +303,12 @@ const perCheckDeadline = 5 * time.Second
 type Entry struct {
 	Backend string
 	Agents  []string
+	Timeout time.Duration // Zero uses the five-second installation deadline.
 	Check   func(ctx context.Context) domain.InstallationResult
 }
 
 // Pass runs bounded, concurrent installation checks: five seconds per unique
-// check, at most four at a time, with the caller's context able to cut the
+// check by default (Entry.Timeout may override it), at most four at a time, with the caller's context able to cut the
 // pass short. Completed failures are preserved; unfinished groups are
 // classified cancelled or timed_out instead of silently passing.
 func Pass(ctx context.Context, budget time.Duration, entries []Entry) domain.PreflightReport {
@@ -331,7 +336,11 @@ func Pass(ctx context.Context, budget time.Duration, entries []Entry) domain.Pre
 				mu.Unlock()
 				return
 			}
-			checkCtx, checkCancel := context.WithTimeout(phaseCtx, perCheckDeadline)
+			deadline := entry.Timeout
+			if deadline <= 0 {
+				deadline = perCheckDeadline
+			}
+			checkCtx, checkCancel := context.WithTimeout(phaseCtx, deadline)
 			result := entry.Check(checkCtx)
 			checkCancel()
 			mu.Lock()

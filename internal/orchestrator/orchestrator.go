@@ -13,6 +13,7 @@ import (
 
 	"github.com/and-semakin/agent_debug_squad/internal/adapters"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode2"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/store"
@@ -53,10 +54,11 @@ func runtimeKeyForRun(run domain.RunRecord) string {
 }
 
 type Orchestrator struct {
-	openCode *opencode.Runtime
-	cfg      domain.SessionConfig
-	store    *store.Store
-	execCtx  context.Context
+	openCode  *opencode.Runtime
+	openCode2 *opencode2.Runtime
+	cfg       domain.SessionConfig
+	store     *store.Store
+	execCtx   context.Context
 
 	mu          sync.Mutex
 	runtimes    map[string]*agentRuntime
@@ -136,6 +138,7 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 	}
 
 	o.openCode = opencode.NewRuntime(ctx, cfg.WorkspaceDir, cfg.MachineBackends.OpenCode)
+	o.openCode2 = opencode2.NewRuntime(ctx, cfg.WorkspaceDir, cfg.MachineBackends.OpenCode2)
 	success := false
 	defer func() {
 		if !success {
@@ -184,7 +187,7 @@ func newOrchestrator(ctx context.Context, cfg domain.SessionConfig, s *store.Sto
 		// its first session on the first checked turn. Recovering a saved
 		// session identity likewise waits for that turn.
 		initialized := true
-		if spec.Backend != "opencode" {
+		if !domain.IsOpenCode(spec.Backend) {
 			state, err = adapter.Init(ctx, spec, state)
 			if err != nil {
 				return nil, err
@@ -589,7 +592,7 @@ func (o *Orchestrator) ResetAgent(ctx context.Context, agentName string, force b
 		current.state = reset
 		// A reset clears session identity; a backend whose Init contacts a
 		// server re-initializes on the next checked turn.
-		current.initialized = current.spec.Backend != "opencode"
+		current.initialized = !domain.IsOpenCode(current.spec.Backend)
 	}
 	o.mu.Unlock()
 	return domain.AgentResetResult{
@@ -985,13 +988,19 @@ func deref(value *string) string {
 
 // Close releases owned backend servers. Call after stopping scheduling and workers.
 func (o *Orchestrator) Close() {
+	if o.openCode2 != nil {
+		o.openCode2.Close()
+	}
 	if o.openCode != nil {
 		o.openCode.Close()
 	}
 }
 
 func (o *Orchestrator) newAdapter(spec domain.AgentSpec) (adapters.AgentAdapter, error) {
-	if spec.Backend == "opencode" {
+	if spec.Backend == "opencode2" {
+		return o.openCode2.Adapter(spec)
+	}
+	if domain.IsOpenCode(spec.Backend) {
 		return o.openCode.Adapter(spec)
 	}
 	return adapters.New(spec)

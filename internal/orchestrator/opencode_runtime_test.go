@@ -137,7 +137,7 @@ func TestManagedOpenCodeSharedAcrossManualAndOwnedRuns(t *testing.T) {
 	}
 	script := filepath.Join(t.TempDir(), "opencode")
 	quoted := "'" + strings.ReplaceAll(binary, "'", "'\\''") + "'"
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec "+quoted+" -test.run=^TestSquadOpenCodeHelper$ -- \"$@\"\n"), 0700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.30; exit 0; fi\nexec "+quoted+" -test.run=^TestSquadOpenCodeHelper$ -- \"$@\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", t.TempDir())

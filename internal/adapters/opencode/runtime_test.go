@@ -177,7 +177,7 @@ func helperRuntime(t *testing.T, mode string) *Runtime {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "opencode")
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec "+quote(binary)+" -test.run=^TestRuntimeHelper$ -- \"$@\"\n"), 0700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.30; exit 0; fi\nexec "+quote(binary)+" -test.run=^TestRuntimeHelper$ -- \"$@\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r := NewRuntime(context.Background(), dir, &domain.MachineBackendSettings{Command: script, ProxyURL: "http://alice:privatepass@proxy.test", InheritEnv: []string{"SQUAD_OPENCODE_HELPER", "HELPER_MODE"}})

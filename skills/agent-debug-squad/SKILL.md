@@ -114,7 +114,8 @@ Backends:
 
 - `codex`: CLI adapter with `command`, optional `model`, `reasoning`, `yolo`, `env`, and `inherit_env`.
 - `cursor`: Cursor Agent CLI adapter with `command`, optional `model`, read-only `mode`, `sandbox`, `yolo`, `env`, and `inherit_env`.
-- `opencode`: HTTP adapter with `base_url`, optional `model`, `timeout_seconds`, and `yolo`.
+- `opencode1` (legacy alias `opencode`): classic OpenCode 1 HTTP/SSE adapter.
+- `opencode2`: OpenCode 2 native HTTP/event adapter. Both versions support managed (default) and external modes, `model`, `agent`, `timeout_seconds`, and `yolo`; external mode accepts `base_url`, `username`, and `password`. Machine settings and executable paths are separate per generation.
 - `zcode`: private App Server adapter with `command` (Node), `runtime_path`, `provider`, `model`, `reasoning`, `yolo`, `env`, and `inherit_env`. Defaults to GLM-5.3-Flash/low; requires a compatible installed ZCode bundle and existing Z.AI Coding Plan login. See the repository README and `examples/zcode-squad.yaml` for compatibility.
 - `devin`: official local ACP CLI; requires an exact advertised `model`. Optional `reasoning` prefers high when offered, `speed` defaults to standard, and `mode` defaults to bypass with `yolo: true` compatibility. Also accepts `command`, `env`, and `inherit_env`; machine proxy_url/no_proxy avoid per-agent proxy duplication. Explicit mode overrides inherited yolo; conflicting explicit mode/yolo is rejected. Tested 3000.11.1 lacks Normal ACP mode, so `yolo: false` without explicit mode fails before prompting. See `docs/devin-backend.md` and `examples/devin-squad.yaml`. Model-list variants remain informational until their ACP selection is verified. Native hooks/MCP/plugins and imported/project configurations are delegated to Devin without extension-specific preflight checks; native startup errors still fail the operation.
 - `kimi`: CLI adapter with `command` and optional model settings.
@@ -139,7 +140,7 @@ command -v opencode
 command -v kimi
 ```
 
-OpenCode-backed agents require a reachable `opencode serve` endpoint. Start other prerequisite services before the squad, then run:
+Managed OpenCode agents start their own authenticated server; external mode requires an explicitly configured reachable endpoint. Both upstream generations use the `opencode` executable name; select the matching backend or configure its machine `command` path. Start other prerequisite services before the squad, then run:
 
 ```sh
 agent-debug-squad serve --config configs/squad.yaml
@@ -211,7 +212,7 @@ curl -sS -X POST http://127.0.0.1:8090/runs/run_000001/permissions/per_example/r
   -d '{"reply":"once"}'
 ```
 
-Use `once`, `always` (OpenCode's suggested patterns for the session), or `reject`, with optional `message`. A successful reply returns `200`; re-read the run to find any other pending requests. `404` means an unknown/resolved request or run, `409` an inactive run or unsupported backend, and `502` a backend reply failure. Check the latest state before retrying an uncertain reply. Do not reset an agent merely because it is waiting for a permission. Decisions are audited in run `.events.jsonl` as `squad.permission.reply` with source `yolo` or `coordinator`.
+Use `once` or `reject`, with optional `message`. OpenCode 1 also supports `always` for its suggested session patterns. OpenCode 2 rejects `always` because upstream persists these grants project-wide; do not bypass this restriction by changing global policies. A successful reply returns `200`; re-read the run to find any other pending requests. `404` means an unknown/resolved request or run, `409` an inactive run or unsupported backend, and `502` a backend reply failure. Check the latest state before retrying an uncertain reply. Do not reset an agent merely because it is waiting for a permission. Decisions are audited in run `.events.jsonl` as `squad.permission.reply` with source `yolo` or `coordinator`.
 
 
 ## Reset One Agent

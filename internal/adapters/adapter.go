@@ -38,7 +38,7 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 		return cursor.New(spec), nil
 	case "kimi":
 		return kimi.New(spec), nil
-	case "opencode":
+	case "opencode", "opencode1", "opencode2":
 		return nil, fmt.Errorf("opencode requires an owned runtime; construct it through the orchestrator")
 	default:
 		return nil, fmt.Errorf("unknown backend %q", spec.Backend)

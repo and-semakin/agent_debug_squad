@@ -30,13 +30,15 @@ func MachineBackendsPath(homeDir string) string {
 // supportedMachineKeys lists the keys one backend section accepts, in a
 // stable order for error messages.
 var supportedMachineKeys = map[string][]string{
-	domain.MachineBackendDevin:    {"command", "inherit_env", "no_proxy", "proxy_url"},
-	domain.MachineBackendCodex:    {"command", "inherit_env", "no_proxy", "proxy_url"},
-	domain.MachineBackendCursor:   {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url"},
-	domain.MachineBackendKimi:     {"command", "inherit_env", "no_proxy", "proxy_url"},
-	domain.MachineBackendOpenCode: {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
-	domain.MachineBackendZCode:    {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url", "runtime_path"},
-	domain.MachineBackendJudge:    {"confidence_threshold", "proxy_url"},
+	domain.MachineBackendDevin:     {"command", "inherit_env", "no_proxy", "proxy_url"},
+	domain.MachineBackendCodex:     {"command", "inherit_env", "no_proxy", "proxy_url"},
+	domain.MachineBackendCursor:    {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url"},
+	domain.MachineBackendKimi:      {"command", "inherit_env", "no_proxy", "proxy_url"},
+	domain.MachineBackendOpenCode1: {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
+	domain.MachineBackendOpenCode2: {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
+	domain.MachineBackendOpenCode:  {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
+	domain.MachineBackendZCode:     {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url", "runtime_path"},
+	domain.MachineBackendJudge:     {"confidence_threshold", "proxy_url"},
 }
 
 // stringMachineKeys are the keys decoded as plain strings.
@@ -78,6 +80,11 @@ func LoadMachineBackends(homeDir string) (domain.MachineBackends, error) {
 		return backends, fmt.Errorf("backends config %s: expected a single YAML document", path)
 	}
 
+	if _, legacy := sections["opencode"]; legacy {
+		if _, explicit := sections["opencode1"]; explicit {
+			return backends, fmt.Errorf("backends config %s: opencode and opencode1 are aliases; declare only one", path)
+		}
+	}
 	names := make([]string, 0, len(sections))
 	for name := range sections {
 		names = append(names, name)
@@ -101,8 +108,10 @@ func LoadMachineBackends(homeDir string) (domain.MachineBackends, error) {
 			backends.Cursor = settings
 		case domain.MachineBackendKimi:
 			backends.Kimi = settings
-		case domain.MachineBackendOpenCode:
+		case domain.MachineBackendOpenCode, domain.MachineBackendOpenCode1:
 			backends.OpenCode = settings
+		case domain.MachineBackendOpenCode2:
+			backends.OpenCode2 = settings
 		case domain.MachineBackendZCode:
 			backends.ZCode = settings
 		case domain.MachineBackendJudge:
@@ -212,7 +221,7 @@ func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBac
 			settings.InheritEnv = inherit
 		}
 	}
-	if name == domain.MachineBackendOpenCode {
+	if domain.IsOpenCode(name) {
 		settings.Declared = map[string]bool{}
 		for _, key := range keys {
 			settings.Declared[key] = true
@@ -410,7 +419,7 @@ var machineStringDefaults = map[string][]string{
 // input spec's maps are never mutated; persisted snapshots keep storing only
 // the agent's raw options.
 func MergeMachineDefaults(spec domain.AgentSpec, backends domain.MachineBackends) domain.AgentSpec {
-	if spec.Backend == domain.MachineBackendOpenCode {
+	if domain.IsOpenCode(spec.Backend) {
 		return spec
 	}
 	settings := backends.For(spec.Backend)

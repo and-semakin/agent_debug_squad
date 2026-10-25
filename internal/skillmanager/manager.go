@@ -152,6 +152,9 @@ func (m *Manager) targets(o Options, r Registry) (map[string][]string, []Result,
 	for _, name := range hostOrder {
 		requested := false
 		for _, n := range o.Agents {
+			if n == "opencode1" || n == "opencode2" {
+				n = "opencode"
+			}
 			if n == name {
 				requested = true
 			}

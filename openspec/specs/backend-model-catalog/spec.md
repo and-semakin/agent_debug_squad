@@ -8,7 +8,7 @@ Provide attributable backend model choices before a squad or workflow is created
 
 ### Requirement: Discovery works before workflow creation
 
-The system SHALL provide `agent-debug-squad models` with `--all`, repeatable `--backend`, optional `--config`, `--workspace`, `--json`, `--include-hidden`, `--timeout`, and `--backend-timeout`. Without config or selectors it SHALL discover all real registered agent backends. `--all` SHALL include codex, cursor, kimi, opencode, zcode, and devin; fake SHALL require explicit selection or an existing configured fake agent. Judge SHALL NOT be treated as an agent backend. The command SHALL NOT require a squad file, workflow, running Squad server, agent startup prompt, or existing conversation. It SHALL NOT initialize an orchestrator, create/resume backend sessions, send prompts, invoke model tools, install/update software, log in, or deliberately mutate native auth/configuration. The first version SHALL NOT expose a REST discovery route.
+The system SHALL provide `agent-debug-squad models` with `--all`, repeatable `--backend`, optional `--config`, `--workspace`, `--json`, `--include-hidden`, `--timeout`, and `--backend-timeout`. Without config or selectors it SHALL discover all real registered agent backends. `--all` SHALL include codex, cursor, kimi, opencode1, opencode2, zcode, and devin; fake SHALL require explicit selection or an existing configured fake agent. Judge SHALL NOT be treated as an agent backend. The command SHALL NOT require a squad file, workflow, running Squad server, agent startup prompt, or existing conversation. It SHALL NOT initialize an orchestrator, create/resume backend sessions, send prompts, invoke model tools, install/update software, log in, or deliberately mutate native auth/configuration. The first version SHALL NOT expose a REST discovery route.
 
 #### Scenario: Author has only a workspace
 - **WHEN** the author runs `models --all --json --workspace .` before writing YAML
@@ -253,3 +253,18 @@ Devin discovery SHALL use the official models list --format json interface only 
 #### Scenario: Catalog variants are not direct ACP choices
 - **WHEN** the native list contains variant IDs whose execution encoding cannot be established without a conversation
 - **THEN** rows remain informational with unsupported selections and no options.model recipe, while manually configured execution IDs are checked against the live ACP control before prompting
+
+### Requirement: Versioned OpenCode catalog discovery
+OpenCode 1 SHALL retain classic discovery. OpenCode 2 SHALL query its native model/provider/default endpoints with execution-equivalent mode, environment, authentication and location. Discovery SHALL preserve exact selectable IDs and evidence without inference. The legacy opencode selector SHALL resolve to v1 without duplicate equivalent probes; all-mode results SHALL identify both generations explicitly.
+
+#### Scenario: Catalog without conversations
+- **WHEN** OpenCode 2 model discovery runs
+- **THEN** it creates no conversation or prompt, closes only its owned runtime, and preserves unknown access as unknown
+
+#### Scenario: Alias and canonical selectors
+- **WHEN** opencode and opencode1 select equivalent effective targets
+- **THEN** one v1 probe serves both selections and opencode2 remains a separate target
+
+#### Scenario: Incomplete catalog
+- **WHEN** a later page or provider query fails
+- **THEN** available rows remain partial with a safe diagnostic and unsupported fields are not invented

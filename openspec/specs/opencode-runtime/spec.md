@@ -84,3 +84,10 @@ External servers SHALL expose the same workspace at the same absolute path as Sq
 #### Scenario: External session uses a different root
 - **WHEN** a saved external session reports a directory absent locally or different from Squad's workspace
 - **THEN** recovery fails with a workspace diagnostic without creating a replacement session or submitting a prompt
+
+### Requirement: Runtime generation boundaries
+Classic protocol requirements in this specification SHALL apply to OpenCode 1, including the opencode alias. OpenCode 2 SHALL satisfy its own protocol specification with equivalent ownership safeguards. Each Squad SHALL own at most one managed runtime per generation; aliases SHALL share the v1 owner. Neither generation SHALL adopt or stop an unrelated server.
+
+#### Scenario: Mixed generation squad
+- **WHEN** v1, legacy-alias and v2 agents initialize concurrently
+- **THEN** at most one v1 and one v2 managed process are launched and each agent retains its separate conversation

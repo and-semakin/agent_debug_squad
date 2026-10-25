@@ -13,7 +13,7 @@ import (
 )
 
 func (a *Adapter) ListModels(ctx context.Context, in domain.ModelDiscoveryInput) domain.ModelDiscoveryResult {
-	r := modelprobe.New("opencode", "opencode_provider_api", "/provider", "known_catalog", in)
+	r := modelprobe.New(a.spec.Backend, "opencode_provider_api", "/provider", "known_catalog", in)
 	if issue := a.ReadinessCheck(ctx); issue != nil {
 		modelprobe.Issue(&r, ctx, *issue)
 		return r
@@ -22,7 +22,7 @@ func (a *Adapter) ListModels(ctx context.Context, in domain.ModelDiscoveryInput)
 		modelprobe.Fail(&r, modelprobe.ContextStatus(ctx, "error"), "snapshot_verification_failed")
 		return r
 	}
-	second := modelprobe.New("opencode", "opencode_provider_api", "/config/providers", "configured", in).Sources[0]
+	second := modelprobe.New(a.spec.Backend, "opencode_provider_api", "/config/providers", "configured", in).Sources[0]
 	r.Sources = append(r.Sources, second)
 	var all struct {
 		All       *[]json.RawMessage `json:"all"`
@@ -110,7 +110,7 @@ func (a *Adapter) ListModels(ctx context.Context, in domain.ModelDiscoveryInput)
 					modelprobe.Fail(&r, "unsupported", "malformed_model_row")
 					continue
 				}
-				m := modelprobe.Model("opencode", id, source)
+				m := modelprobe.Model(a.spec.Backend, id, source)
 				m.ProviderID = p.ID
 				m.ProviderLabel = p.Name
 				m.DisplayName = x.Name

@@ -12,7 +12,7 @@ const Help = `Usage:
   agent-debug-squad skill install (--agent NAME ... | --path /absolute/skills/agent-debug-squad) [--adopt] [--allow-dev | --allow-downgrade] [--json]
   agent-debug-squad skill status [--agent NAME ... | --path DIR] [--json]
   agent-debug-squad skill sync [--path DIR] [--allow-dev | --allow-downgrade] [--json]
-Hosts: codex, claude-code, cursor, opencode, zcode, kimi, kimi-cli.
+Hosts: codex, claude-code, cursor, opencode (aliases: opencode1, opencode2), zcode, kimi, kimi-cli.
 --path is the exact skill directory, not its parent. Registration is explicit.
 `
 

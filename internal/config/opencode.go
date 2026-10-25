@@ -41,7 +41,7 @@ func ValidateOpenCodeSettings(s domain.MachineBackendSettings) error {
 
 // ValidateOpenCodeAgent runs for YAML, recovered specs and programmatic callers.
 func ValidateOpenCodeAgent(spec domain.AgentSpec) error {
-	if spec.Backend != "opencode" {
+	if !domain.IsOpenCode(spec.Backend) {
 		return nil
 	}
 	for _, key := range []string{"command", "proxy_url", "no_proxy", "snapshot", "env", "inherit_env", "runtime_path", "ca_cert_file"} {

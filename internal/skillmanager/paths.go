@@ -78,7 +78,7 @@ func hostRoots(home string, env func(string) string, name string) (host, error) 
 	case "cursor":
 		native = generic
 		eligible = []string{h(".cursor/skills"), h(".claude/skills"), h(".codex/skills")}
-	case "opencode":
+	case "opencode", "opencode1", "opencode2":
 		r, e := override("XDG_CONFIG_HOME", h(".config"))
 		if e != nil {
 			return host{}, e

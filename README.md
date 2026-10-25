@@ -17,7 +17,7 @@ Coding-agent CLIs expose different flags, session formats, and streaming protoco
 - interrupt and reset one stuck agent without restarting the squad;
 - let an external facilitator coordinate review, critique, and implementation rounds through HTTP.
 
-Supported backends are Codex CLI, Cursor Agent CLI, OpenCode, Kimi CLI, ZCode App Server, official local Devin CLI, and a deterministic fake backend for local smoke tests.
+Supported backends are Codex CLI, Cursor Agent CLI, OpenCode 1, OpenCode 2, Kimi CLI, ZCode App Server, official local Devin CLI, and a deterministic fake backend for local smoke tests.
 
 ## Quick Start
 
@@ -145,7 +145,8 @@ and 10,000 rows; incomplete data is never labelled complete.
 | Codex | Private App Server `model/list` | Native model ID; returned reasoning maps to `reasoning`; no thread or turn |
 | Cursor | `--list-models` text | Opaque exact ID; verified header/rows/footer; format drift is explicit |
 | Kimi | `provider list --json` | Configured alias; provider secrets and unknown fields are excluded |
-| OpenCode | Classic `/provider` and `/config/providers` | Provider/model; managed owned runtime or configured external endpoint |
+| OpenCode 1 (`opencode1`, alias `opencode`) | Classic `/provider` and `/config/providers` | Provider/model; managed owned runtime or configured external endpoint |
+| OpenCode 2 (`opencode2`) | Native `/api/model`, `/api/provider`, `/api/model/default` | Provider/model; independent managed runtime or external endpoint |
 | Devin | `models list --format json` | Informational variant inventory; ACP selection mapping is not inferred |
 | ZCode | No verified read-only bootstrap | `unsupported`, `read_only_catalog_unavailable`; no session workaround |
 | fake | Fixed synthetic `fake` record | Explicit test fixture; arbitrary manually configured models still work |
@@ -240,7 +241,8 @@ The verdict must be one the task declares (`400` otherwise), and the request is 
 | --- | --- | --- | --- |
 | `codex` | CLI process | Codex resume ID | `command`, `model`, `reasoning`, `yolo` |
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
-| `opencode` | Owned `opencode serve` (default), or explicit external HTTP server | OpenCode session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
+| `opencode1` (alias `opencode`) | Owned `opencode serve` (default), or explicit external HTTP server | OpenCode session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
+| `opencode2` | Owned OpenCode 2 `serve`, or explicit external HTTP server | OpenCode 2 session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
 | `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `model`, `reasoning`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `devin` | Owned local ACP process | Explicit native session ID | `command`, `model`, `yolo`, `env`, `inherit_env`; [compatibility limits](docs/devin-backend.md) |
@@ -289,7 +291,7 @@ A failed admission returns `503` with a structured report before any run or exec
 
 Messages never include command/path values, environment, proxy credentials or child output; reports name at most the built-in default command and the option source (agent, machine or built-in default). A rejected manual run or workflow submission consumes no run/execution identity and no request ID, so the same request can be resubmitted after repair.
 
-OpenCode readiness is a separate phase after every local check passes: managed mode starts (or reuses) the owned server, external mode probes `GET /global/health` with redirects disabled. If the first managed startup fails or is cancelled, that runtime stays failed until Squad is explicitly restarted; the report carries `restart_required: true` with guidance. Local installation failures and external service errors never latch anything, and a successfully started shared server survives unrelated admission failures.
+OpenCode readiness is a separate phase after every local check passes: managed mode starts (or reuses) the owned server, external mode probes `GET /global/health` for v1 or `GET /api/info` for v2, with redirects disabled. If the first managed startup fails or is cancelled, that runtime stays failed until Squad is explicitly restarted; the report carries `restart_required: true` with guidance. Local installation failures and external service errors never latch anything, and a successfully started shared server survives unrelated admission failures.
 
 Official installation pages used in reports:
 
@@ -398,7 +400,22 @@ judge:
 
 For Codex, Cursor, Kimi, ZCode and Devin, explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
 
-### Managed and external OpenCode
+### OpenCode versions
+
+Use **OpenCode 1** (`opencode1`) for the classic server and **OpenCode 2**
+(`opencode2`) for the new API. `opencode` remains a v1 alias. Both generations use
+an executable named `opencode`; a mismatched major version fails before work.
+Machine settings use separate `opencode1` and `opencode2` sections; do not declare
+both `opencode` and `opencode1`. Saved v1 conversations are never converted to v2.
+
+OpenCode 2 preserves managed/external operation, multi-turn sessions, streaming,
+descendant activity, model discovery and cancellation. Its `always` permission
+reply persists project-wide grants upstream, so Squad rejects it; use `once` or
+`reject`. YOLO still automatically sends only `once`. See the
+[OpenCode 2 compatibility guide](docs/opencode2-compatibility.md) for configuration,
+verified protocol details and the isolated smoke test.
+
+### Managed and external OpenCode 1
 
 OpenCode defaults to **managed** mode. One Squad owns one reusable `opencode serve` process in its workspace; ordinary agents and workflow attempts share that server while retaining separate sessions and per-request models. The server binds `127.0.0.1`, disables mDNS, and uses a generated password. `--port 0` lets OpenCode bind an available port itself (v1 prefers 4096, otherwise an OS-selected port); Squad uses the child's announcement, never an independently running server. Startup allows 30 seconds for authenticated health readiness, followed by a separate configuration check bounded to 10 seconds or an earlier caller deadline.
 
@@ -497,7 +514,7 @@ The service deliberately accepts only loopback hosts because the v1 API has no a
 
 ### OpenCode permissions
 
-OpenCode uses its classic HTTP/SSE permission API. Effective `yolo: true` (the default) automatically replies `once` to owned permission requests. It does not change global OpenCode configuration or override explicit backend denials. Set `options.yolo: false` for coordinator-controlled replies. Questions are separate and are not automatically answered.
+OpenCode 1 uses its classic HTTP/SSE permission API. OpenCode 2 maps the same Squad API to its native session-scoped permission routes, but rejects `always` because it persists project-wide grants. Effective `yolo: true` (the default) automatically replies `once` to owned permission requests. It does not change global OpenCode configuration or override explicit backend denials. Set `options.yolo: false` for coordinator-controlled replies. Questions are separate and are not automatically answered.
 
 While any permissions are pending, progress includes:
 
@@ -529,7 +546,7 @@ curl -sS -X POST http://127.0.0.1:8090/runs/run_000001/permissions/per_example/r
   -d '{"reply":"once","message":"Read the review artifacts"}'
 ```
 
-Replies are `once`, `always`, or `reject`; `message` is optional. `always` approves OpenCode's suggested patterns for that backend session. Success returns `200` with `{"ok":true}`; invalid input returns `400`, unknown runs/requests `404`, inactive runs or unsupported backends `409`, and backend failures `502`. Concurrent replies are serialized and resolved requests cannot be approved again. Backend calls time out after five seconds and are cancelled with the run. Reset/restart invalidates old actionable requests.
+Replies are `once`, `always`, or `reject`; `message` is optional. `always` approves OpenCode 1's suggested patterns for that backend session; OpenCode 2 rejects it because its native grant persists project-wide. Success returns `200` with `{"ok":true}`; invalid input returns `400`, unknown runs/requests `404`, inactive runs or unsupported backends `409`, and backend failures `502`. Concurrent replies are serialized and resolved requests cannot be approved again. Backend calls time out after five seconds and are cancelled with the run. Reset/restart invalidates old actionable requests.
 
 Permission reply attempts are recorded as `squad.permission.reply` events in the run's `.events.jsonl`, with request/session IDs, reply, source (`yolo` or `coordinator`), timestamp, and any error. Waiting for permission takes precedence over waiting for subagents until all requests resolve.
 
@@ -784,7 +801,7 @@ Installation is explicit. Updates only maintain registered paths; they never tak
 | --- | --- | --- |
 | `codex`, `cursor` | `~/.agents/skills` | None for this root |
 | `claude-code` | `~/.claude/skills` | `CLAUDE_CONFIG_DIR` + `/skills` |
-| `opencode` | `~/.config/opencode/skills` | `XDG_CONFIG_HOME` + `/opencode/skills`; `OPENCODE_CONFIG_DIR` + `/skills` takes preference |
+| `opencode`, `opencode1`, `opencode2` | `~/.config/opencode/skills` | `XDG_CONFIG_HOME` + `/opencode/skills`; `OPENCODE_CONFIG_DIR` + `/skills` takes preference |
 | `zcode` | `~/.zcode/skills` | None |
 | `kimi` (current Kimi Code) | `~/.kimi-code/skills` | `KIMI_CODE_HOME` + `/skills` |
 | `kimi-cli` (legacy) | `~/.kimi/skills` | None; `KIMI_SHARE_DIR` does not relocate skills |

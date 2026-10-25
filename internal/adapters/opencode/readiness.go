@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
@@ -79,7 +80,7 @@ func (a *Adapter) externalHealthCheck(ctx context.Context, links []domain.Instal
 		Healthy bool   `json:"healthy"`
 		Version string `json:"version"`
 	}
-	if err := json.Unmarshal(data, &health); err != nil || !health.Healthy {
+	if err := json.Unmarshal(data, &health); err != nil || !health.Healthy || (health.Version != "" && !strings.HasPrefix(health.Version, "1.")) {
 		return a.healthIssue(domain.CodeServiceIncompatible, links)
 	}
 	return nil

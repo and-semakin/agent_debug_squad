@@ -17,8 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencodeversion"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
+	"github.com/and-semakin/agent_debug_squad/internal/preflight"
 )
 
 // Runtime owns at most one serve process. Share it across every adapter in a
@@ -149,6 +151,14 @@ func (r *Runtime) start(ctx context.Context) error {
 	command := r.settings.Command
 	if command == "" {
 		command = "opencode"
+	}
+	resolved, issue := preflight.ResolveCommand(command, env, r.workspace)
+	if issue != nil {
+		return errors.New(issue.Message)
+	}
+	command = resolved
+	if err := opencodeversion.Check(ctx, command, env, r.workspace, 1); err != nil {
+		return err
 	}
 	cmd := exec.Command(command, "serve", "--hostname", "127.0.0.1", "--port", "0", "--mdns=false")
 	cmd.Dir = r.workspace

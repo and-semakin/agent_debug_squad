@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode"
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencode2"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
@@ -14,7 +15,16 @@ type ModelLister interface {
 }
 
 func NewModelLister(ctx context.Context, spec domain.AgentSpec, machine domain.MachineBackends, in domain.ModelDiscoveryInput) (ModelLister, func(), error) {
-	if spec.Backend == "opencode" {
+	if spec.Backend == "opencode2" {
+		r := opencode2.NewRuntimeWithEnv(ctx, in.WorkspaceDir, machine.OpenCode2, in.AmbientEnv)
+		a, err := r.Adapter(spec)
+		if err != nil {
+			r.Close()
+			return nil, func() {}, err
+		}
+		return a, r.Close, nil
+	}
+	if domain.IsOpenCode(spec.Backend) {
 		r := opencode.NewRuntimeWithEnv(ctx, in.WorkspaceDir, machine.OpenCode, in.AmbientEnv)
 		a, err := r.Adapter(spec)
 		if err != nil {

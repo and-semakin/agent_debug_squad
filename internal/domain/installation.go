@@ -45,14 +45,16 @@ const (
 // Official documentation links reported with installation and service
 // failures. OS-specific choices are delegated to these pages.
 const (
-	DocDevinCLI       = "https://docs.devin.ai/cli"
-	DocCodexCLI       = "https://learn.chatgpt.com/docs/codex/cli"
-	DocCursorCLI      = "https://cursor.com/docs/cli/installation"
-	DocKimiCLI        = "https://www.kimi.com/code/docs/en/"
-	DocOpenCodeCLI    = "https://opencode.ai/docs/"
-	DocOpenCodeServer = "https://opencode.ai/docs/server/"
-	DocZCodeDesktop   = "https://zcode.z.ai/en/docs/install"
-	DocNodeDownload   = "https://nodejs.org/en/download"
+	DocDevinCLI        = "https://docs.devin.ai/cli"
+	DocCodexCLI        = "https://learn.chatgpt.com/docs/codex/cli"
+	DocCursorCLI       = "https://cursor.com/docs/cli/installation"
+	DocKimiCLI         = "https://www.kimi.com/code/docs/en/"
+	DocOpenCode2CLI    = "https://opencode.ai/v2/docs/"
+	DocOpenCode2Server = "https://opencode.ai/v2/docs/api"
+	DocOpenCodeCLI     = "https://opencode.ai/docs/"
+	DocOpenCodeServer  = "https://opencode.ai/docs/server/"
+	DocZCodeDesktop    = "https://zcode.z.ai/en/docs/install"
+	DocNodeDownload    = "https://nodejs.org/en/download"
 )
 
 // InstallationLink is one labeled documentation entry in a report.

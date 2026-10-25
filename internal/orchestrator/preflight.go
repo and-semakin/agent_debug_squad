@@ -2,12 +2,11 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/and-semakin/agent_debug_squad/internal/adapters"
@@ -32,16 +31,10 @@ const (
 // actual spawn remains a launch-time failure).
 func (o *Orchestrator) PreflightAgents(ctx context.Context, names []string) error {
 	ambient := os.Environ()
-	groups := map[string]*preflight.Entry{}
+	installations := map[string]*preflight.Entry{}
+	services := map[string]*preflight.Entry{}
 	agents := append([]string(nil), names...)
 	sort.Strings(agents)
-	// Service readiness entries: managed OpenCode shares one owned server per
-	// Squad, so managed groups collapse onto one readiness check regardless
-	// of per-agent command differences; external groups key on the endpoint.
-	managed := false
-	var managedAgents []string
-	external := map[string][]string{}
-
 	for _, name := range agents {
 		spec, ok := o.effectiveSpec(name)
 		if !ok {
@@ -52,154 +45,60 @@ func (o *Orchestrator) PreflightAgents(ctx context.Context, names []string) erro
 			return fmt.Errorf("prepare %s check: %w", spec.Backend, err)
 		}
 		key := installationKey(spec, o.cfg.WorkspaceDir)
-		entry, ok := groups[key]
-		if !ok {
+		if installations[key] == nil {
 			checked := adapter
-			entry = &preflight.Entry{
-				Backend: spec.Backend,
-				Check: func(ctx context.Context) domain.InstallationResult {
-					return checked.CheckInstallation(ctx, domain.InstallationInput{
-						WorkspaceDir: o.cfg.WorkspaceDir,
-						AmbientEnv:   ambient,
-					})
-				},
-			}
-			groups[key] = entry
+			installations[key] = &preflight.Entry{Backend: spec.Backend, Check: func(ctx context.Context) domain.InstallationResult {
+				return checked.CheckInstallation(ctx, domain.InstallationInput{WorkspaceDir: o.cfg.WorkspaceDir, AmbientEnv: ambient})
+			}}
 		}
-		entry.Agents = append(entry.Agents, name)
-		if spec.Backend == "opencode" {
-			mode, baseURL := opencodeServiceInfo(adapter)
-			switch mode {
-			case "external":
-				external[baseURL] = append(external[baseURL], name)
-			default:
-				managed = true
-				managedAgents = append(managedAgents, name)
-			}
+		installations[key].Agents = append(installations[key].Agents, name)
+		if !domain.IsOpenCode(spec.Backend) {
+			continue
 		}
+		mode, baseURL := opencodeServiceInfo(adapter)
+		generation := spec.Backend
+		if generation == "opencode" {
+			generation = "opencode1"
+		}
+		parts := []string{generation, mode}
+		if mode == "external" {
+			parts = append(parts, baseURL, spec.StringOptions["username"], spec.StringOptions["password"])
+		}
+		raw, _ := json.Marshal(parts)
+		key = string(raw) // private, never logged
+		if services[key] == nil {
+			checked := adapter
+			services[key] = &preflight.Entry{Backend: spec.Backend, Timeout: readinessBudget, Check: func(ctx context.Context) domain.InstallationResult {
+				issue := checked.(interface {
+					ReadinessCheck(context.Context) *domain.InstallationIssue
+				}).ReadinessCheck(ctx)
+				if issue != nil {
+					return domain.InstallationResult{Status: domain.InstallationStatusFailed, Issues: []domain.InstallationIssue{*issue}}
+				}
+				return domain.InstallationResult{Status: domain.InstallationStatusReady}
+			}}
+		}
+		services[key].Agents = append(services[key].Agents, name)
 	}
-
-	entries := make([]preflight.Entry, 0, len(groups))
-	for _, entry := range groups {
-		entries = append(entries, *entry)
+	entries := func(groups map[string]*preflight.Entry) []preflight.Entry {
+		out := make([]preflight.Entry, 0, len(groups))
+		for _, g := range groups {
+			out = append(out, *g)
+		}
+		return out
 	}
-	report := preflight.Pass(ctx, installationBudget, entries)
+	report := preflight.Pass(ctx, installationBudget, entries(installations))
 	if len(report.Issues) > 0 {
 		return &domain.PreflightError{Report: &report}
 	}
-
-	serviceIssues := o.readinessPass(ctx, ambient, managed, managedAgents, external)
-	if len(serviceIssues) > 0 {
-		return &domain.PreflightError{Report: &domain.PreflightReport{Issues: serviceIssues}}
+	report = preflight.Pass(ctx, readinessBudget, entries(services))
+	for i := range report.Issues {
+		report.Issues[i].Phase = domain.InstallationPhaseReadiness
+	}
+	if len(report.Issues) > 0 {
+		return &domain.PreflightError{Report: &report}
 	}
 	return nil
-}
-
-// readinessPass asks the OpenCode lifecycle integration to ensure managed
-// services and probes external health. It never starts a server when stage
-// one failed (the caller guarantees that ordering) and never terminates
-// unrelated or external servers.
-func (o *Orchestrator) readinessPass(ctx context.Context, ambient []string, managed bool, managedAgents []string, external map[string][]string) []domain.PreflightIssue {
-	phaseCtx, cancel := context.WithTimeout(ctx, readinessBudget)
-	defer cancel()
-
-	type serviceCheck struct {
-		agents []string
-		run    func(ctx context.Context) *domain.InstallationIssue
-	}
-	var checks []serviceCheck
-	if managed {
-		agents := append([]string(nil), managedAgents...)
-		sort.Strings(agents)
-		checks = append(checks, serviceCheck{
-			agents: agents,
-			run: func(ctx context.Context) *domain.InstallationIssue {
-				return o.openCode.EnsureReadyIssue(ctx)
-			},
-		})
-	}
-	baseURLs := make([]string, 0, len(external))
-	for url := range external {
-		baseURLs = append(baseURLs, url)
-	}
-	sort.Strings(baseURLs)
-	for _, url := range baseURLs {
-		url := url
-		agents := append([]string(nil), external[url]...)
-		sort.Strings(agents)
-		checks = append(checks, serviceCheck{
-			agents: agents,
-			run: func(ctx context.Context) *domain.InstallationIssue {
-				return o.externalHealthIssue(ctx, url, ambient)
-			},
-		})
-	}
-	sem := make(chan struct{}, 4)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var issues []domain.PreflightIssue
-	for _, check := range checks {
-		check := check
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-phaseCtx.Done():
-				mu.Lock()
-				issues = append(issues, domain.PreflightIssue{
-					Phase:     domain.InstallationPhaseReadiness,
-					Backend:   "opencode",
-					Agents:    check.agents,
-					Component: domain.ComponentService,
-					Code:      phaseCode(phaseCtx.Err()),
-					Message:   "the service readiness check did not finish within its budget",
-				})
-				mu.Unlock()
-				return
-			}
-			issue := check.run(phaseCtx)
-			mu.Lock()
-			defer mu.Unlock()
-			if issue != nil {
-				issues = append(issues, domain.PreflightIssue{
-					Phase:             issue.Phase,
-					Backend:           "opencode",
-					Agents:            check.agents,
-					Component:         issue.Component,
-					Code:              issue.Code,
-					RestartRequired:   issue.RestartRequired,
-					Message:           issue.Message,
-					InstallationLinks: issue.InstallationLinks,
-				})
-			}
-		}()
-	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-phaseCtx.Done():
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-		}
-	}
-	sort.SliceStable(issues, func(i, j int) bool {
-		if issues[i].Code != issues[j].Code {
-			return issues[i].Code < issues[j].Code
-		}
-		return strings.Join(issues[i].Agents, ",") < strings.Join(issues[j].Agents, ",")
-	})
-	return issues
-}
-
-func phaseCode(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return domain.CodeTimedOut
-	}
-	return domain.CodeCancelled
 }
 
 // effectiveSpec resolves the normalized, machine-merged agent spec a check
@@ -219,7 +118,11 @@ func (o *Orchestrator) effectiveSpec(name string) (domain.AgentSpec, bool) {
 // effective environments stay distinct.
 func installationKey(spec domain.AgentSpec, workspace string) string {
 	var builder strings.Builder
-	builder.WriteString(spec.Backend)
+	backend := spec.Backend
+	if backend == "opencode1" {
+		backend = "opencode"
+	}
+	builder.WriteString(backend)
 	builder.WriteString("\x00")
 	for _, key := range []string{"mode", "command", "runtime_path", "base_url"} {
 		builder.WriteString(spec.StringOptions[key])
@@ -244,28 +147,4 @@ func opencodeServiceInfo(adapter adapters.AgentAdapter) (string, string) {
 		return info.EffectiveMode(), info.EffectiveBaseURL()
 	}
 	return "managed", ""
-}
-
-// externalHealthIssue probes one external OpenCode endpoint's health through
-// the adapter's transport, so redirects, authentication and redaction follow
-// the same contract as ordinary requests.
-func (o *Orchestrator) externalHealthIssue(ctx context.Context, baseURL string, ambient []string) *domain.InstallationIssue {
-	spec := domain.AgentSpec{
-		Backend:       "opencode",
-		StringOptions: map[string]string{"mode": "external", "base_url": baseURL},
-	}
-	adapter, err := o.openCode.Adapter(spec)
-	if err != nil {
-		return &domain.InstallationIssue{
-			Phase:     domain.InstallationPhaseReadiness,
-			Component: domain.ComponentService,
-			Code:      domain.CodeServiceUnavailable,
-			Message:   "the OpenCode service endpoint is not usable; verify the external server configuration",
-			InstallationLinks: []domain.InstallationLink{
-				{Label: "OpenCode server documentation", URL: domain.DocOpenCodeServer},
-			},
-		}
-	}
-	_ = ambient
-	return adapter.ReadinessCheck(ctx)
 }

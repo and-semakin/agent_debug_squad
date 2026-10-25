@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/and-semakin/agent_debug_squad/internal/adapters/opencodeversion"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 	"github.com/and-semakin/agent_debug_squad/internal/preflight"
 )
@@ -42,6 +43,9 @@ func (a *Adapter) CheckInstallation(ctx context.Context, input domain.Installati
 	}
 	if issue := preflight.CheckLauncher(resolved, effective, input.WorkspaceDir); issue != nil {
 		return domain.InstallationResult{Status: domain.InstallationStatusFailed, Issues: []domain.InstallationIssue{*issue}}
+	}
+	if err := opencodeversion.Check(ctx, resolved, effective, input.WorkspaceDir, 1); err != nil {
+		return domain.InstallationResult{Status: domain.InstallationStatusFailed, Issues: []domain.InstallationIssue{{Phase: domain.InstallationPhaseInstallation, Component: domain.ComponentExecutable, Code: domain.CodeUnsupportedRuntime, Message: err.Error(), InstallationLinks: []domain.InstallationLink{preflight.OfficialLink(a.spec.Backend)}}}}
 	}
 	return domain.InstallationResult{Status: domain.InstallationStatusReady}
 }

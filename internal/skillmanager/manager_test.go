@@ -739,3 +739,17 @@ func TestRegistryRequiresSchemaAndRejectsFutureFields(t *testing.T) {
 		requireCode(t, r, tc.code)
 	}
 }
+
+func TestOpenCodeVersionAliasesShareRegistration(t *testing.T) {
+	m := manager(t, testBundle(t, nil), "v1.0.0")
+	r := run(t, m, Options{Command: "install", Agents: []string{"opencode", "opencode1", "opencode2"}})
+	if len(r.Destinations) != 1 || len(r.Destinations[0].Agents) != 1 || r.Destinations[0].Agents[0] != "opencode" {
+		t.Fatalf("duplicate or changed registration: %+v", r.Destinations)
+	}
+	for _, alias := range []string{"opencode1", "opencode2"} {
+		status := run(t, m, Options{Command: "status", Agents: []string{alias}})
+		if len(status.Destinations) != 1 || status.Destinations[0].Path != r.Destinations[0].Path {
+			t.Fatalf("alias %s lost installed root: %+v", alias, status.Destinations)
+		}
+	}
+}

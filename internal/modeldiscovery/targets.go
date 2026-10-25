@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-var RealBackends = []string{"codex", "cursor", "kimi", "opencode", "zcode", "devin"}
+var RealBackends = []string{"codex", "cursor", "kimi", "opencode1", "opencode2", "zcode", "devin"}
 
 type Options struct {
 	All                   bool
@@ -37,8 +37,11 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	}
 	selected := map[string]bool{}
 	for _, b := range o.Backends {
+		if b == "opencode" {
+			b = "opencode1"
+		}
 		switch b {
-		case "codex", "cursor", "kimi", "opencode", "zcode", "devin", "fake":
+		case "codex", "cursor", "kimi", "opencode1", "opencode2", "zcode", "devin", "fake":
 			selected[b] = true
 		default:
 			return nil, errors.New("invalid_arguments")
@@ -75,6 +78,9 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	targets := []Target{}
 	represented := map[string]bool{}
 	for _, spec := range specs {
+		if spec.Backend == "opencode" {
+			spec.Backend = "opencode1"
+		}
 		if len(selected) > 0 && !selected[spec.Backend] && !(o.All && spec.Backend == "fake") {
 			continue
 		}
@@ -93,7 +99,7 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	out := []Target{}
 	for _, t := range targets {
 		switch t.Spec.Backend {
-		case "codex", "cursor", "kimi", "opencode", "zcode", "devin", "fake":
+		case "codex", "cursor", "kimi", "opencode1", "opencode2", "zcode", "devin", "fake":
 		default:
 			return nil, errors.New("invalid_configuration")
 		}
@@ -123,8 +129,8 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 			}
 		}
 		keyData := []any{t.Spec.Backend, workspace, opts, envMap}
-		if t.Spec.Backend == "opencode" {
-			keyData = append(keyData, machine.OpenCode, ambient)
+		if domain.IsOpenCode(t.Spec.Backend) {
+			keyData = append(keyData, machine.For(t.Spec.Backend), ambient)
 		}
 		b, _ := json.Marshal(keyData)
 		key := string(b)

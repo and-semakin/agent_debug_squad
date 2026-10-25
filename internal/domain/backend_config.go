@@ -30,24 +30,27 @@ type MachineBackendSettings struct {
 // MachineBackends is the resolved content of the machine backend settings
 // file. Nil sections mean the backend has no machine settings.
 type MachineBackends struct {
-	Devin    *MachineBackendSettings
-	Codex    *MachineBackendSettings
-	Cursor   *MachineBackendSettings
-	Kimi     *MachineBackendSettings
-	OpenCode *MachineBackendSettings
-	ZCode    *MachineBackendSettings
-	Judge    *MachineBackendSettings
+	Devin     *MachineBackendSettings
+	Codex     *MachineBackendSettings
+	Cursor    *MachineBackendSettings
+	Kimi      *MachineBackendSettings
+	OpenCode  *MachineBackendSettings
+	OpenCode2 *MachineBackendSettings
+	ZCode     *MachineBackendSettings
+	Judge     *MachineBackendSettings
 }
 
 // Backend names accepted as sections in the machine settings file.
 const (
-	MachineBackendDevin    = "devin"
-	MachineBackendCodex    = "codex"
-	MachineBackendCursor   = "cursor"
-	MachineBackendKimi     = "kimi"
-	MachineBackendOpenCode = "opencode"
-	MachineBackendZCode    = "zcode"
-	MachineBackendJudge    = "judge"
+	MachineBackendDevin     = "devin"
+	MachineBackendCodex     = "codex"
+	MachineBackendCursor    = "cursor"
+	MachineBackendKimi      = "kimi"
+	MachineBackendOpenCode  = "opencode"
+	MachineBackendOpenCode1 = "opencode1"
+	MachineBackendOpenCode2 = "opencode2"
+	MachineBackendZCode     = "zcode"
+	MachineBackendJudge     = "judge"
 )
 
 // MachineBackendNames lists the accepted section names in a stable order.
@@ -58,6 +61,8 @@ func MachineBackendNames() []string {
 		MachineBackendCursor,
 		MachineBackendKimi,
 		MachineBackendOpenCode,
+		MachineBackendOpenCode1,
+		MachineBackendOpenCode2,
 		MachineBackendZCode,
 		MachineBackendJudge,
 	}
@@ -75,8 +80,10 @@ func (m MachineBackends) For(backend string) *MachineBackendSettings {
 		return m.Cursor
 	case MachineBackendKimi:
 		return m.Kimi
-	case MachineBackendOpenCode:
+	case MachineBackendOpenCode, MachineBackendOpenCode1:
 		return m.OpenCode
+	case MachineBackendOpenCode2:
+		return m.OpenCode2
 	case MachineBackendZCode:
 		return m.ZCode
 	case MachineBackendJudge:
@@ -92,6 +99,9 @@ func (m MachineBackends) For(backend string) *MachineBackendSettings {
 func (m MachineBackends) Configured() []string {
 	var names []string
 	for _, name := range MachineBackendNames() {
+		if name == MachineBackendOpenCode1 {
+			continue
+		}
 		if m.For(name) != nil {
 			names = append(names, name)
 		}
@@ -118,4 +128,9 @@ func (m MachineBackends) JudgeConfidenceThreshold() float64 {
 		return 0
 	}
 	return *m.Judge.ConfidenceThreshold
+}
+
+// IsOpenCode reports backends with owned HTTP runtimes.
+func IsOpenCode(name string) bool {
+	return name == "opencode" || name == "opencode1" || name == "opencode2"
 }
