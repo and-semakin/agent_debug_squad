@@ -546,6 +546,16 @@ func (r *activeRun) hostRequest(msg wireMessage) {
 		r.preferences(msg)
 	case "squad/authorizeProviderHeaders":
 		r.authorizeHeaders(msg)
+	case "interaction/requestOfficialMcpAuthHeaders":
+		// Optional plugin authentication is separate from model credentials.
+		// ZCode accepts this native negative result and can continue without
+		// authenticated MCP access. Never grant headers, even for foreign or
+		// malformed contexts; no session binding is needed to decline auth.
+		if len(msg.ID) != 0 {
+			_ = r.c.respond(context.Background(), map[string]any{"id": msg.ID, "result": map[string]any{
+				"ok": false, "reason": "official_auth_unavailable",
+			}})
+		}
 	case "interaction/providerRuntimeHeadersCancelled":
 		// Notification: the runtime cancelled a pending auth request. Squad
 		// holds no pending material; late results are discarded by binding.

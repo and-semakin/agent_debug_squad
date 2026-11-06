@@ -380,3 +380,39 @@ func TestTerminalCleanupFailureReported(t *testing.T) {
 		t.Fatal("cleanup failure swallowed")
 	}
 }
+
+func TestOfficialMCPAuthUnavailableDuringCreateAndResume(t *testing.T) {
+	for _, scenario := range []string{"official-auth-mcp", "official-auth-command", "official-auth-malformed"} {
+		t.Run(scenario, func(t *testing.T) {
+			a, state := fakeAdapter(t, scenario)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			for i := 0; i < 2; i++ {
+				res, next, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+				if err != nil {
+					t.Fatalf("turn %d: %v", i+1, err)
+				}
+				if res.FinalMessage != "pong" || next.BackendSessionID != "session" {
+					t.Fatalf("turn %d: %+v %+v", i+1, res, next)
+				}
+				state = next
+			}
+		})
+	}
+}
+
+func TestOfficialMCPAuthNotificationDoesNotReply(t *testing.T) {
+	// No client is necessary: a notification must not attempt a wire reply.
+	r := &activeRun{}
+	r.hostRequest(wireMessage{Method: "interaction/requestOfficialMcpAuthHeaders"})
+}
+
+func TestUnknownHostInteractionStillFails(t *testing.T) {
+	a, state := fakeAdapter(t, "unknown-host")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	res, _, err := a.Send(ctx, state, domain.RunRequest{RunID: "run", Message: "ping"}, nil)
+	if err == nil || !contains(err.Error(), "unsupported zcode host interaction: interaction/futureUnknown") || res.FinalMessage != "" {
+		t.Fatalf("unknown host request did not fail explicitly: %+v %v", res, err)
+	}
+}

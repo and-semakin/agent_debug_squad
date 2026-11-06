@@ -241,6 +241,7 @@ func TestProtocolHelper(t *testing.T) {
 	fresh := true
 	input := ""
 	mode := ""
+	var pendingSession json.RawMessage
 
 	registryPayload := map[string]any{"revision": "rev-1", "providers": []any{map[string]any{
 		"providerId": "account:zai-individual-coding-plan",
@@ -278,6 +279,14 @@ func TestProtocolHelper(t *testing.T) {
 			var answer map[string]any
 			_ = json.Unmarshal(m.Result, &answer)
 			switch {
+			case id == "official-auth":
+				// Native 3.17.2 negative-result contract: no headers or extra
+				// fields, and no JSON-RPC error. Only now finish create/resume.
+				if m.Error != nil || len(answer) != 2 || answer["ok"] != false || answer["reason"] != "official_auth_unavailable" || len(pendingSession) == 0 {
+					os.Exit(19)
+				}
+				emit(map[string]any{"id": pendingSession, "result": map[string]any{"session": map[string]string{"sessionId": "session"}}})
+				pendingSession = nil
 			case id == "host-permission":
 				if answer["decision"] != "allow" && answer["decision"] != "deny" {
 					os.Exit(5)
@@ -370,6 +379,17 @@ func TestProtocolHelper(t *testing.T) {
 			result = map[string]any{"allow": true}
 		case "session/create", "session/resume":
 			fresh = m.Method == "session/create"
+			if strings.HasPrefix(scenario, "official-auth-") {
+				params := any(map[string]any{"requestId": "official-mcp-auth:1", "workspace": map[string]string{"workspaceKey": "/foreign", "workspacePath": "/foreign"}, "pluginId": "fixture-plugin", "mcpKey": "fixture-mcp", "targetOrigin": "https://example.invalid"})
+				if scenario == "official-auth-command" {
+					params = map[string]any{"requestId": "official-command-auth:1", "workspace": map[string]string{"workspaceKey": "/foreign", "workspacePath": "/foreign"}, "consumer": "plugin-command", "pluginId": "fixture-plugin", "targetOrigin": "https://example.invalid"}
+				} else if scenario == "official-auth-malformed" {
+					params = "invalid-context"
+				}
+				pendingSession = m.ID
+				emit(map[string]any{"id": "official-auth", "method": "interaction/requestOfficialMcpAuthHeaders", "params": params})
+				continue
+			}
 			// The runtime names the new sessionId in the preferences request
 			// while the create result is outstanding.
 			if fresh && (scenario == "preferences-during-create" || scenario == "preferences-mismatch") {
@@ -459,6 +479,8 @@ func TestProtocolHelper(t *testing.T) {
 			case "wrong-turn":
 				event("turn.completed", "foreign-turn", map[string]string{"resultType": "success", "response": "stale"})
 				os.Exit(0)
+			case "unknown-host":
+				emit(map[string]any{"id": "unknown", "method": "interaction/futureUnknown", "params": map[string]any{}})
 			case "unsupported":
 				emit(map[string]any{"id": "question", "method": "interaction/requestUserInput", "params": map[string]string{"sessionId": "session"}})
 			case "permission":
