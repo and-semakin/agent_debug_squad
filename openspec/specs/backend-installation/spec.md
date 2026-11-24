@@ -52,37 +52,6 @@ Commands SHALL denote a single executable, without shell expansion or arguments 
 #### Scenario: No implicit working-directory search
 - **WHEN** effective PATH includes a relative directory or consists only of empty entries
 - **THEN** preflight reports invalid_search_path or not_found respectively and does not find an implicit workspace executable
-### Requirement: Backend checks reflect actual prerequisites
-Codex, Cursor, Kimi and managed OpenCode SHALL check their effective executable and recognized launcher dependencies. A self-contained CLI SHALL NOT require a separately installed Node or Python solely because another distribution uses one. The ambient-versus-explicit environment rules SHALL be identical between checking and actual launch for every CLI backend. Fake and external OpenCode SHALL report that local installation is not required, without CLI discovery.
-
-ZCode SHALL independently check the effective Node executable, readable runtime bundle and readable built-in provider configuration from effective environment variable ZCODE_BUILTIN_PROVIDER_CONFIG_FILE when nonempty, otherwise ../config/provider/zcode-builtin.json relative to the resolved runtime bundle directory. A relative override SHALL resolve against the effective workspace. It SHALL check required runtime structures with the existing structural compatibility rule, without loading/executing the runtime bundle, reading account/credential files or spawning app-server. Missing or ambiguous structures SHALL fail with unsupported_runtime; compatibility SHALL NOT depend on an exact hash/version allowlist. Missing independent components SHALL all be reported, without derivative duplicate issues for probes that cannot run. Installation success SHALL NOT imply authentication, account availability or model access. Start/Individual plan-policy selection SHALL NOT add account or billing checks to installation. Relative runtime and provider paths SHALL resolve consistently against the effective workspace for both checking and launch; no unrelated runtime fallback SHALL occur.
-
-#### Scenario: Multiple ZCode prerequisites missing
-- **WHEN** both the configured Node executable and runtime bundle are absent
-- **THEN** the report contains both component failures and installation links for Node and ZCode without attempting a runtime probe
-
-#### Scenario: Structural compatibility without credentials
-- **WHEN** a ZCode bundle has the required unambiguous structures and all local prerequisites but the account is signed out
-- **THEN** installation checking succeeds without touching credential/account files, and authentication remains a later launch concern
-
-#### Scenario: Unsupported bundle is not loaded
-- **WHEN** ZCode runtime structures are missing or ambiguous
-- **THEN** the check fails before loading the bundle or starting app-server and can include the non-secret bundle fingerprint
-
-#### Scenario: External mode needs no CLI
-- **WHEN** effective OpenCode mode is external and no local opencode executable exists
-- **THEN** local installation checking reports not_required and HTTP readiness is evaluated separately
-
-#### Scenario: Managed mode requires CLI
-- **WHEN** effective OpenCode mode is managed and its configured command cannot be resolved
-- **THEN** preflight fails before starting any owned server
-
-#### Scenario: Fake remains self-contained
-- **WHEN** only fake agents are selected and no real backend is installed
-- **THEN** local checks succeed without filesystem prerequisites or network requests
-#### Scenario: Start-first installation is account free
-- **WHEN** an agent selects start-first policy
-- **THEN** local preflight checks the same runtime prerequisites without reading account data, requesting a balance or starting app-server
 
 ### Requirement: Installation and service readiness are separate phases
 All selected local installation checks SHALL finish successfully before any managed OpenCode server startup. After that gate, preflight SHALL check readiness for every required OpenCode service through the separately defined lifecycle/transport integration, including external services. OpenCode 1 readiness SHALL use GET `/global/health` with redirects disabled and require a 2xx JSON response containing healthy:true; an advertised version SHALL identify major 1, while absent version metadata remains compatible. OpenCode 2 readiness SHALL use GET `/api/info` with redirects disabled and require a 2xx JSON response advertising major 2. Version mismatches SHALL fail before task work. Unreachable/non-2xx services SHALL report service_unavailable; invalid health shape SHALL report service_incompatible. Managed startup failure SHALL report start_failed. Readiness SHALL NOT create sessions, submit prompts or certify all API methods/model compatibility. No agent task SHALL start until both phases pass. Failed initial managed startup, including initiating cancellation or timeout, SHALL preserve the existing failure latch until explicit Squad restart. The immediate cause SHALL retain its code and carry restart_required:true; subsequent live requests SHALL report restart_required without another launch. Local installation rejection before startup and external service errors SHALL NOT set a managed latch. Once managed startup succeeds, the shared server SHALL remain owned until Squad shutdown even when admission later fails or the caller cancels. Failed-start cleanup SHALL remain the supervisor's responsibility, and unrelated/external servers SHALL never be terminated. Existing bounded effective snapshot/config verification SHALL still precede session creation and work.
@@ -99,31 +68,12 @@ All selected local installation checks SHALL finish successfully before any mana
 - **WHEN** every local prerequisite passes but a required managed server is stopped
 - **THEN** preflight may start that owned server and wait for health, while all session creation and task prompts remain blocked
 
-### Requirement: Checks are bounded and cannot perform model work
-Each unique local check SHALL be bounded to five seconds. The local installation phase SHALL have a thirty-second budget including cleanup. Only after it passes, service readiness SHALL receive a separate sixty-second budget including managed failure cleanup; the existing thirty-second managed startup and up-to-ten-second effective-config check SHALL use that second budget. Thus the normal pass SHALL be bounded to ninety seconds, subject to earlier caller deadline/cancellation. A deadline that aborts initial managed startup SHALL report timed_out with restart_required:true if that runtime latched the failure; explicit cancellation SHALL analogously report cancelled. Timeout after successful startup SHALL NOT itself imply a startup latch. No more than four checks SHALL run concurrently. Failures in one group SHALL NOT skip independent groups while budget remains. On cancellation or deadline, the report SHALL preserve completed issues and explicitly classify unfinished groups as cancelled or timed_out. Probe output SHALL be bounded to 64 KiB and never forwarded raw. Installation checks SHALL NOT issue model/auth smoke requests, read credentials, auto-install/update anything, create backend conversations, or execute the selected backend CLI merely to request its version, except that managed OpenCode SHALL run a bounded `--version` probe to reject the wrong major generation before startup. A bundled ZCode probe may run the resolved Node interpreter only to inspect local files; it SHALL suppress environment-driven preload hooks for that inspector without altering the actual backend environment. Each service health request SHALL have a five-second deadline within the readiness phase budget; managed startup may retain its existing shorter per-poll limit. No successful evidence SHALL be cached across admissions, dispatches, retries or restarts.
-
-#### Scenario: Inspector cannot preload account code
-- **WHEN** the effective backend environment contains Node preload hooks
-- **THEN** the installation inspector omits those hooks, while retaining effective resolved installation paths and leaving the subsequent backend environment unchanged
-
-#### Scenario: Hanging probe
-- **WHEN** one probe does not finish within five seconds and another backend has a missing executable
-- **THEN** the aggregate contains timed_out and the independent executable failure within the overall budget, with no task started
-
-#### Scenario: Request cancellation
-- **WHEN** the submitting request is cancelled during preflight
-- **THEN** checking stops, owned probe work is cancelled/cleaned up, uncompleted groups are identified and no execution/run is admitted
-
-#### Scenario: Installation changes between turns
-- **WHEN** a manual turn succeeds and the executable is then removed before another turn
-- **THEN** the next turn performs a fresh check and is rejected before creating a run
-
 ### Requirement: Manual use and validation remain independently usable
 Pure YAML parsing and structural configuration validation SHALL remain possible without installed CLIs, filesystem installation discovery or HTTP checks. Serving a fresh squad SHALL NOT check all configured agents or create external sessions for unused agents. A manual turn SHALL check only its selected effective agent before creating a run or submitting agent work. Consecutive successful manual turns SHALL retain session continuity; checks SHALL NOT reset session identity. Reset SHALL defer creation of a replacement external session until a subsequent checked turn; force reset SHALL still cancel and join existing work. Ephemeral SHALL NOT mean disabled. This change SHALL introduce no enabled/disabled setting.
 
 #### Scenario: Unused backend does not block work
-- **WHEN** an unused ZCode agent has no installation and the selected manual agent uses fake
-- **THEN** server startup and the manual turn succeed without checking ZCode
+- **WHEN** an unused Kimi agent has no installation and the selected manual agent uses fake
+- **THEN** server startup and the manual turn succeed without checking Kimi
 
 #### Scenario: Pure validation without tools
 - **WHEN** a structurally valid configuration is loaded and validated on a host without any backend CLI
@@ -136,10 +86,11 @@ Pure YAML parsing and structural configuration validation SHALL remain possible 
 #### Scenario: Concurrent reset invalidates admission
 - **WHEN** force reset wins serialization while a manual preflight is in flight
 - **THEN** the stale admission cannot launch work or reuse invalidated session state
+
 ### Requirement: Diagnostics are structured concise and safe
 Preflight rejection SHALL return HTTP 503 with `error`, `code: backend_preflight_failed`, and `issues`. Each issue SHALL contain phase, backend, sorted affected agents, component, stable code, restart_required boolean, concise message and labeled documentation links in installation_links. Reports SHALL be deterministically ordered by phase, backend, agent list, component and code. Installation errors SHALL point to the relevant official product installation page; service errors SHALL point to official server documentation. They SHALL NOT include long installation instructions, raw environment/PATH/option values, proxy credentials, raw HTTP bodies or child output. Existing 400/404/409 and unrelated 500 semantics SHALL remain. Caller cancellation SHALL propagate internally and stop admission without attempting a synthetic response to the cancelled/disconnected HTTP request; no 408 or custom 499 response is promised. Existing executions SHALL retain sanitized failure/latch diagnostics for later observation. Server-side deadline expiry for a live request SHALL produce 503 with timed_out issues, including restart_required when applicable. Diagnostics SHALL identify the offending option source and may name built-in default commands, but SHALL omit arbitrary configured basenames as well as full paths. This stricter public preflight policy SHALL NOT remove the existing permission for operational paths in invocation provenance. A latched runtime diagnostic SHALL explicitly instruct the user to correct the cause and restart Squad. Actual CLI startup errors SHALL retain exit code 2, while recoverable workflow installation holds SHALL keep serve running.
 
-The official links SHALL be Codex `https://learn.chatgpt.com/docs/codex/cli`, Cursor `https://cursor.com/docs/cli/installation`, Kimi `https://www.kimi.com/code/docs/en/`, OpenCode `https://opencode.ai/docs/`, ZCode `https://zcode.z.ai/en/docs/install`, Node `https://nodejs.org/en/download`, and OpenCode readiness `https://opencode.ai/docs/server/`. OS-specific choices SHALL be delegated to these pages. Documentation SHALL distinguish upstream OS availability from Squad's supported macOS/Linux release targets. Native Windows local backend checks SHALL return unsupported_platform rather than applying Unix executable bits or claiming full support; fake/external checks SHALL require no local executable. WSL SHALL use Linux semantics. ZCode's implicit runtime location SHALL remain macOS-specific; Linux users SHALL configure runtime_path explicitly.
+The official links SHALL be Codex `https://learn.chatgpt.com/docs/codex/cli`, Cursor `https://cursor.com/docs/cli/installation`, Kimi `https://www.kimi.com/code/docs/en/`, OpenCode `https://opencode.ai/docs/`, Node `https://nodejs.org/en/download`, and OpenCode readiness `https://opencode.ai/docs/server/`. OS-specific choices SHALL be delegated to these pages. Documentation SHALL distinguish upstream OS availability from Squad's supported macOS/Linux release targets. Native Windows local backend checks SHALL return unsupported_platform rather than applying Unix executable bits or claiming full support; fake/external checks SHALL require no local executable. WSL SHALL use Linux semantics.
 
 #### Scenario: Multiple actionable failures
 - **WHEN** two backend installations are missing and two agents share one of them
@@ -156,11 +107,12 @@ The official links SHALL be Codex `https://learn.chatgpt.com/docs/codex/cli`, Cu
 #### Scenario: Executable disappears after checking
 - **WHEN** an executable disappears after its final check but before process creation
 - **THEN** the real launch fails under existing run failure/cleanup semantics without fallback, automatic prompt retry or a false success claim
+
 ### Requirement: Environment and readiness boundaries remain observable
 Preflight SHALL distinguish retryable installation failures from runtime failures requiring explicit restart, and SHALL preserve launch environment inheritance when no explicit child environment is produced.
 
 #### Scenario: Default CLI agents inherit ambient PATH
-- **WHEN** Codex, Cursor, Kimi or ZCode has no effective env options and its default executable is on ambient PATH
+- **WHEN** Codex, Cursor or Kimi has no effective env options and its default executable is on ambient PATH
 - **THEN** executable discovery uses that ambient PATH instead of reporting it absent
 
 #### Scenario: Empty resolved inheritance retains nil semantics
@@ -209,3 +161,33 @@ Devin SHALL check the effective single executable and recognized launcher depend
 #### Scenario: Native Windows is outside Squad release support
 - **WHEN** a native Windows source build checks Devin installation
 - **THEN** it reports unsupported_platform and the official product link while documenting upstream Windows support separately
+
+### Requirement: Supported backend checks reflect actual prerequisites
+Codex, Cursor, Kimi and managed OpenCode SHALL check their effective executable and recognized launcher dependencies. A self-contained CLI SHALL NOT require a separately installed Node or Python solely because another distribution uses one. The ambient-versus-explicit environment rules SHALL be identical between checking and actual launch for every CLI backend. Fake and external OpenCode SHALL report that local installation is not required, without CLI discovery.
+
+#### Scenario: External mode needs no CLI
+- **WHEN** effective OpenCode mode is external and no local opencode executable exists
+- **THEN** local installation checking reports not_required and HTTP readiness is evaluated separately
+
+#### Scenario: Managed mode requires CLI
+- **WHEN** effective OpenCode mode is managed and its configured command cannot be resolved
+- **THEN** preflight fails before starting any owned server
+
+#### Scenario: Fake remains self-contained
+- **WHEN** only fake agents are selected and no real backend is installed
+- **THEN** local checks succeed without filesystem prerequisites or network requests
+
+### Requirement: Supported checks are bounded and cannot perform model work
+Each unique local check SHALL be bounded to five seconds. The local installation phase SHALL have a thirty-second budget including cleanup. Only after it passes, service readiness SHALL receive a separate sixty-second budget including managed failure cleanup; the existing thirty-second managed startup and up-to-ten-second effective-config check SHALL use that second budget. Thus the normal pass SHALL be bounded to ninety seconds, subject to earlier caller deadline/cancellation. A deadline that aborts initial managed startup SHALL report timed_out with restart_required:true if that runtime latched the failure; explicit cancellation SHALL analogously report cancelled. Timeout after successful startup SHALL NOT itself imply a startup latch. No more than four checks SHALL run concurrently. Failures in one group SHALL NOT skip independent groups while budget remains. On cancellation or deadline, the report SHALL preserve completed issues and explicitly classify unfinished groups as cancelled or timed_out. Probe output SHALL be bounded to 64 KiB and never forwarded raw. Installation checks SHALL NOT issue model/auth smoke requests, read credentials, auto-install/update anything, create backend conversations, or execute the selected backend CLI merely to request its version, except that managed OpenCode SHALL run a bounded `--version` probe to reject the wrong major generation before startup. Each service health request SHALL have a five-second deadline within the readiness phase budget; managed startup may retain its existing shorter per-poll limit. No successful evidence SHALL be cached across admissions, dispatches, retries or restarts.
+
+#### Scenario: Hanging probe
+- **WHEN** one probe does not finish within five seconds and another backend has a missing executable
+- **THEN** the aggregate contains timed_out and the independent executable failure within the overall budget, with no task started
+
+#### Scenario: Request cancellation
+- **WHEN** the submitting request is cancelled during preflight
+- **THEN** checking stops, owned probe work is cancelled/cleaned up, uncompleted groups are identified and no execution/run is admitted
+
+#### Scenario: Installation changes between turns
+- **WHEN** a manual turn succeeds and the executable is then removed before another turn
+- **THEN** the next turn performs a fresh check and is rejected before creating a run

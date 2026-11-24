@@ -454,7 +454,6 @@ func TestValidateRejectsBodyInternalCycleWithTaskError(t *testing.T) {
 func TestLoadExistingExampleConfigsStillLoad(t *testing.T) {
 	for _, name := range []string{
 		"../../examples/squad.yaml",
-		"../../examples/zcode-squad.yaml",
 		"../../examples/cursor-squad.yaml",
 		"../../examples/workflow-chain.yaml",
 		"../../examples/workflow-review.yaml",

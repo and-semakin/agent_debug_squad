@@ -8,7 +8,7 @@ context: |
   internal/api serves HTTP; internal/orchestrator coordinates runs;
   internal/workflow schedules declarative workflow graphs above the orchestrator;
   internal/domain defines shared types; internal/store persists readable files;
-  internal/adapters contains Codex, Cursor, OpenCode, Kimi, ZCode, and fake backends;
+  internal/adapters contains Codex, Cursor, OpenCode, Kimi, Devin, and fake backends;
   internal/selfupdate handles release updates.
   Agents are driven two ways: explicit facilitator turns with preserved backend
   session continuity, and declarative workflows — an explicitly submitted,

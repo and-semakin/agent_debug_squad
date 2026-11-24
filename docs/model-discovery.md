@@ -22,30 +22,13 @@ settings failed strict configuration validation in an initial invocation, which
 correctly returned a single exit-2 error envelope without raw configuration.
 No inference was sent. Native auth/config files were not deliberately modified.
 
-## ZCode boundary
+## Retired ZCode boundary (v0.24.0)
 
-The installed bundle contains `createModelCatalogPort`, which maps
-`registry.getView().providers` into model records. This is not a public `list_models`
-API. The registry factory `startProcessProviderRegistryRuntime` constructs and
-starts configuration repositories before a registry view is available. The existing
-execution bridge also reads account files, acquires credentials and then starts
-an app-server conversation path; that lifecycle is inappropriate for discovery.
-
-The opt-in `scripts/probe-zcode-model-bootstrap.cjs` harness patches out CLI
-autorun only after the existing structural checks, uses fixture configuration and
-an isolated HOME, blocks filesystem writes, networking, subprocess creation and
-native storage module loading, and has a bounded lifetime. On the observed family,
-it reached `registry_start` and was stopped by `persistent_write`. It printed only
-`{"stage":"registry_start","blocked":"persistent_write","verified":false}`.
-This establishes a blocking bootstrap side effect, not a working catalog bridge.
-No account credentials, agent tools or conversations were used.
-
-Production discovery therefore returns
-`unsupported/read_only_catalog_unavailable`. It never loads this bundle to obtain
-a catalog, and never substitutes static provider files or historical diagnostics.
-The harness is an optional research tool, not part of normal discovery or tests.
-Tests separately verify structural inspection under write denial and that the
-unsupported lister cannot execute even a deliberately side-effecting bundle.
+ZCode execution and discovery support were removed in v0.24.0. Earlier inspection
+found registry bootstrap side effects and no verified read-only catalog. The private
+bridge and research probe have now been deleted. `models --all` omits ZCode;
+`models --backend zcode` fails with removal and migration guidance. The historical
+observation above does not describe a currently supported interface.
 
 ## Verification map
 
@@ -56,8 +39,7 @@ unsupported lister cannot execute even a deliberately side-effecting bundle.
   failures, credential projection, conflicting duplicate metadata and provenance.
 - Backend `models_test.go` fixtures: Codex RPC/pagination/hidden scope; Cursor text
   grammar; Kimi aliases/secrets and exact execution argv; OpenCode scoped/authenticated
-  GETs, HTTP failure/cancellation and owned versus external runtime lifecycle;
-  ZCode unsupported boundary. Existing lifecycle/config tests continue to cover
+  GETs, HTTP failure/cancellation and owned versus external runtime lifecycle. Existing lifecycle/config tests continue to cover
   manual session continuity, installation resolution and arbitrary explicit models.
 - Required acceptance: gofmt, `go vet ./...`, `go test -race -count=1 ./...`, and
   strict OpenSpec validation. No catalog lookup is added to execution admission.

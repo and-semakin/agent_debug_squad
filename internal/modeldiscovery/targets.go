@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-var RealBackends = []string{"codex", "cursor", "kimi", "opencode1", "opencode2", "zcode", "devin"}
+var RealBackends = []string{"codex", "cursor", "kimi", "opencode1", "opencode2", "devin"}
 
 type Options struct {
 	All                   bool
@@ -37,11 +37,14 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	}
 	selected := map[string]bool{}
 	for _, b := range o.Backends {
+		if b == "zcode" {
+			return nil, fmt.Errorf("invalid_arguments: %w", domain.ErrZCodeRemoved)
+		}
 		if b == "opencode" {
 			b = "opencode1"
 		}
 		switch b {
-		case "codex", "cursor", "kimi", "opencode1", "opencode2", "zcode", "devin", "fake":
+		case "codex", "cursor", "kimi", "opencode1", "opencode2", "devin", "fake":
 			selected[b] = true
 		default:
 			return nil, errors.New("invalid_arguments")
@@ -99,7 +102,7 @@ func Resolve(o Options, machine domain.MachineBackends, ambient []string) ([]Tar
 	out := []Target{}
 	for _, t := range targets {
 		switch t.Spec.Backend {
-		case "codex", "cursor", "kimi", "opencode1", "opencode2", "zcode", "devin", "fake":
+		case "codex", "cursor", "kimi", "opencode1", "opencode2", "devin", "fake":
 		default:
 			return nil, errors.New("invalid_configuration")
 		}

@@ -16,12 +16,9 @@ func TestNewSupportsCursorBackend(t *testing.T) {
 	}
 }
 
-func TestNewSupportsZCodeBackend(t *testing.T) {
-	adapter, err := New(domain.AgentSpec{Name: "ZCodeFlash", Backend: "zcode"})
-	if err != nil || adapter == nil {
-		t.Fatalf("New(zcode): %v", err)
-	}
-	if _, ok := adapter.(PermissionReplier); !ok {
-		t.Fatal("zcode permission API unavailable")
+func TestNewRejectsRemovedZCodeBackend(t *testing.T) {
+	adapter, err := New(domain.AgentSpec{Name: "Legacy", Backend: "zcode"})
+	if adapter != nil || err != domain.ErrZCodeRemoved {
+		t.Fatalf("New(zcode) = %v, %v", adapter, err)
 	}
 }

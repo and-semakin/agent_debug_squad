@@ -17,7 +17,7 @@ Coding-agent CLIs expose different flags, session formats, and streaming protoco
 - interrupt and reset one stuck agent without restarting the squad;
 - let an external facilitator coordinate review, critique, and implementation rounds through HTTP.
 
-Supported backends are Codex CLI, Cursor Agent CLI, OpenCode 1, OpenCode 2, Kimi CLI, ZCode App Server, official local Devin CLI, and a deterministic fake backend for local smoke tests.
+Supported backends are Codex CLI, Cursor Agent CLI, OpenCode 1, OpenCode 2, Kimi CLI, official local Devin CLI, and a deterministic fake backend for local smoke tests.
 
 ## Quick Start
 
@@ -106,9 +106,7 @@ esac
 
 Exit 0 means every target is complete (`ok` or `empty`); exit 1 covers both
 `partial` and `failed`, distinguished by JSON `status` and `results`. Exit 2 is an
-argument/config error; cancellation exits 130 with collected results. **`--all`
-returns exit 1 while ZCode discovery is unsupported**, even if all other backends
-succeed. Do not hide the report behind an `&&` success chain.
+argument/config error; cancellation exits 130 with collected results. Do not hide the report behind an `&&` success chain.
 
 Copy `selection.backend` and exact `selection.options` from a supported returned
 row. For example, **if the current catalog returns** `gpt-6-astra` for Codex and
@@ -148,7 +146,6 @@ and 10,000 rows; incomplete data is never labelled complete.
 | OpenCode 1 (`opencode1`, alias `opencode`) | Classic `/provider` and `/config/providers` | Provider/model; managed owned runtime or configured external endpoint |
 | OpenCode 2 (`opencode2`) | Native `/api/model`, `/api/provider`, `/api/model/default` | Provider/model; independent managed runtime or external endpoint |
 | Devin | `models list --format json` | Informational variant inventory; ACP selection mapping is not inferred |
-| ZCode | No verified read-only bootstrap | `unsupported`, `read_only_catalog_unavailable`; no session workaround |
 | fake | Fixed synthetic `fake` record | Explicit test fixture; arbitrary manually configured models still work |
 
 **Kimi compatibility:** explicit `options.model` is now passed unchanged as
@@ -157,7 +154,7 @@ a returned configured alias or omit `model` to use Kimi's default. There is no
 silent fallback. Discovery does not certify Kimi's broader run protocol.
 
 See [compatibility evidence](docs/model-discovery.md) for observed versions, smoke
-outcomes and the ZCode boundary. Observed versions are not guaranteed support ranges.
+outcomes and the retired ZCode boundary. Observed versions are not guaranteed support ranges.
 
 ## Configuration
 
@@ -243,7 +240,6 @@ The verdict must be one the task declares (`400` otherwise), and the request is 
 | `cursor` | Cursor Agent CLI | Cursor `session_id` | `command`, `model`, `mode`, `sandbox`, `yolo` |
 | `opencode1` (alias `opencode`) | Owned `opencode serve` (default), or explicit external HTTP server | OpenCode session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
 | `opencode2` | Owned OpenCode 2 `serve`, or explicit external HTTP server | OpenCode 2 session ID | `model`, `agent`, `timeout_seconds`, `yolo`; external `mode`, `base_url`, `username`, `password` |
-| `zcode` | Private App Server process | ZCode session ID | `command`, `runtime_path`, `provider`, `model`, `reasoning`, `yolo` |
 | `kimi` | CLI process | Kimi local session | `command`, `model`, optional `session_root` |
 | `devin` | Owned local ACP process | Explicit native session ID | `command`, `model`, `yolo`, `env`, `inherit_env`; [compatibility limits](docs/devin-backend.md) |
 | `fake` | In process | Deterministic state | none |
@@ -302,46 +298,26 @@ Official installation pages used in reports:
 | Kimi CLI | https://www.kimi.com/code/docs/en/ |
 | OpenCode | https://opencode.ai/docs/ |
 | OpenCode server | https://opencode.ai/docs/server/ |
-| ZCode desktop | https://zcode.z.ai/en/docs/install |
-| Node.js (ZCode interpreter) | https://nodejs.org/en/download |
 
-These pages document upstream OS availability; Squad releases target macOS and Linux (AMD64/ARM64). Native Windows source builds report `unsupported_platform` for local backend checks; WSL uses Linux semantics. ZCode's implicit runtime location stays macOS-specific; Linux users must configure `runtime_path` explicitly.
+These pages document upstream OS availability; Squad releases target macOS and Linux (AMD64/ARM64). Native Windows source builds report `unsupported_platform` for local backend checks; WSL uses Linux semantics.
 
-### ZCode App Server
+### ZCode backend removed
 
-See [examples/zcode-squad.yaml](examples/zcode-squad.yaml). Start it with:
+The experimental `zcode` execution backend is **deprecated and removed as of v0.24.0**.
+It depended on private Desktop internals that repeatedly changed, including registry
+bootstrap and host callbacks. With Desktop 3.19.0, Squad's separate Node host could
+not access credential secure storage even while Desktop login and inference worked.
 
-```sh
-agent-debug-squad serve --config examples/zcode-squad.yaml
-```
+To migrate:
 
-This experimental adapter supports **ZCode desktop 3.x** installs and a signed-in **Z.AI individual Coding Plan** account. Install Node (tested with Node 26) and sign in through ZCode first. There is no pinned version list: before loading the runtime, the host bridge probes the bundle structurally for the anchors it needs (CLI autorun statement, native credential store, provider registry). Bundles that keep those anchors work without a Squad update; bundles where an anchor is missing or ambiguous fail closed before a prompt is sent, with an actionable error that includes the bundle SHA-256 for reporting. The host bridge loads the installed runtime's native credential reader in memory; it never edits the bundle or exports credentials into Squad state.
+1. Remove the `zcode` section from `~/.agent-debug-squad/backends.yaml`, including empty sections.
+2. Replace `backend: zcode` agents with `codex`, `cursor`, `kimi`, `opencode1`, `opencode2`, or `devin`, using that backend's own options and authentication.
+3. Start a fresh Squad session with a new session name or state directory. Native ZCode conversation IDs cannot be resumed by another backend. Keep old run artifacts for reference; the upgrade does not delete or convert them.
 
-Options:
-
-- `command`: Node executable, default `node`.
-- `runtime_path`: bundle location, default `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Other locations must contain a compatible bundle and its companion resources.
-- `provider`: `account:zai-individual-coding-plan` (default and the only accepted value). Every other provider ID fails validation before preflight.
-- `model`: default `GLM-5.3-Flash`; `reasoning`: `low` (default), `high`, or `max`. Before dispatch the adapter verifies the exact provider/model/reasoning is selectable in the live registry view of the installed runtime; an unselectable request fails before any model request is sent, without substituting another model or reasoning level. The full selection is sent on every turn.
-- `yolo`: inherits squad defaults. True selects native `yolo`; false explicitly selects `build`. This also updates ZCode's workspace permission preference. False is permission-controlled, **not a read-only sandbox**.
-- `env` / `inherit_env`: the same explicit environment rules as other CLI adapters. Inherit `HOME` and `PATH` for the existing login and tools.
-
-**Removed `plan_policy` option (breaking):** the `plan_policy` agent option (`fixed`/`start-first`), Start Plan routing, Start-to-Individual continuation, and the pre-dispatch active-subscription check were removed in v0.20.0 after the subscription gate broke fixed-mode runs whenever `api.z.ai` was unreachable. Configurations that still set `plan_policy` fail validation with an error naming the option; delete the line to migrate. Dispatch now requires only the resolvable Individual credential plus the local registry-view selectability check; no Z.AI network origin is read before a turn.
-
-**Live compatibility (ZCode Desktop 3.17.2):** Individual GLM-5.3 and GLM-5.3-Flash conversations have been tested on a real account, including a new conversation and a resumed turn for each model.
-
-**Session diagnostics (separate from `models`):** the current account catalog is captured from `session/create` or `session/resume` as a `zcode.models` record in `<agent>.diagnostics.jsonl` before each prompt. For example:
-
-```sh
-jq 'select(.type == "zcode.models") | .model.available[] | {ref, reasoning}' \
-  .agent-debug-squad/sessions/<session_id>/runs/<run_id>/ZCodeFlash.diagnostics.jsonl
-```
-
-The adapter owns one App Server process per turn and resumes the persisted ZCode session on the next turn. Reset starts a new conversation without deleting the previous history. A run completes only after its matching turn completes, not when the server accepts the input. Stream events are written to the normal run artifacts; direct and nested subagents appear in `progress.subagents`. Historical children from earlier turns are excluded. Child timestamps reflect observed status changes, rather than token-level activity. Background children are stopped with their owning Squad turn; they are not detached jobs.
-
-With YOLO off, tool requests appear in `pending_permissions` and use the same `/runs/{run_id}/permissions/{request_id}/reply` endpoint described below. `always` uses only the backend's offered project rule; it can affect later ZCode work in that project. Duplicate/stale replies are rejected. Native YOLO does not override an explicit denial or answer questions. Official MCP/plugin-command authentication is not implemented: Squad answers its optional auth callback with `official_auth_unavailable`, without supplying headers or credentials, so ordinary conversations can continue. ZCode owns any anonymous MCP fallback or tool-level authentication failure. Browser integration, interactive questionnaires, CAPTCHA and login refresh remain unsupported and fail explicitly. Resolve account challenges in ZCode before retrying.
-
-The standard ZCode session database is shared with the desktop. Open/import the same workspace in ZCode to make its conversations discoverable there; Squad does not write the sidebar index directly. Do not operate the same active conversation concurrently from both hosts. This adapter does not request special off-peak dispatch or promise free tokens, subscription bonuses, or different billing from ordinary account usage.
+Old ZCode agents and machine sections fail validation with migration guidance.
+`models --all` omits ZCode; `models --backend zcode` returns an argument error.
+The `zcode` **skill installation host** remains available: installing the facilitator
+skill into Desktop is independent of running ZCode as a Squad backend.
 
 ## Environment And Secrets
 
@@ -356,8 +332,6 @@ Kimi is the one exception: its child keeps the server's full ambient environment
 Keep credentials out of committed YAML. Prefer the machine backend settings file (below), environment variables, an OS credential store, or a private ignored launcher/config. The checked-in proxy URLs use the reserved `.example` domain and are non-functional placeholders.
 
 Cursor browser authentication normally requires inheriting `HOME`; API-key authentication requires `CURSOR_API_KEY`. When Cursor uses `HTTP_PROXY` or `HTTPS_PROXY`, also set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if the proxy performs TLS inspection. The machine backend settings file sets all of these from `cursor.proxy_url` / `cursor.ca_cert_file`.
-
-ZCode model traffic uses `ZCODE_HTTP_PROXY`, with exclusions in `ZCODE_NO_PROXY` and a custom CA file in `ZCODE_AGENT_CA_CERT`. Explicitly inherit these variables (as in the example), set non-secret values through `env`, or configure them once per machine via the `zcode` section of the machine backend settings file. Ordinary `HTTP_PROXY` / `HTTPS_PROXY` variables alone are not a substitute for `ZCODE_HTTP_PROXY`: the runtime treats model, web-fetch, and tool traffic differently. The bridge also honors `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` and `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` when explicitly passed; normally it derives these paths from the installation and HOME. Custom `ZCODE_STORAGE_DIR` / `ZCODE_SESSION_DB_PATH` isolate conversations from the desktop's default history.
 
 ### Machine Backend Settings
 
@@ -376,12 +350,6 @@ cursor:
 kimi:
   proxy_url: http://proxy.example:3128   # standard vars plus NODE_USE_ENV_PROXY=1
   inherit_env: [HOME, PATH]              # keeps login/config working under the constrained env
-zcode:
-  command: /opt/homebrew/bin/node        # Node executable default
-  runtime_path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-  proxy_url: http://proxy.example:3128   # ZCODE_HTTP_PROXY only — never plain HTTP_PROXY
-  no_proxy: localhost
-  ca_cert_file: /etc/proxy-ca.pem        # ZCODE_AGENT_CA_CERT
 opencode:
   mode: managed                       # default; Squad owns and reuses opencode serve
   command: opencode                    # executable path, not a shell command
@@ -398,7 +366,7 @@ judge:
 
 `judge.confidence_threshold` must be an unquoted, finite number greater than 0 and at most 1. An explicit workflow threshold still wins. The machine default applies to future classifications of saved executions whose workflow omitted the field, including after recovery; it does not rewrite completed verdicts or enter the workflow hash. Restart the server after changing this file.
 
-For Codex, Cursor, Kimi, ZCode and Devin, explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
+For Codex, Cursor, Kimi and Devin, explicit agent `options` in squad YAML win over machine settings, which win over built-in defaults. A machine-injected variable is suppressed when the agent defines it in `options.env` or names it in `options.inherit_env`, so the child environment never carries duplicate keys. Machine settings apply to facilitator agents and to agents dispatched for recovered workflow executions alike, and never enter persisted workflow snapshots or run artifacts.
 
 ### OpenCode versions
 

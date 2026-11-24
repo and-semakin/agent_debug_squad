@@ -53,7 +53,6 @@ const (
 	DocOpenCode2Server = "https://opencode.ai/v2/docs/api"
 	DocOpenCodeCLI     = "https://opencode.ai/docs/"
 	DocOpenCodeServer  = "https://opencode.ai/docs/server/"
-	DocZCodeDesktop    = "https://zcode.z.ai/en/docs/install"
 	DocNodeDownload    = "https://nodejs.org/en/download"
 )
 

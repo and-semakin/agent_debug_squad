@@ -264,8 +264,6 @@ func officialLinkURL(backend string) string {
 		return domain.DocOpenCode2CLI
 	case "opencode", "opencode1":
 		return domain.DocOpenCodeCLI
-	case "zcode":
-		return domain.DocZCodeDesktop
 	case "node":
 		return domain.DocNodeDownload
 	default:
@@ -287,8 +285,6 @@ func productLabel(backend string) string {
 		return "OpenCode 2 installation"
 	case "opencode", "opencode1":
 		return "OpenCode 1 installation"
-	case "zcode":
-		return "ZCode installation"
 	case "node":
 		return "Node.js installation"
 	default:

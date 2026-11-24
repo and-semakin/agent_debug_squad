@@ -544,16 +544,16 @@ func TestSubmitOwnedRunRejectsUnresolvableSavedSpec(t *testing.T) {
 // reservation so shutdown joins promptly.
 func TestWaitForWorkersJoinsAfterOwnedInitFailure(t *testing.T) {
 	o, _ := newOwnedTestOrchestrator(t, "Reviewer")
-	// The installation gate passes (the seam stubs it), and the zcode
-	// adapter then rejects an unknown reasoning level during Init.
+	// The installation gate passes (the seam stubs it), then Devin Init
+	// fails on a missing executable without starting an external process.
 	o.installationCheck = func(_ adapters.AgentAdapter, _ context.Context, _ domain.InstallationInput) domain.InstallationResult {
 		return domain.InstallationResult{Status: domain.InstallationStatusReady}
 	}
 	saved := domain.AgentSpec{
 		Name:          "Reviewer",
-		Backend:       "zcode",
+		Backend:       "devin",
 		StartupPrompt: "Will never start.",
-		Options:       map[string]any{"reasoning": "ultra"},
+		Options:       map[string]any{"model": "test-model", "command": filepath.Join(t.TempDir(), "missing-devin")},
 	}
 	outcomes := make(chan domain.OwnedRunOutcome, 1)
 	if err := o.SubmitOwnedRun(context.Background(), domain.OwnedRunOptions{

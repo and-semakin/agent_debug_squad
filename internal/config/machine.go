@@ -37,7 +37,6 @@ var supportedMachineKeys = map[string][]string{
 	domain.MachineBackendOpenCode1: {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
 	domain.MachineBackendOpenCode2: {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
 	domain.MachineBackendOpenCode:  {"base_url", "command", "inherit_env", "mode", "no_proxy", "proxy_url", "snapshot"},
-	domain.MachineBackendZCode:     {"ca_cert_file", "command", "inherit_env", "no_proxy", "proxy_url", "runtime_path"},
 	domain.MachineBackendJudge:     {"confidence_threshold", "proxy_url"},
 }
 
@@ -47,7 +46,6 @@ var stringMachineKeys = map[string]bool{
 	"mode":         true,
 	"ca_cert_file": true,
 	"command":      true,
-	"runtime_path": true,
 }
 
 // LoadMachineBackends reads and validates the machine backend settings file.
@@ -112,8 +110,6 @@ func LoadMachineBackends(homeDir string) (domain.MachineBackends, error) {
 			backends.OpenCode = settings
 		case domain.MachineBackendOpenCode2:
 			backends.OpenCode2 = settings
-		case domain.MachineBackendZCode:
-			backends.ZCode = settings
 		case domain.MachineBackendJudge:
 			backends.Judge = settings
 		}
@@ -125,6 +121,9 @@ func LoadMachineBackends(homeDir string) (domain.MachineBackends, error) {
 // allowlist and decodes the supported keys. A nil settings result means the
 // section is present but empty.
 func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBackendSettings, error) {
+	if name == "zcode" {
+		return nil, fmt.Errorf("backends config %s: %w; remove the zcode section", path, domain.ErrZCodeRemoved)
+	}
 	supported, ok := supportedMachineKeys[name]
 	if !ok {
 		return nil, fmt.Errorf("backends config %s: unknown backend section %q (supported: %s)",
@@ -175,8 +174,6 @@ func parseMachineSection(path, name string, node *yaml.Node) (*domain.MachineBac
 				settings.CACertFile = decoded
 			case "command":
 				settings.Command = decoded
-			case "runtime_path":
-				settings.RuntimePath = decoded
 			}
 		case key == "snapshot":
 			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
@@ -286,7 +283,7 @@ func decodeNoProxy(path, name string, node *yaml.Node) (string, error) {
 }
 
 func machineSectionEmpty(settings *domain.MachineBackendSettings) bool {
-	return settings.Mode == "" && settings.Snapshot == nil && len(settings.Declared) == 0 && settings.Command == "" && settings.RuntimePath == "" && settings.BaseURL == "" &&
+	return settings.Mode == "" && settings.Snapshot == nil && len(settings.Declared) == 0 && settings.Command == "" && settings.BaseURL == "" &&
 		settings.ProxyURL == "" && settings.NoProxy == "" && settings.CACertFile == "" &&
 		len(settings.InheritEnv) == 0 && settings.ConfidenceThreshold == nil
 }
@@ -344,9 +341,7 @@ func decodeStringSequence(path, name, key string, node *yaml.Node) ([]string, er
 // the environment variables that backend honors. The table mirrors what
 // README "Environment And Secrets" documents for hand configuration:
 // standard proxy variables for the CLIs that read them, NODE_USE_ENV_PROXY
-// for the Node-based Cursor and Kimi CLIs, and the ZCode-specific variables
-// because the ZCode runtime routes its traffic types differently and must
-// not receive plain HTTP_PROXY from machine settings.
+// for the Node-based Cursor and Kimi CLIs.
 func MachineEnvEntries(backend string, settings *domain.MachineBackendSettings) []string {
 	if settings == nil {
 		return nil
@@ -385,16 +380,6 @@ func MachineEnvEntries(backend string, settings *domain.MachineBackendSettings) 
 		if settings.CACertFile != "" {
 			add("NODE_EXTRA_CA_CERTS", settings.CACertFile)
 		}
-	case domain.MachineBackendZCode:
-		if settings.ProxyURL != "" {
-			add("ZCODE_HTTP_PROXY", settings.ProxyURL)
-		}
-		if settings.NoProxy != "" {
-			add("ZCODE_NO_PROXY", settings.NoProxy)
-		}
-		if settings.CACertFile != "" {
-			add("ZCODE_AGENT_CA_CERT", settings.CACertFile)
-		}
 	}
 	return entries
 }
@@ -406,7 +391,6 @@ var machineStringDefaults = map[string][]string{
 	domain.MachineBackendCodex:  {"command"},
 	domain.MachineBackendCursor: {"command"},
 	domain.MachineBackendKimi:   {"command"},
-	domain.MachineBackendZCode:  {"command", "runtime_path"},
 }
 
 // MergeMachineDefaults applies machine backend settings to one agent spec as
@@ -510,8 +494,6 @@ func machineStringValue(key string, settings *domain.MachineBackendSettings) str
 	switch key {
 	case "command":
 		return settings.Command
-	case "runtime_path":
-		return settings.RuntimePath
 	case "base_url":
 		return settings.BaseURL
 	default:

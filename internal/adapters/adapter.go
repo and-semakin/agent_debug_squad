@@ -9,7 +9,6 @@ import (
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/devin"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/fake"
 	"github.com/and-semakin/agent_debug_squad/internal/adapters/kimi"
-	"github.com/and-semakin/agent_debug_squad/internal/adapters/zcode"
 	"github.com/and-semakin/agent_debug_squad/internal/domain"
 )
 
@@ -29,7 +28,7 @@ func New(spec domain.AgentSpec) (AgentAdapter, error) {
 	case "devin":
 		return devin.New(spec), nil
 	case "zcode":
-		return zcode.New(spec), nil
+		return nil, domain.ErrZCodeRemoved
 	case "fake":
 		return fake.New(spec), nil
 	case "codex":

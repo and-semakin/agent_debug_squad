@@ -59,12 +59,6 @@ cursor:
 kimi:
   command: /opt/kimi
   proxy_url: http://proxy.example:8080
-zcode:
-  command: /opt/node
-  runtime_path: /opt/zcode.cjs
-  proxy_url: http://proxy.example:8080
-  no_proxy: localhost
-  ca_cert_file: /etc/zcode-ca.pem
 opencode:
   mode: external
   base_url: http://127.0.0.1:4097
@@ -79,7 +73,6 @@ judge:
 		Codex:    &domain.MachineBackendSettings{Command: "/opt/codex", ProxyURL: "http://proxy.example:8080", NoProxy: "localhost,127.0.0.1"},
 		Cursor:   &domain.MachineBackendSettings{Command: "/opt/cursor-agent", ProxyURL: "https://proxy.example:8443", NoProxy: "localhost,.internal.example", CACertFile: "/etc/cursor-ca.pem"},
 		Kimi:     &domain.MachineBackendSettings{Command: "/opt/kimi", ProxyURL: "http://proxy.example:8080"},
-		ZCode:    &domain.MachineBackendSettings{Command: "/opt/node", RuntimePath: "/opt/zcode.cjs", ProxyURL: "http://proxy.example:8080", NoProxy: "localhost", CACertFile: "/etc/zcode-ca.pem"},
 		OpenCode: &domain.MachineBackendSettings{Mode: "external", BaseURL: "http://127.0.0.1:4097", Declared: map[string]bool{"mode": true, "base_url": true}},
 		Judge:    &domain.MachineBackendSettings{ProxyURL: "http://proxy.example:8080"},
 	}
@@ -92,16 +85,13 @@ judge:
 	if !reflect.DeepEqual(backends.Kimi, want.Kimi) {
 		t.Errorf("kimi = %+v, want %+v", backends.Kimi, want.Kimi)
 	}
-	if !reflect.DeepEqual(backends.ZCode, want.ZCode) {
-		t.Errorf("zcode = %+v, want %+v", backends.ZCode, want.ZCode)
-	}
 	if !reflect.DeepEqual(backends.OpenCode, want.OpenCode) {
 		t.Errorf("opencode = %+v, want %+v", backends.OpenCode, want.OpenCode)
 	}
 	if !reflect.DeepEqual(backends.Judge, want.Judge) {
 		t.Errorf("judge = %+v, want %+v", backends.Judge, want.Judge)
 	}
-	if got, want := backends.Configured(), []string{"codex", "cursor", "judge", "kimi", "opencode", "zcode"}; !reflect.DeepEqual(got, want) {
+	if got, want := backends.Configured(), []string{"codex", "cursor", "judge", "kimi", "opencode"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Configured() = %v, want %v", got, want)
 	}
 }
@@ -154,7 +144,7 @@ func TestLoadMachineJudgeConfidenceThresholdRejectsInvalidValues(t *testing.T) {
 			}
 		})
 	}
-	for _, section := range []string{"codex", "cursor", "kimi", "opencode", "zcode"} {
+	for _, section := range []string{"codex", "cursor", "kimi", "opencode"} {
 		t.Run("unsupported_"+section, func(t *testing.T) {
 			home := writeMachineBackends(t, section+":\n  confidence_threshold: 0.6\n")
 			_, err := LoadMachineBackends(home)
@@ -172,7 +162,7 @@ func TestLoadMachineBackendsUnknownSectionFails(t *testing.T) {
 		t.Fatal("expected unknown section error")
 	}
 	path := MachineBackendsPath(home)
-	for _, want := range []string{path, "claude", "codex", "cursor", "judge", "kimi", "opencode", "zcode"} {
+	for _, want := range []string{path, "claude", "codex", "cursor", "judge", "kimi", "opencode"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
@@ -256,14 +246,7 @@ func TestMachineEnvEntriesPerBackend(t *testing.T) {
 				"NODE_EXTRA_CA_CERTS=/etc/ca.pem",
 			},
 		},
-		{
-			backend: "zcode",
-			want: []string{
-				"ZCODE_HTTP_PROXY=http://proxy.example:8080",
-				"ZCODE_NO_PROXY=localhost,.internal.example",
-				"ZCODE_AGENT_CA_CERT=/etc/ca.pem",
-			},
-		},
+		{backend: "zcode", want: nil},
 		{backend: "opencode", want: nil},
 		{backend: "judge", want: nil},
 		{backend: "unknown", want: nil},
@@ -276,19 +259,10 @@ func TestMachineEnvEntriesPerBackend(t *testing.T) {
 	}
 }
 
-func TestMachineEnvEntriesOmitUnsetAndNeverLeakPlainProxyToZCode(t *testing.T) {
+func TestMachineEnvEntriesOmitUnset(t *testing.T) {
 	entries := MachineEnvEntries("codex", &domain.MachineBackendSettings{NoProxy: "localhost"})
 	if len(entries) != 1 || entries[0] != "NO_PROXY=localhost" {
 		t.Fatalf("codex entries = %v, want only NO_PROXY", entries)
-	}
-	entries = MachineEnvEntries("zcode", &domain.MachineBackendSettings{ProxyURL: "http://proxy.example:8080"})
-	for _, entry := range entries {
-		if strings.HasPrefix(entry, "HTTP_PROXY=") || strings.HasPrefix(entry, "HTTPS_PROXY=") {
-			t.Fatalf("zcode must not receive machine-derived plain proxy vars, got %v", entries)
-		}
-	}
-	if len(entries) != 1 || entries[0] != "ZCODE_HTTP_PROXY=http://proxy.example:8080" {
-		t.Fatalf("zcode entries = %v, want only ZCODE_HTTP_PROXY", entries)
 	}
 	if MachineEnvEntries("codex", nil) != nil {
 		t.Fatal("nil settings must yield no entries")
@@ -367,10 +341,8 @@ func TestMergeMachineDefaultsInheritEnvNamingWins(t *testing.T) {
 }
 
 func TestMergeMachineDefaultsDoesNotMutateInput(t *testing.T) {
-	backends := domain.MachineBackends{
-		ZCode: &domain.MachineBackendSettings{Command: "/opt/node", RuntimePath: "/opt/zcode.cjs", ProxyURL: "http://proxy.example:8080"},
-	}
-	spec := agentSpecForMerge("zcode")
+	backends := domain.MachineBackends{Codex: &domain.MachineBackendSettings{Command: "/opt/codex", ProxyURL: "http://proxy.example:8080"}}
+	spec := agentSpecForMerge("codex")
 	spec.ListOptions["env"] = []string{"K=v"}
 	merged := MergeMachineDefaults(spec, backends)
 	if got := spec.StringOptions["command"]; got != "" {
@@ -379,10 +351,10 @@ func TestMergeMachineDefaultsDoesNotMutateInput(t *testing.T) {
 	if !reflect.DeepEqual(spec.ListOptions["env"], []string{"K=v"}) {
 		t.Fatalf("input spec env mutated: %v", spec.ListOptions["env"])
 	}
-	if got := merged.StringOptions["runtime_path"]; got != "/opt/zcode.cjs" {
-		t.Fatalf("runtime_path = %q, want machine default", got)
+	if got := merged.StringOptions["command"]; got != "/opt/codex" {
+		t.Fatalf("command = %q, want machine default", got)
 	}
-	wantEnv := []string{"ZCODE_HTTP_PROXY=http://proxy.example:8080", "K=v"}
+	wantEnv := []string{"HTTP_PROXY=http://proxy.example:8080", "HTTPS_PROXY=http://proxy.example:8080", "K=v"}
 	if !reflect.DeepEqual(merged.ListOptions["env"], wantEnv) {
 		t.Fatalf("env = %v, want %v", merged.ListOptions["env"], wantEnv)
 	}
@@ -425,22 +397,6 @@ func hasDuplicateKeys(entries []string) bool {
 	return false
 }
 
-func TestMergeMachineDefaultsZCodeExplicitEnvWins(t *testing.T) {
-	backends := domain.MachineBackends{
-		ZCode: &domain.MachineBackendSettings{ProxyURL: "http://proxy.example:8080"},
-	}
-	spec := agentSpecForMerge("zcode")
-	spec.ListOptions["env"] = []string{"ZCODE_HTTP_PROXY=http://direct.example:3128"}
-	merged := MergeMachineDefaults(spec, backends)
-	wantEnv := []string{"ZCODE_HTTP_PROXY=http://direct.example:3128"}
-	if !reflect.DeepEqual(merged.ListOptions["env"], wantEnv) {
-		t.Fatalf("env = %v, want %v (explicit ZCODE_HTTP_PROXY wins, no duplicates)", merged.ListOptions["env"], wantEnv)
-	}
-	if hasDuplicateKeys(merged.ListOptions["env"]) {
-		t.Fatalf("env has duplicate keys: %v", merged.ListOptions["env"])
-	}
-}
-
 func TestLoadMachineBackendsInheritEnv(t *testing.T) {
 	home := writeMachineBackends(t, `
 codex:
@@ -449,9 +405,6 @@ codex:
     - PATH
 kimi:
   inherit_env: HOME,PATH
-zcode:
-  inherit_env:
-    - HOME
 `)
 	backends, err := LoadMachineBackends(home)
 	if err != nil {
@@ -462,9 +415,6 @@ zcode:
 	}
 	if want := []string{"HOME", "PATH"}; !reflect.DeepEqual(backends.Kimi.InheritEnv, want) {
 		t.Errorf("kimi inherit_env = %v, want %v (comma string)", backends.Kimi.InheritEnv, want)
-	}
-	if want := []string{"HOME"}; !reflect.DeepEqual(backends.ZCode.InheritEnv, want) {
-		t.Errorf("zcode inherit_env = %v, want %v", backends.ZCode.InheritEnv, want)
 	}
 }
 

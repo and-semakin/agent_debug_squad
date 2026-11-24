@@ -9,13 +9,12 @@ type MachineBackendSettings struct {
 	Mode     string
 	Snapshot *bool
 	// Declared records explicitly present machine keys, including empty values.
-	Declared    map[string]bool
-	Command     string
-	RuntimePath string
-	BaseURL     string
-	ProxyURL    string
-	NoProxy     string
-	CACertFile  string
+	Declared   map[string]bool
+	Command    string
+	BaseURL    string
+	ProxyURL   string
+	NoProxy    string
+	CACertFile string
 	// ConfidenceThreshold is the judge's machine default when a workflow
 	// definition omits its own threshold. Nil means use the built-in default.
 	ConfidenceThreshold *float64
@@ -36,7 +35,6 @@ type MachineBackends struct {
 	Kimi      *MachineBackendSettings
 	OpenCode  *MachineBackendSettings
 	OpenCode2 *MachineBackendSettings
-	ZCode     *MachineBackendSettings
 	Judge     *MachineBackendSettings
 }
 
@@ -49,7 +47,6 @@ const (
 	MachineBackendOpenCode  = "opencode"
 	MachineBackendOpenCode1 = "opencode1"
 	MachineBackendOpenCode2 = "opencode2"
-	MachineBackendZCode     = "zcode"
 	MachineBackendJudge     = "judge"
 )
 
@@ -63,7 +60,6 @@ func MachineBackendNames() []string {
 		MachineBackendOpenCode,
 		MachineBackendOpenCode1,
 		MachineBackendOpenCode2,
-		MachineBackendZCode,
 		MachineBackendJudge,
 	}
 }
@@ -84,8 +80,6 @@ func (m MachineBackends) For(backend string) *MachineBackendSettings {
 		return m.OpenCode
 	case MachineBackendOpenCode2:
 		return m.OpenCode2
-	case MachineBackendZCode:
-		return m.ZCode
 	case MachineBackendJudge:
 		return m.Judge
 	default:

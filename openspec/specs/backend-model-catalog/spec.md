@@ -8,7 +8,7 @@ Provide attributable backend model choices before a squad or workflow is created
 
 ### Requirement: Discovery works before workflow creation
 
-The system SHALL provide `agent-debug-squad models` with `--all`, repeatable `--backend`, optional `--config`, `--workspace`, `--json`, `--include-hidden`, `--timeout`, and `--backend-timeout`. Without config or selectors it SHALL discover all real registered agent backends. `--all` SHALL include codex, cursor, kimi, opencode1, opencode2, zcode, and devin; fake SHALL require explicit selection or an existing configured fake agent. Judge SHALL NOT be treated as an agent backend. The command SHALL NOT require a squad file, workflow, running Squad server, agent startup prompt, or existing conversation. It SHALL NOT initialize an orchestrator, create/resume backend sessions, send prompts, invoke model tools, install/update software, log in, or deliberately mutate native auth/configuration. The first version SHALL NOT expose a REST discovery route.
+The system SHALL provide `agent-debug-squad models` with `--all`, repeatable `--backend`, optional `--config`, `--workspace`, `--json`, `--include-hidden`, `--timeout`, and `--backend-timeout`. Without config or selectors it SHALL discover all real registered agent backends. `--all` SHALL include codex, cursor, kimi, opencode1, opencode2, and devin; fake SHALL require explicit selection or an existing configured fake agent. Judge SHALL NOT be treated as an agent backend. The command SHALL NOT require a squad file, workflow, running Squad server, agent startup prompt, or existing conversation. It SHALL NOT initialize an orchestrator, create/resume backend sessions, send prompts, invoke model tools, install/update software, log in, or deliberately mutate native auth/configuration. The first version SHALL NOT expose a REST discovery route.
 
 #### Scenario: Author has only a workspace
 - **WHEN** the author runs `models --all --json --workspace .` before writing YAML
@@ -114,22 +114,6 @@ Kimi discovery SHALL read provider list --json only when supported and extract a
 - **WHEN** two configured aliases reference the same provider/model
 - **THEN** both rows remain selectable and execution passes the chosen alias unchanged rather than substituting the native ID
 
-### Requirement: ZCode discovery fails honestly without a verified safe bridge
-
-ZCode discovery SHALL use only an independently verified session-free, configuration-read-only bridge path with structural compatibility checks before runtime loading or native credential access. An internal tool display named list_models SHALL NOT be treated as a public API. Discovery SHALL NOT create/resume a session, execute the ListModels agent tool, refresh login, mutate account configuration, or use connectivity inference probes. Missing, ambiguous or unsafe structures SHALL yield unsupported with a safe reason rather than a fabricated empty catalog. Until safe initialization is verified, read_only_catalog_unavailable SHALL be an accepted explicit unsupported outcome. Static provider files or old conversation diagnostics SHALL NOT silently substitute for the effective catalog. Verified metadata SHALL retain truncation and disabled state; choices unsupported by Squad's execution adapter SHALL be labelled accordingly.
-
-#### Scenario: Installed runtime only exposes conversation-based listing
-- **WHEN** a runtime has list_models display code but no verified session-free read-only bridge path
-- **THEN** discovery returns unsupported and creates no conversation or credential/configuration mutation
-
-#### Scenario: Compatible verified registry path
-- **WHEN** a structurally compatible bridge has passed read-only lifecycle verification and returns registry records
-- **THEN** discovery returns only allowed metadata, preserves truncation, and marks unsupported execution selections instead of promising they can run
-
-#### Scenario: Plan eligibility is not the complete model catalog
-- **WHEN** execution routing can read model-specific Start billing buckets but no full session-free effective registry source is verified
-- **THEN** generic ZCode discovery remains unsupported with read_only_catalog_unavailable rather than presenting those buckets as a complete catalog or initializing the execution auth bridge
-
 ### Requirement: Fake discovery is explicitly synthetic
 
 The fake backend SHALL return one deterministic synthetic fake model record with source scope synthetic, no provider/auth/reasoning claims and no filesystem, network or session effects. This fixture SHALL NOT restrict arbitrary explicitly configured fake model values or appear implicitly in an all-real-backend query.
@@ -196,10 +180,10 @@ Repository documentation and the authoring skill SHALL instruct callers to disco
 
 Without --json the command SHALL produce human-readable target blocks ordered as JSON, identifying backend/target/agents, status, completeness, diagnostics, provider/model/alias/display name, exact selection options, known reasoning/defaults, source retrieval/freshness and hidden policy. Unknown evidence and unsupported selections SHALL be explicit. Empty/failed targets SHALL remain visible beside successful rows. Output SHALL end with aggregate status and indicate that inference was not checked. Terminal control characters in all user/backend text SHALL be escaped; exact IDs/options SHALL NOT be silently truncated. Layout spacing SHALL NOT be a machine parsing contract.
 
-In JSON mode exit-2 failures SHALL use exactly the top-level fields schema_version: 1, generated_at (RFC 3339 UTC), status: failed, results: [], and error containing code and message. Error code SHALL be invalid_arguments, invalid_configuration or no_targets, as appropriate; message SHALL be a safe diagnostic without raw option/configuration values. Backend-result envelopes SHALL omit error. Documentation SHALL explain that exit 1 covers both partial and failed, distinguishable by JSON status/results, and that --all returns exit 1 while ZCode is unsupported even when all other targets succeed. Examples SHALL capture exit 0/1 for inspection instead of relying on an && success chain.
+In JSON mode exit-2 failures SHALL use exactly the top-level fields schema_version: 1, generated_at (RFC 3339 UTC), status: failed, results: [], and error containing code and message. Error code SHALL be invalid_arguments, invalid_configuration or no_targets, as appropriate; message SHALL be a safe diagnostic without raw option/configuration values. Backend-result envelopes SHALL omit error. Documentation SHALL explain that exit 1 covers both partial and failed, distinguishable by JSON status/results. Examples SHALL capture exit 0/1 for inspection instead of relying on an && success chain.
 
 #### Scenario: Useful all-backend result has nonzero exit
-- **WHEN** four real backends complete successfully and ZCode discovery is unsupported
+- **WHEN** some real backends complete successfully and another registered backend fails discovery
 - **THEN** aggregate status is partial with exit 1, successful rows remain visible in both output modes, and documented scripts inspect the report
 
 #### Scenario: Human partial result is safe to display
@@ -249,7 +233,6 @@ Devin discovery SHALL use the official models list --format json interface only 
 - **WHEN** the catalog supplies thinking levels but this backend cannot apply them
 - **THEN** they remain metadata and no options.reasoning selection is advertised
 
-
 #### Scenario: Catalog variants are not direct ACP choices
 - **WHEN** the native list contains variant IDs whose execution encoding cannot be established without a conversation
 - **THEN** rows remain informational with unsupported selections and no options.model recipe, while manually configured execution IDs are checked against the live ACP control before prompting
@@ -268,3 +251,10 @@ OpenCode 1 SHALL retain classic discovery. OpenCode 2 SHALL query its native mod
 #### Scenario: Incomplete catalog
 - **WHEN** a later page or provider query fails
 - **THEN** available rows remain partial with a safe diagnostic and unsupported fields are not invented
+
+### Requirement: Removed ZCode discovery is rejected
+Explicit zcode selectors SHALL fail with a deprecated-and-removed diagnostic and supported alternatives, without executing a probe. Default discovery and --all SHALL omit ZCode.
+
+#### Scenario: Explicit removed selector
+- **WHEN** models is called with --backend zcode
+- **THEN** it returns an argument error with migration guidance and launches no ZCode process

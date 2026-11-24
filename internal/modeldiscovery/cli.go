@@ -3,6 +3,7 @@ package modeldiscovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/and-semakin/agent_debug_squad/internal/config"
@@ -39,8 +40,11 @@ func Main(ctx context.Context, args []string, out, stderr io.Writer) int {
 		}
 	}
 	requestedJSON := jsonMode
-	fail := func(code string) int {
+	fail := func(code string, messages ...string) int {
 		r := domain.ModelCatalog{SchemaVersion: 1, GeneratedAt: time.Now().UTC(), Status: "failed", Results: []domain.ModelDiscoveryResult{}, Error: &domain.ModelCatalogError{Code: code, Message: "model discovery: " + code}}
+		if len(messages) > 0 {
+			r.Error.Message = messages[0]
+		}
 		if requestedJSON || jsonMode {
 			_ = json.NewEncoder(out).Encode(r)
 		} else {
@@ -73,10 +77,16 @@ func Main(ctx context.Context, args []string, out, stderr io.Writer) int {
 	}
 	machine, e := config.LoadMachineBackends(home)
 	if e != nil {
+		if errors.Is(e, domain.ErrZCodeRemoved) {
+			return fail("invalid_configuration", domain.ErrZCodeRemoved.Error()+"; remove the zcode section from backends.yaml")
+		}
 		return fail("invalid_configuration")
 	}
 	targets, e := Resolve(o, machine, os.Environ())
 	if e != nil {
+		if errors.Is(e, domain.ErrZCodeRemoved) {
+			return fail("invalid_arguments", domain.ErrZCodeRemoved.Error())
+		}
 		return fail(e.Error())
 	}
 	computed, e := DefaultTimeout(len(targets), *perTarget)

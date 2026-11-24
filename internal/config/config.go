@@ -173,6 +173,9 @@ func normalizeAgentSpec(spec domain.AgentSpec) (domain.AgentSpec, error) {
 	if backend == "" {
 		return spec, fmt.Errorf("agent %q backend is required", name)
 	}
+	if backend == "zcode" {
+		return spec, fmt.Errorf("agent %q: %w", name, domain.ErrZCodeRemoved)
+	}
 	if strings.TrimSpace(spec.StartupPrompt) == "" {
 		return spec, fmt.Errorf("agent %q startup_prompt is required", name)
 	}
@@ -214,9 +217,6 @@ func normalizeAgentSpec(spec domain.AgentSpec) (domain.AgentSpec, error) {
 		return spec, err
 	}
 	if err := ValidateDevinAgent(spec); err != nil {
-		return spec, err
-	}
-	if err := ValidateZCodeAgent(spec); err != nil {
 		return spec, err
 	}
 	return spec, nil

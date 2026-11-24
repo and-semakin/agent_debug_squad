@@ -45,8 +45,7 @@ or filter with repeatable `--backend`; use `--config <file>` to inspect the exac
 existing agent environments. Discovery needs no running squad or conversation.
 Capture the exit code: 0 is complete success; **1 includes useful partial catalogs
 and total failure**. Inspect `status`, each result's `complete`, `diagnostics`, and
-`models` even on exit 1. `--all` includes unsupported ZCode and therefore exits 1
-while that interface remains unsupported. Do not use an `&&` chain to parse output.
+`models` even on exit 1. Do not use an `&&` chain to parse output.
 
 ```sh
 status=0
@@ -71,9 +70,7 @@ unknown stays unknown, and listing performs no inference. Rerun to refresh; ther
 is no Squad catalog cache or REST discovery route. Kimi effort and OpenCode variant
 metadata currently have no executable option mapping. Kimi `options.model` now
 forwards `--model`; replace previously ignored stale values with a returned alias
-or omit the option. This does not verify the broader Kimi run protocol. ZCode
-returns `unsupported/read_only_catalog_unavailable` until a session-free read-only
-bootstrap is verified; never create a conversation merely to obtain its catalog.
+or omit the option. This does not verify the broader Kimi run protocol.
 
 ## Configuration
 
@@ -116,7 +113,6 @@ Backends:
 - `cursor`: Cursor Agent CLI adapter with `command`, optional `model`, read-only `mode`, `sandbox`, `yolo`, `env`, and `inherit_env`.
 - `opencode1` (legacy alias `opencode`): classic OpenCode 1 HTTP/SSE adapter.
 - `opencode2`: OpenCode 2 native HTTP/event adapter. Both versions support managed (default) and external modes, `model`, `agent`, `timeout_seconds`, and `yolo`; external mode accepts `base_url`, `username`, and `password`. Machine settings and executable paths are separate per generation.
-- `zcode`: private App Server adapter with `command` (Node), `runtime_path`, `provider`, `model`, `reasoning`, `yolo`, `env`, and `inherit_env`. Defaults to GLM-5.3-Flash/low; requires a compatible installed ZCode bundle and existing Z.AI Coding Plan login. See the repository README and `examples/zcode-squad.yaml` for compatibility.
 - `devin`: official local ACP CLI; requires an exact advertised `model`. Optional `reasoning` prefers high when offered, `speed` defaults to standard, and `mode` defaults to bypass with `yolo: true` compatibility. Also accepts `command`, `env`, and `inherit_env`; machine proxy_url/no_proxy avoid per-agent proxy duplication. Explicit mode overrides inherited yolo; conflicting explicit mode/yolo is rejected. Tested 3000.11.1 lacks Normal ACP mode, so `yolo: false` without explicit mode fails before prompting. See `docs/devin-backend.md` and `examples/devin-squad.yaml`. Model-list variants remain informational until their ACP selection is verified. Native hooks/MCP/plugins and imported/project configurations are delegated to Devin without extension-specific preflight checks; native startup errors still fail the operation.
 - `kimi`: CLI adapter with `command` and optional model settings.
 - `fake`: deterministic in-process adapter for smoke tests.
@@ -125,7 +121,7 @@ Keep credentials out of YAML and skill files. Use `options.inherit_env` for expl
 
 For Cursor browser login, inherit `HOME`; for API-key authentication, inherit `CURSOR_API_KEY`. When inheriting `HTTP_PROXY` or `HTTPS_PROXY`, set `NODE_USE_ENV_PROXY=1`. Inherit `NODE_EXTRA_CA_CERTS` if a TLS-inspecting proxy requires it. Verify account-specific model IDs with `cursor-agent --list-models` rather than guessing from display names.
 
-ZCode: inherit HOME/PATH and, if needed, ZCODE_HTTP_PROXY, ZCODE_NO_PROXY, and ZCODE_AGENT_CA_CERT. Its `zcode.models` diagnostic record contains the current model catalog. `yolo: false` selects build mode and exposes pending tool permissions through the existing run permission endpoint; it is not a read-only sandbox. Monitor `progress.subagents` for child status. Background work ends with the owning turn. Open the workspace in ZCode for desktop session discovery, and avoid concurrent control of the same conversation. Unsupported login challenges/questions/browser interactions fail explicitly.
+ZCode execution is deprecated and removed as of v0.24.0. Remove its machine section and replace its agents with a supported backend, using a fresh Squad session and backend-specific options/authentication. Preserve old artifacts; do not reuse native ZCode session IDs. Model discovery excludes ZCode and rejects explicit selectors. The independent `zcode` skill installation host remains available.
 
 ## Start And Verify
 
